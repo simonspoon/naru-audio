@@ -2,4 +2,5 @@
 
 pub mod error;
 pub mod log;
+pub mod registry;
 pub mod server;

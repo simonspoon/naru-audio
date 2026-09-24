@@ -1,0 +1,241 @@
+//! §3.2 manifests and the catalog: the built-in `catalog/*.toml` merged with
+//! `$NARU_AUDIO_HOME/catalog.d/*.toml`.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
+
+use serde::Deserialize;
+
+use super::RegistryError;
+
+/// Built-in manifests, `(file name, contents)`, compiled in from `catalog/`.
+/// Empty until task 4 pins the STT and VAD entries.
+const BUILTIN: &[(&str, &str)] = &[];
+
+/// Derived files the registry knows how to generate (§3.2 `derive`).
+pub const BPE_VOCAB: &str = "bpe.vocab";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Stt,
+    Tts,
+    Vad,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Model {
+    pub name: String,
+    pub kind: Kind,
+    pub backend: String,
+    #[serde(default)]
+    pub requires: Vec<String>,
+}
+
+/// A `[[file]]`. Without a `url` it comes out of an `[[archive]]` and is
+/// checked after extraction.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileEntry {
+    pub path: String,
+    pub url: Option<String>,
+    /// Optional only so the loader can reject its absence with a clear error.
+    pub sha256: Option<String>,
+    pub size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArchiveEntry {
+    pub url: String,
+    pub sha256: Option<String>,
+    pub size: Option<u64>,
+    /// Leading path components dropped on extraction, like `tar --strip-components`.
+    #[serde(default)]
+    pub strip: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Manifest {
+    pub model: Model,
+    #[serde(default)]
+    pub backend: BTreeMap<String, toml::Table>,
+    #[serde(default, rename = "file")]
+    pub files: Vec<FileEntry>,
+    #[serde(default, rename = "archive")]
+    pub archives: Vec<ArchiveEntry>,
+    /// The whole document, `[[voice]]` and all; written out as `manifest.json`.
+    #[serde(skip)]
+    pub raw: toml::Table,
+}
+
+impl Manifest {
+    /// Parses and validates one manifest. `origin` names it in errors.
+    pub fn parse(text: &str, origin: &str) -> Result<Self, RegistryError> {
+        let err = |message: String| RegistryError::Manifest {
+            origin: origin.to_string(),
+            message,
+        };
+        let raw: toml::Table = toml::from_str(text).map_err(|e| err(e.to_string()))?;
+        let mut m = Manifest::deserialize(raw.clone()).map_err(|e| err(e.to_string()))?;
+        m.raw = raw;
+        m.validate().map_err(err)?;
+        Ok(m)
+    }
+
+    /// `backend.<model.backend>.derive`, e.g. `["bpe.vocab"]`.
+    pub fn derive(&self) -> Vec<String> {
+        self.backend
+            .get(&self.model.backend)
+            .and_then(|t| t.get("derive"))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn validate(&mut self) -> Result<(), String> {
+        let name = &self.model.name;
+        if !is_relative_path(name) || name.contains('/') {
+            return Err(format!("model name `{name}` is not a plain directory name"));
+        }
+        // It would collide with another model's `tmp/<name>.lock`.
+        if name.ends_with(".lock") {
+            return Err(format!("model name `{name}` must not end in `.lock`"));
+        }
+
+        // §3.2: every file and archive has a sha256, no exceptions.
+        for a in &mut self.archives {
+            a.sha256 = Some(check_sha(a.sha256.take(), &format!("archive `{}`", a.url))?);
+            check_url(&a.url)?;
+            if !(a.url.ends_with(".tar.bz2") || a.url.ends_with(".tar")) {
+                return Err(format!("archive `{}` must be a .tar.bz2 or .tar", a.url));
+            }
+        }
+        let mut paths = BTreeSet::new();
+        for f in &mut self.files {
+            f.sha256 = Some(check_sha(f.sha256.take(), &format!("file `{}`", f.path))?);
+            if !is_relative_path(&f.path) {
+                return Err(format!("file path `{}` must be relative", f.path));
+            }
+            if !paths.insert(f.path.clone()) {
+                return Err(format!("file `{}` is listed twice", f.path));
+            }
+            match &f.url {
+                Some(url) => check_url(url)?,
+                None if self.archives.is_empty() => {
+                    return Err(format!(
+                        "file `{}` has no url and the manifest has no [[archive]]",
+                        f.path
+                    ));
+                }
+                None => {}
+            }
+        }
+
+        let has = |p: &str| paths.contains(p);
+        for d in self.derive() {
+            if d != BPE_VOCAB {
+                return Err(format!("unknown derived file `{d}`"));
+            }
+            if has(&d) {
+                return Err(format!("`{d}` is derived, so it cannot also be a [[file]]"));
+            }
+            if !has("tokens.txt") {
+                return Err(format!(
+                    "`{d}` is derived from tokens.txt, which is not a [[file]]"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn check_sha(sha: Option<String>, what: &str) -> Result<String, String> {
+    let Some(sha) = sha else {
+        return Err(format!(
+            "{what} has no sha256; every file and archive must pin one"
+        ));
+    };
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("{what} has a malformed sha256 `{sha}`"));
+    }
+    Ok(sha.to_ascii_lowercase())
+}
+
+fn check_url(url: &str) -> Result<(), String> {
+    if ["https://", "http://", "file:///"]
+        .iter()
+        .any(|s| url.starts_with(s))
+    {
+        Ok(())
+    } else {
+        Err(format!("url `{url}` must be https://, http:// or file:///"))
+    }
+}
+
+/// Non-empty and made only of normal components: no `/`, `..`, or `.`.
+fn is_relative_path(p: &str) -> bool {
+    !p.is_empty()
+        && Path::new(p)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+}
+
+/// Every known manifest by model name, `catalog.d` over the built-in catalog.
+#[derive(Debug, Default)]
+pub struct Catalog {
+    pub models: BTreeMap<String, Manifest>,
+}
+
+impl Catalog {
+    /// Loads the built-in catalog, then `catalog_d/*.toml` over it. A missing
+    /// `catalog_d` is fine; an invalid manifest anywhere is an error.
+    pub fn load(catalog_d: &Path) -> Result<Self, RegistryError> {
+        let mut cat = Catalog::default();
+        let add = |layer: &mut BTreeMap<String, Manifest>, text: &str, origin: String| {
+            let m = Manifest::parse(text, &origin)?;
+            if layer.contains_key(&m.model.name) {
+                return Err(RegistryError::Manifest {
+                    origin,
+                    message: format!("model `{}` is defined twice", m.model.name),
+                });
+            }
+            layer.insert(m.model.name.clone(), m);
+            Ok(())
+        };
+
+        for (file, text) in BUILTIN {
+            add(&mut cat.models, text, format!("catalog/{file}"))?;
+        }
+
+        let mut user = BTreeMap::new();
+        let entries = match std::fs::read_dir(catalog_d) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cat),
+            Err(e) => {
+                return Err(RegistryError::io(format!("read {}", catalog_d.display()))(
+                    e,
+                ));
+            }
+        };
+        let mut paths = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(RegistryError::io(format!("read {}", catalog_d.display())))?
+                .path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        for path in paths {
+            let text = std::fs::read_to_string(&path)
+                .map_err(RegistryError::io(format!("read {}", path.display())))?;
+            add(&mut user, &text, path.display().to_string())?;
+        }
+        cat.models.extend(user);
+        Ok(cat)
+    }
+}
