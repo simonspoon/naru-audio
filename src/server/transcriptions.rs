@@ -2,7 +2,7 @@
 //!
 //! Checks run cheapest first: the form fields, then the model (404/409),
 //! `language` against its manifest, the audio (415/413), and only then the
-//! load. With no model manager yet (task 7) every request loads its model.
+//! model manager's load (§3.4), unless the model is already loaded.
 
 use std::convert::Infallible;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -18,20 +18,17 @@ use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use super::{AppState, RequestId, registry_error};
+use super::{AppState, RequestId, manager_error, registry_error};
 use crate::error::ApiError;
+use crate::manager::{Guard, KeepAlive};
 use crate::registry::RegistryError;
 use crate::registry::manifest::{Kind, Manifest};
 use crate::stt::audio::{self, AudioError, TARGET_SAMPLE_RATE};
-use crate::stt::{Segment, SttError, SttModel, VadConfig, Vocabulary};
+use crate::stt::{Segment, VadConfig, Vocabulary};
 
 /// The request body cap: the §2.2 256 MiB audio cap plus room for the other
 /// fields and the multipart framing.
 pub(super) const MAX_BODY_BYTES: usize = audio::MAX_INPUT_BYTES as usize + 1024 * 1024;
-
-/// What `default` means until §3.3 resolution lands (task 7); both hardware
-/// profiles pick this model.
-const DEFAULT_STT_MODEL: &str = "parakeet-tdt-0.6b-v2-int8";
 
 /// OpenAI model names that stand for `default`, so stock clients work.
 const DEFAULT_ALIASES: [&str; 4] = [
@@ -62,6 +59,7 @@ struct Form {
     vad_threshold: Option<String>,
     vad_min_speech: Option<String>,
     vad_min_silence: Option<String>,
+    keep_alive: Option<String>,
 }
 
 /// A validated request.
@@ -73,11 +71,20 @@ struct Job {
     stream: bool,
     hotwords: Option<Vocabulary>,
     vad: Option<VadConfig>,
+    keep_alive: Option<KeepAlive>,
 }
 
-/// Everything the decode needs, once the model has loaded.
+/// The checked request, before the load.
+struct Prepared {
+    manifest: Manifest,
+    pcm: Vec<f32>,
+    language: Option<String>,
+}
+
+/// Everything the decode needs, once the model has loaded. Dropping it ends
+/// the request for the model manager (§3.4).
 struct Loaded {
-    model: Box<dyn SttModel>,
+    model: Guard,
     pcm: Vec<f32>,
     language: Option<String>,
 }
@@ -94,7 +101,10 @@ pub(super) async fn transcriptions(
             format!("the body must be multipart/form-data: {}", e.body_text()),
         )
     })?;
-    let job = validate(read_form(multipart).await?)?;
+    let job = validate(
+        read_form(multipart).await?,
+        &st.models.settings().stt_default,
+    )?;
     if let Some(v) = &job.hotwords
         && v.terms_dropped > 0
     {
@@ -117,15 +127,29 @@ pub(super) async fn transcriptions(
         stream,
         hotwords,
         vad,
+        keep_alive,
     } = job;
     let prepare = {
         let st = st.clone();
         let model = model.clone();
         move || prepare(&st, &model, language, &audio)
     };
-    let loaded = tokio::task::spawn_blocking(prepare)
+    let Prepared {
+        manifest,
+        pcm,
+        language,
+    } = tokio::task::spawn_blocking(prepare)
         .await
         .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    let loaded = Loaded {
+        model: st
+            .models
+            .acquire(manifest, keep_alive)
+            .await
+            .map_err(|e| manager_error(&st, &req_id, e))?,
+        pcm,
+        language,
+    };
 
     if stream {
         return Ok(sse(st, req_id, loaded, hotwords, vad));
@@ -135,6 +159,7 @@ pub(super) async fn transcriptions(
     let (loaded, result) = tokio::task::spawn_blocking(move || {
         let result = loaded
             .model
+            .stt()
             .decode(&loaded.pcm, hotwords.as_ref(), vad.as_ref());
         (loaded, result)
     })
@@ -182,13 +207,13 @@ async fn read_form(mut multipart: Multipart) -> Result<Form, ApiError> {
             "vad_threshold" => &mut form.vad_threshold,
             "vad_min_speech" => &mut form.vad_min_speech,
             "vad_min_silence" => &mut form.vad_min_silence,
+            "keep_alive" => &mut form.keep_alive,
             "timestamp_granularities[]" => {
                 form.timestamp_granularities.push(value);
                 continue;
             }
             // `prompt`, `temperature`, `chunking_strategy` and `include[]`
-            // are ignored (§2.2), as is anything unknown. `keep_alive` is
-            // accepted and ignored until the model manager (task 7).
+            // are ignored (§2.2), as is anything unknown.
             _ => continue,
         };
         *slot = Some(value);
@@ -196,7 +221,8 @@ async fn read_form(mut multipart: Multipart) -> Result<Form, ApiError> {
     Ok(form)
 }
 
-fn validate(form: Form) -> Result<Job, ApiError> {
+/// `default_model` is what `default` and its aliases resolve to (§3.3).
+fn validate(form: Form, default_model: &str) -> Result<Job, ApiError> {
     let audio = form
         .file
         .ok_or_else(|| bad_request("file", "invalid_request", "the \"file\" field is required"))?;
@@ -273,9 +299,15 @@ fn validate(form: Form) -> Result<Job, ApiError> {
     }
     let vad = parse_bool("vad", form.vad.as_deref(), true)?.then_some(cfg);
 
+    let keep_alive = form
+        .keep_alive
+        .map(|k| KeepAlive::parse(&k))
+        .transpose()
+        .map_err(|e| bad_request("keep_alive", "invalid_request", e))?;
+
     let model = match form.model.as_deref() {
-        None => DEFAULT_STT_MODEL,
-        Some(m) if DEFAULT_ALIASES.contains(&m) => DEFAULT_STT_MODEL,
+        None => default_model,
+        Some(m) if DEFAULT_ALIASES.contains(&m) => default_model,
         Some(m) => m,
     };
 
@@ -287,17 +319,13 @@ fn validate(form: Form) -> Result<Job, ApiError> {
         stream,
         hotwords,
         vad,
+        keep_alive,
     })
 }
 
-/// The model's manifest (404/409), `language` (400), the audio (415/413),
-/// then the load (503). Blocking.
-fn prepare(
-    st: &AppState,
-    name: &str,
-    language: Option<String>,
-    wav: &[u8],
-) -> Result<Loaded, ApiError> {
+/// The pulled manifest of the STT model `name`: 404 unknown, 409 not
+/// pulled, 400 not STT. Blocking.
+pub(super) fn stt_manifest(st: &AppState, name: &str) -> Result<Manifest, ApiError> {
     // Only a catalog name or a pulled one reaches the filesystem, so a name
     // like `../x` or `/tmp/x` is 404, as in `Registry::lock_pulled`.
     let known = st.registry.catalog().models.contains_key(name)
@@ -321,7 +349,18 @@ fn prepare(
             format!("the model \"{name}\" is not a speech-to-text model"),
         ));
     }
+    Ok(manifest)
+}
 
+/// The model's manifest (404/409), `language` (400), then the audio
+/// (415/413). Blocking.
+fn prepare(
+    st: &AppState,
+    name: &str,
+    language: Option<String>,
+    wav: &[u8],
+) -> Result<Prepared, ApiError> {
+    let manifest = stt_manifest(st, name)?;
     let languages = languages(&manifest);
     let language = match language {
         None => languages.first().cloned(),
@@ -344,16 +383,8 @@ fn prepare(
         Err(AudioError::Empty) => Vec::new(),
         Err(e) => return Err(audio_error(e)),
     };
-
-    let model = crate::backend::load_stt(&manifest, &st.registry.model_dir(name)).map_err(|e| {
-        let code = match e {
-            SttError::BackendUnavailable { .. } => "backend_unavailable",
-            _ => "model_load_failed",
-        };
-        ApiError::new(StatusCode::SERVICE_UNAVAILABLE, code, e.to_string())
-    })?;
-    Ok(Loaded {
-        model,
+    Ok(Prepared {
+        manifest,
         pcm,
         language,
     })
@@ -396,6 +427,7 @@ fn sse(
         let result = catch_unwind(AssertUnwindSafe(|| {
             loaded
                 .model
+                .stt()
                 .decode_each(&loaded.pcm, hotwords.as_ref(), vad.as_ref(), &mut |s| {
                     let delta = if text.is_empty() {
                         s.text
@@ -454,7 +486,7 @@ fn bad_request(param: &'static str, code: &'static str, message: impl Into<Strin
 }
 
 /// A 500, logged: the log line carries the request id (§2.6).
-fn internal(st: &AppState, req_id: &str, message: String) -> ApiError {
+pub(super) fn internal(st: &AppState, req_id: &str, message: String) -> ApiError {
     st.log
         .line("error", Some(req_id), &format!("internal {message}"));
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)

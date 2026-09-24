@@ -3,6 +3,8 @@
 pub mod backend;
 pub mod error;
 pub mod log;
+pub mod manager;
+pub mod profile;
 pub mod registry;
 pub mod server;
 pub mod stt;

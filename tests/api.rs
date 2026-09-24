@@ -14,6 +14,8 @@ use axum::http::{Request, StatusCode};
 use common::{Stub, file_entry, home, model_header};
 use http_body_util::BodyExt;
 use naru_audio::log::Logger;
+use naru_audio::manager::{BackendLoader, ModelManager, Settings};
+use naru_audio::profile::Profile;
 use naru_audio::registry::Registry;
 use naru_audio::server::{AppState, router};
 use serde_json::{Value, json};
@@ -22,12 +24,22 @@ use tower::ServiceExt;
 const HOSTPORT: &str = "127.0.0.1:7870";
 
 fn app(home: &Path) -> Router {
+    let log = Arc::new(Logger::stderr());
+    let registry = Arc::new(Registry::open(home).unwrap());
+    let settings = Settings::from_env(Profile::detect().unwrap()).unwrap();
+    let models = ModelManager::new(
+        registry.clone(),
+        log.clone(),
+        settings,
+        Arc::new(BackendLoader),
+    );
     router(Arc::new(AppState {
         port: 7870,
         allow_remote: false,
         started: Instant::now(),
-        log: Arc::new(Logger::stderr()),
-        registry: Arc::new(Registry::open(home).unwrap()),
+        log,
+        registry,
+        models: Arc::new(models),
     }))
 }
 

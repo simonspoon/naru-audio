@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, Request, State};
 use axum::http::header::{CONTENT_TYPE, HOST, ORIGIN};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 use crate::error::ApiError;
 use crate::log::Logger;
+use crate::manager::{KeepAlive, ManagerError, ModelManager};
 use crate::registry::{Progress, Registry, RegistryError};
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7870";
@@ -35,6 +36,7 @@ pub struct AppState {
     pub started: Instant,
     pub log: Arc<Logger>,
     pub registry: Arc<Registry>,
+    pub models: Arc<ModelManager>,
 }
 
 /// The request's `X-Request-Id`, for handlers' log lines.
@@ -63,20 +65,92 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/pull", post(pull))
         .route("/api/models/{name}", delete(remove))
+        .route("/api/ps", get(ps))
+        .route("/api/load", post(load))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state)
 }
 
+/// §2.5 `/health`. The model manager's lock is never held across a load or
+/// a decode, so this never waits behind either (§4.3). `ready` reads and
+/// parses the default model's small `manifest.json` and `stat`s what it
+/// requires, so a pull or `rm` by the CLI shows at once.
 async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
+    let settings = st.models.settings();
+    let profile = &settings.profile;
+    let ps = st.models.ps();
+    let stt = &settings.stt_default;
+    let state = ps.iter().find(|m| &m.name == stt);
+    let backends: Vec<Value> = ["sherpa-onnx", "mlx"]
+        .iter()
+        .map(|name| match crate::backend::available(name) {
+            Ok(()) => json!({"name": name, "available": true}),
+            Err(reason) => json!({"name": name, "available": false, "reason": reason}),
+        })
+        .collect();
+    let problems: Vec<Value> = profile
+        .problem()
+        .map(|message| json!({"code": "rosetta", "message": message}))
+        .into_iter()
+        .collect();
+    let stt_problem = stt_problem(&st.registry, stt);
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "api": 1,
         "pid": std::process::id(),
         "uptime_s": st.started.elapsed().as_secs(),
+        "profile": {
+            "name": profile.name,
+            "arch": profile.arch,
+            "translated": profile.translated,
+            "ram_bytes": profile.ram_bytes,
+            "budget_bytes": settings.budget_bytes,
+        },
+        "stt": {
+            "default": stt,
+            "ready": stt_problem.is_none(),
+            "problem": stt_problem,
+            "loaded": state.is_some_and(|m| !m.loading),
+            "loading": state.is_some_and(|m| m.loading),
+        },
+        "tts": {
+            "default": settings.tts_default,
+            "ready": false,
+            "problem": {"code": "not_implemented", "message": "text-to-speech is not implemented yet"},
+        },
+        "backends": backends,
+        "problems": problems,
     }))
+}
+
+/// Why the default STT model is not ready (§2.5: pulled and loadable), if
+/// it is not: not pulled, a `requires` not pulled, or its backend.
+fn stt_problem(registry: &Registry, name: &str) -> Option<Value> {
+    let problem = |code: &str, message: String| Some(json!({"code": code, "message": message}));
+    let manifest = match registry.pulled_manifest(name) {
+        Ok(m) => m,
+        Err(e) => {
+            let e = registry_error(e);
+            return problem(e.code, e.message);
+        }
+    };
+    if let Err(reason) = crate::backend::available(&manifest.model.backend) {
+        return problem("backend_unavailable", reason);
+    }
+    manifest
+        .model
+        .requires
+        .iter()
+        .find(|r| !registry.is_installed(r))
+        .and_then(|r| {
+            problem(
+                "model_not_pulled",
+                format!("\"{name}\" requires \"{r}\"; run `naru-audio pull {r}`"),
+            )
+        })
 }
 
 /// §2.5 `GET /v1/models`, `?pulled=true|false` filtering on `x_pulled`.
@@ -100,6 +174,13 @@ async fn models(
         }
     };
     let registry = st.registry.clone();
+    let loaded: Vec<String> = st
+        .models
+        .ps()
+        .into_iter()
+        .filter(|m| !m.loading)
+        .map(|m| m.name)
+        .collect();
     let data: Vec<Value> = tokio::task::spawn_blocking(move || registry.list())
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
@@ -107,6 +188,7 @@ async fn models(
         .into_iter()
         .filter(|e| pulled.is_none_or(|p| p == e.pulled))
         .map(|e| {
+            let name = &e.manifest.model.name;
             json!({
                 "id": e.manifest.model.name,
                 "object": "model",
@@ -117,11 +199,9 @@ async fn models(
                 "x_available": e.available.is_ok(),
                 "x_unavailable_reason": e.available.err(),
                 "x_pulled": e.pulled,
-                // No model manager yet: nothing is ever loaded.
-                "x_loaded": false,
+                "x_loaded": loaded.contains(name),
                 "x_size_bytes": e.size_bytes,
-                // §3.3 default resolution is not implemented yet.
-                "x_default": false,
+                "x_default": st.models.default_for(e.manifest.model.kind) == Some(name.as_str()),
             })
         })
         .collect();
@@ -184,14 +264,22 @@ async fn pull(State(st): State<Arc<AppState>>, body: Bytes) -> Result<Response, 
         .into_response())
 }
 
-/// §2.5 `DELETE /api/models/{name}`. With no model manager nothing is ever
-/// loaded, so `model_in_use` cannot happen yet. A catalog model that is not
-/// pulled is 404: there is nothing to delete, and the usual `model_not_pulled`
-/// advice (pull it) is wrong here.
+/// §2.5 `DELETE /api/models/{name}`: 409 `model_in_use` while the model is
+/// loaded and busy (or loading); an idle loaded model is unloaded first. A
+/// catalog model that is not pulled is 404: there is nothing to delete, and
+/// the usual `model_not_pulled` advice (pull it) is wrong here.
 async fn remove(
     State(st): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    st.models.unload(&name, "rm").map_err(|_| ApiError {
+        param: Some("model"),
+        ..ApiError::new(
+            StatusCode::CONFLICT,
+            "model_in_use",
+            format!("the model \"{name}\" is loaded and busy; try again once its requests finish"),
+        )
+    })?;
     let registry = st.registry.clone();
     // `remove` waits on the model's lock, which a pull may hold for minutes.
     tokio::task::spawn_blocking(move || registry.remove(&name, false, &[]))
@@ -209,6 +297,125 @@ async fn remove(
             e => registry_error(e),
         })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// §2.5 `GET /api/ps`: loaded models, and those still loading (§3.4).
+async fn ps(State(st): State<Arc<AppState>>) -> Json<Value> {
+    Json(Value::Array(
+        st.models
+            .ps()
+            .into_iter()
+            .map(|m| {
+                json!({
+                    "name": m.name,
+                    "kind": m.kind.as_str(),
+                    "backend": m.backend,
+                    "resident_bytes": m.resident_bytes,
+                    "expires_at": m.expires_at.map(|t| humantime::format_rfc3339_seconds(t).to_string()),
+                    "busy": m.busy,
+                    "loading": m.loading,
+                })
+            })
+            .collect(),
+    ))
+}
+
+/// §2.5 `POST /api/load` `{"model":"default"|name,"kind":"stt","keep_alive":"10m"}`
+/// warms a model; `keep_alive: 0` unloads it (once idle, if busy).
+async fn load(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let bad = |param: &'static str, code: &'static str, message: String| ApiError {
+        param: Some(param),
+        ..ApiError::new(StatusCode::BAD_REQUEST, code, message)
+    };
+    let body: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let Some(model) = body["model"].as_str() else {
+        return Err(bad(
+            "model",
+            "invalid_request",
+            "the body must be JSON with a string \"model\"".to_string(),
+        ));
+    };
+    let keep_alive = match &body["keep_alive"] {
+        Value::Null => None,
+        Value::String(s) => Some(KeepAlive::parse(s)),
+        Value::Number(n) => Some(KeepAlive::from_secs(n.as_f64().unwrap_or(f64::NAN))),
+        _ => Some(Err(
+            "keep_alive must be a duration string or a number of seconds".to_string(),
+        )),
+    }
+    .transpose()
+    .map_err(|e| bad("keep_alive", "invalid_request", e))?;
+
+    let name = match (model, body["kind"].as_str()) {
+        ("default", Some("stt")) => st.models.settings().stt_default.clone(),
+        ("default", Some("tts")) => {
+            return Err(bad(
+                "kind",
+                "unsupported_value",
+                "text-to-speech is not implemented yet".to_string(),
+            ));
+        }
+        ("default", None) => {
+            return Err(bad(
+                "kind",
+                "invalid_request",
+                "\"kind\" is required with model \"default\"".to_string(),
+            ));
+        }
+        ("default", Some(other)) => {
+            return Err(bad(
+                "kind",
+                "unsupported_value",
+                format!("kind {other:?} has no default; use stt"),
+            ));
+        }
+        (name, _) => name.to_string(),
+    };
+
+    let manifest = {
+        let (st, name) = (st.clone(), name.clone());
+        tokio::task::spawn_blocking(move || transcriptions::stt_manifest(&st, &name))
+    }
+    .await
+    .map_err(|e| transcriptions::internal(&st, &req_id, e.to_string()))??;
+    if keep_alive.is_some_and(KeepAlive::is_zero) {
+        let loaded = st.models.unload_when_idle(&name);
+        return Ok(Json(json!({"model": name, "loaded": loaded})));
+    }
+    drop(
+        st.models
+            .acquire(manifest, keep_alive)
+            .await
+            .map_err(|e| manager_error(&st, &req_id, e))?,
+    );
+    Ok(Json(json!({"model": name, "loaded": true})))
+}
+
+/// §2.6 codes for model manager failures; a 500 is logged with the
+/// request id.
+fn manager_error(st: &AppState, req_id: &str, e: ManagerError) -> ApiError {
+    match e {
+        ManagerError::InsufficientMemory(message) => ApiError {
+            param: Some("model"),
+            ..ApiError::new(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "insufficient_memory",
+                message,
+            )
+        },
+        ManagerError::Load(e) => {
+            let code = match e {
+                crate::stt::SttError::BackendUnavailable { .. } => "backend_unavailable",
+                _ => "model_load_failed",
+            };
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, code, e.to_string())
+        }
+        ManagerError::Internal(message) => transcriptions::internal(st, req_id, message),
+    }
 }
 
 /// §2.6 codes for registry failures.
@@ -352,6 +559,8 @@ fn request_id(req: &Request) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manager::{BackendLoader, Settings};
+    use crate::profile::Profile;
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -359,14 +568,24 @@ mod tests {
     const PORT: u16 = 7870;
 
     fn app(allow_remote: bool) -> Router {
+        let log = Arc::new(Logger::stderr());
+        // These tests never touch the registry: a missing home is an empty
+        // catalog.
+        let registry = Arc::new(Registry::open("/nonexistent/naru-audio-home").unwrap());
+        let settings = Settings::from_env(Profile::detect().unwrap()).unwrap();
+        let models = ModelManager::new(
+            registry.clone(),
+            log.clone(),
+            settings,
+            Arc::new(BackendLoader),
+        );
         router(Arc::new(AppState {
             port: PORT,
             allow_remote,
             started: Instant::now(),
-            log: Arc::new(Logger::stderr()),
-            // These tests never touch the registry: a missing home is an
-            // empty catalog.
-            registry: Arc::new(Registry::open("/nonexistent/naru-audio-home").unwrap()),
+            log,
+            registry,
+            models: Arc::new(models),
         }))
     }
 

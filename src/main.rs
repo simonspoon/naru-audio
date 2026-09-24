@@ -6,6 +6,8 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use naru_audio::log::{self, Logger};
+use naru_audio::manager::{BackendLoader, ModelManager, Settings};
+use naru_audio::profile::Profile;
 use naru_audio::registry::{self, Progress, Pulled, Registry};
 use naru_audio::server::{self, AppState};
 
@@ -75,8 +77,15 @@ async fn main() -> ExitCode {
     }
 
     let registry = match open_registry() {
-        Ok(r) => r,
+        Ok(r) => Arc::new(r),
         Err(code) => return code,
+    };
+    let settings = match Profile::detect().and_then(Settings::from_env) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("naru-audio: {e}");
+            return ExitCode::from(2);
+        }
     };
 
     let log_file = log_file.or_else(|| {
@@ -108,12 +117,19 @@ async fn main() -> ExitCode {
     let log = Arc::new(log);
     log.info(None, &format!("listening addr={addr}"));
 
+    let models = ModelManager::new(
+        registry.clone(),
+        log.clone(),
+        settings,
+        Arc::new(BackendLoader),
+    );
     let app = server::router(Arc::new(AppState {
         port: addr.port(),
         allow_remote,
         started: Instant::now(),
         log,
-        registry: Arc::new(registry),
+        registry,
+        models: Arc::new(models),
     }));
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("naru-audio: server error: {e}");

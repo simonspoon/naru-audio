@@ -186,6 +186,11 @@ impl Registry {
         Ok(Self { home, catalog })
     }
 
+    /// `$NARU_AUDIO_HOME` (§3.1).
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
     pub fn catalog(&self) -> &Catalog {
         &self.catalog
     }

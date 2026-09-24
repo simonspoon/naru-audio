@@ -12,6 +12,8 @@ use axum::http::header::{CONTENT_TYPE, HOST};
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use naru_audio::log::Logger;
+use naru_audio::manager::{BackendLoader, ModelManager, Settings};
+use naru_audio::profile::Profile;
 use naru_audio::registry::Registry;
 use naru_audio::server::{AppState, router};
 use serde_json::{Value, json};
@@ -34,12 +36,22 @@ fn home() -> tempfile::TempDir {
 }
 
 fn app(home: &Path) -> Router {
+    let log = Arc::new(Logger::stderr());
+    let registry = Arc::new(Registry::open(home).unwrap());
+    let settings = Settings::from_env(Profile::detect().unwrap()).unwrap();
+    let models = ModelManager::new(
+        registry.clone(),
+        log.clone(),
+        settings,
+        Arc::new(BackendLoader),
+    );
     router(Arc::new(AppState {
         port: 7870,
         allow_remote: false,
         started: Instant::now(),
-        log: Arc::new(Logger::stderr()),
-        registry: Arc::new(Registry::open(home).unwrap()),
+        log,
+        registry,
+        models: Arc::new(models),
     }))
 }
 
@@ -300,8 +312,8 @@ async fn bad_hotwords_are_400() {
     assert_error(&body, "invalid_request", "hotwords");
 }
 
-/// The fields §2.2 ignores, `keep_alive` included, do not fail the request:
-/// it gets as far as the load.
+/// The fields §2.2 ignores, and a valid `keep_alive`, do not fail the
+/// request: it gets as far as the load.
 #[tokio::test]
 async fn ignored_fields_are_accepted() {
     let home = home();

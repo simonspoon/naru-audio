@@ -832,6 +832,7 @@ dependencies = [
  "hound",
  "http-body-util",
  "humantime",
+ "libc",
  "rubato",
  "serde",
  "serde_json",
