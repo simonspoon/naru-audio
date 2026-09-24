@@ -85,6 +85,17 @@ pub struct Vad {
 impl Vad {
     /// `model` is `silero_vad.onnx`.
     pub fn load(model: &Path, cfg: &VadConfig) -> Result<Vad, VadError> {
+        Self::load_with_max_speech(model, cfg, MAX_SPEECH_SECONDS)
+    }
+
+    /// [`Vad::load`] with the detector's own force-close at `max_speech`
+    /// seconds instead of [`MAX_SPEECH_SECONDS`]; the ring buffer keeps the
+    /// same headroom over it.
+    pub fn load_with_max_speech(
+        model: &Path,
+        cfg: &VadConfig,
+        max_speech: f32,
+    ) -> Result<Vad, VadError> {
         if !model.is_file() {
             return Err(VadError::MissingModel(model.to_path_buf()));
         }
@@ -96,15 +107,16 @@ impl Vad {
                 min_silence_duration: cfg.min_silence,
                 min_speech_duration: cfg.min_speech,
                 window_size: WINDOW_SIZE,
-                max_speech_duration: MAX_SPEECH_SECONDS,
+                max_speech_duration: max_speech,
             },
             sample_rate: TARGET_SAMPLE_RATE as i32,
             num_threads: 1,
             ..Default::default()
         };
 
+        let buffer_seconds = BUFFER_SECONDS - MAX_SPEECH_SECONDS + max_speech;
         let inner =
-            VoiceActivityDetector::create(&config, BUFFER_SECONDS).ok_or(VadError::CreateFailed)?;
+            VoiceActivityDetector::create(&config, buffer_seconds).ok_or(VadError::CreateFailed)?;
         Ok(Vad { inner })
     }
 
@@ -143,6 +155,11 @@ impl Segmenter<'_> {
             self.vad.inner.accept_waveform(chunk);
         }
         self.pending.drain(..whole);
+    }
+
+    /// Whether the detector is inside a span that has not closed yet.
+    pub fn detected(&self) -> bool {
+        self.vad.inner.detected()
     }
 
     /// End of stream: feeds the remainder and closes any open span.

@@ -1,6 +1,8 @@
-//! HTTP surface: §2.1 guards, §2.2 transcriptions, §2.5 `/health` and
-//! registry routes, §2.6 errors, `X-Request-Id`.
+//! HTTP surface: §2.1 guards, §2.2 transcriptions, §2.4 streaming
+//! transcriptions, §2.5 `/health` and registry routes, §2.6 errors,
+//! `X-Request-Id`.
 
+mod stream;
 mod transcriptions;
 
 use std::collections::HashMap;
@@ -63,6 +65,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(transcriptions::transcriptions)
                 .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
         )
+        .route("/v1/audio/transcriptions/stream", get(stream::stream))
         .route("/api/pull", post(pull))
         .route("/api/models/{name}", delete(remove))
         .route("/api/ps", get(ps))

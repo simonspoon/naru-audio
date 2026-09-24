@@ -14,6 +14,8 @@ pub mod vocabulary;
 pub use vad::VadConfig;
 pub use vocabulary::Vocabulary;
 
+use std::path::Path;
+
 /// One utterance's transcript. `start`/`end` are seconds from the start of
 /// the audio: the speech Silero detected (the whole buffer with VAD off),
 /// not the slice that was decoded.
@@ -47,6 +49,12 @@ pub trait SttModel: Send + Sync {
         let mut segments = Vec::new();
         self.decode_each(pcm16k, hotwords, vad, &mut |s| segments.push(s))?;
         Ok(segments)
+    }
+
+    /// The Silero model streaming sessions segment with (§2.4); `None`
+    /// when the model has none, and cannot stream.
+    fn vad_model(&self) -> Option<&Path> {
+        None
     }
 }
 

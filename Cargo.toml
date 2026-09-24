@@ -6,10 +6,10 @@ license = "GPL-3.0-or-later"
 description = "Local speech-to-text and text-to-speech daemon for Naru"
 
 [dependencies]
-axum = { version = "0.8", features = ["multipart"] }
+axum = { version = "0.8", features = ["multipart", "ws"] }
 bzip2 = "0.6"
 clap = { version = "4", features = ["derive", "env"] }
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 hound = "3.5.1"
 humantime = "2"
 libc = "0.2"
@@ -22,6 +22,7 @@ sherpa-onnx = "=1.13.6"
 sherpa-onnx-sys = "=1.13.6"
 tar = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio-tungstenite = "0.29"
 toml = "1"
 ureq = "3"
 

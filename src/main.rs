@@ -1,18 +1,21 @@
 use std::io::Read;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use futures_util::{SinkExt, StreamExt};
 use naru_audio::log::{self, Logger};
 use naru_audio::manager::{BackendLoader, ModelManager, Settings};
 use naru_audio::profile::Profile;
 use naru_audio::registry::{self, Progress, Pulled, Registry};
 use naru_audio::server::{self, AppState};
+use naru_audio::stt::audio;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 #[derive(Parser)]
 #[command(name = "naru-audio", version, about = "Local STT/TTS daemon for Naru")]
@@ -75,6 +78,22 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
+    /// Stream a WAV file through the daemon's WebSocket at the pace of real
+    /// time, printing its events as JSON Lines. Each `final` gains
+    /// `latency_ms`: from sending its last speech sample to its arrival.
+    Stream {
+        /// WAV file; resampled to 16 kHz mono if need be.
+        file: PathBuf,
+        /// Model name; the daemon's default STT model if not given.
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Milliseconds of audio per frame.
+        #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u64).range(20..=100))]
+        frame_ms: u64,
+        /// Times faster than real time; 0 sends as fast as possible.
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -100,6 +119,12 @@ async fn main() -> ExitCode {
             model,
             format,
         } => return transcribe(&daemon_url(), &file, model.as_deref(), format),
+        Command::Stream {
+            file,
+            model,
+            frame_ms,
+            speed,
+        } => return stream(&daemon_url(), &file, model.as_deref(), frame_ms, speed).await,
         // §3.7: these work without a daemon, directly on $NARU_AUDIO_HOME.
         command => return registry_command(command),
     };
@@ -195,7 +220,11 @@ fn registry_command(command: Command) -> ExitCode {
         ok = false;
     };
     match command {
-        Command::Serve { .. } | Command::Health | Command::Ps | Command::Transcribe { .. } => {
+        Command::Serve { .. }
+        | Command::Health
+        | Command::Ps
+        | Command::Transcribe { .. }
+        | Command::Stream { .. } => {
             unreachable!("handled by main")
         }
         Command::Pull { names, force } => {
@@ -550,4 +579,136 @@ fn transcribe(url: &str, file: &str, model: Option<&str>, format: Format) -> Exi
         }
     }
     ExitCode::SUCCESS
+}
+
+/// §2.4 over `ws://`: `start`, the file's samples as s16le frames paced at
+/// `speed` times real time, then `stop`. Exits 0 once `done` arrives, 1 on
+/// an `error` event or any other end.
+async fn stream(
+    url: &str,
+    file: &Path,
+    model: Option<&str>,
+    frame_ms: u64,
+    speed: f64,
+) -> ExitCode {
+    if !(speed.is_finite() && speed >= 0.0) {
+        eprintln!("naru-audio: --speed must be a non-negative number, got {speed}");
+        return ExitCode::from(2);
+    }
+    // As `transcribe`: a stopped daemon is exit 3, before the file is read.
+    if let Err(code) = read(
+        url,
+        agent(Some(PROBE_TIMEOUT))
+            .get(format!("{url}/health"))
+            .call(),
+    ) {
+        return code;
+    }
+    let pcm = match std::fs::File::open(file)
+        .map_err(|e| e.to_string())
+        .and_then(|f| audio::decode(f).map_err(|e| e.to_string()))
+    {
+        Ok(pcm) => pcm,
+        Err(e) => {
+            eprintln!("naru-audio: {}: {e}", file.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let ws_url = match url.strip_prefix("http") {
+        Some(rest) => format!("ws{rest}/v1/audio/transcriptions/stream"),
+        None => format!("{url}/v1/audio/transcriptions/stream"),
+    };
+    let (socket, _) = match tokio_tungstenite::connect_async(&ws_url).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("naru-audio: {ws_url}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let (mut tx, mut rx) = socket.split();
+    let start = serde_json::json!({
+        "type": "start", "model": model.unwrap_or("default"), "format": "s16le",
+        "sample_rate": audio::TARGET_SAMPLE_RATE,
+    });
+    if let Err(e) = tx.send(WsMessage::text(start.to_string())).await {
+        eprintln!("naru-audio: {ws_url}: {e}");
+        return ExitCode::FAILURE;
+    }
+
+    let frame_len = (audio::TARGET_SAMPLE_RATE as u64 * frame_ms / 1000) as usize;
+    let frames: Vec<Vec<u8>> = pcm
+        .chunks(frame_len)
+        .map(|frame| {
+            frame
+                .iter()
+                // The inverse of the daemon's `/ 32768`: 16-bit WAV samples
+                // arrive unchanged.
+                .flat_map(|s| ((s * 32768.0).clamp(-32768.0, 32767.0) as i16).to_le_bytes())
+                .collect()
+        })
+        .collect();
+    let pace = (speed > 0.0).then(|| Duration::from_secs_f64(frame_ms as f64 / 1000.0 / speed));
+    // When each frame went out, for `latency_ms`.
+    let sent: Arc<std::sync::Mutex<Vec<Instant>>> = Arc::default();
+    // Sending starts at `ready`, alongside the reading.
+    let (mut go, sender) = {
+        let sent = sent.clone();
+        let (go, ready) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            if ready.await.is_err() {
+                return Ok(());
+            }
+            let t0 = tokio::time::Instant::now();
+            for (i, frame) in frames.into_iter().enumerate() {
+                if let Some(pace) = pace {
+                    tokio::time::sleep_until(t0 + pace * i as u32).await;
+                }
+                sent.lock().unwrap().push(Instant::now());
+                tx.send(WsMessage::binary(frame)).await?;
+            }
+            tx.send(WsMessage::text(r#"{"type":"stop"}"#)).await
+        });
+        (Some(go), task)
+    };
+
+    let mut done = false;
+    while let Some(msg) = rx.next().await {
+        let text = match msg {
+            Ok(WsMessage::Text(text)) => text,
+            Ok(WsMessage::Close(_)) | Err(_) => break,
+            Ok(_) => continue,
+        };
+        let Ok(mut event) = serde_json::from_str::<Value>(&text) else {
+            println!("{text}");
+            continue;
+        };
+        match event["type"].as_str() {
+            Some("ready") => {
+                if let Some(go) = go.take() {
+                    let _ = go.send(());
+                }
+            }
+            Some("final") => {
+                // The frame that carried the segment's last speech sample.
+                let end = event["end"].as_f64().unwrap_or(0.0);
+                // `end` is exclusive: the last sample is the one before it.
+                let last =
+                    ((end * audio::TARGET_SAMPLE_RATE as f64).round() as usize).saturating_sub(1);
+                let frame = last / frame_len;
+                if let Some(at) = sent.lock().unwrap().get(frame) {
+                    event["latency_ms"] = (at.elapsed().as_millis() as u64).into();
+                }
+            }
+            Some("done") => done = true,
+            _ => {}
+        }
+        println!("{event}");
+    }
+    sender.abort();
+    if done {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }

@@ -470,7 +470,7 @@ fn sse(
 }
 
 /// Segment texts joined with a space.
-fn join(segments: &[Segment]) -> String {
+pub(super) fn join(segments: &[Segment]) -> String {
     segments
         .iter()
         .map(|s| s.text.as_str())

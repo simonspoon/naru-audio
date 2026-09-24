@@ -148,4 +148,8 @@ impl SttModel for SherpaStt {
         }
         Ok(())
     }
+
+    fn vad_model(&self) -> Option<&Path> {
+        Some(&self.vad_model)
+    }
 }
