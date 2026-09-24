@@ -1,21 +1,26 @@
-//! HTTP surface: §2.1 guards, §2.5 `/health`, §2.6 errors, `X-Request-Id`.
+//! HTTP surface: §2.1 guards, §2.5 `/health` and registry routes, §2.6
+//! errors, `X-Request-Id`.
 
+use std::collections::HashMap;
+use std::convert::Infallible;
 use std::hash::{BuildHasher, RandomState};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Request, State};
-use axum::http::header::{HOST, ORIGIN};
+use axum::body::{Body, Bytes};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::header::{CONTENT_TYPE, HOST, ORIGIN};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use crate::error::ApiError;
 use crate::log::Logger;
+use crate::registry::{Progress, Registry, RegistryError};
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7870";
 const REQUEST_ID: &str = "x-request-id";
@@ -27,6 +32,7 @@ pub struct AppState {
     pub allow_remote: bool,
     pub started: Instant,
     pub log: Arc<Logger>,
+    pub registry: Arc<Registry>,
 }
 
 /// §2.1: a non-loopback bind needs `--allow-remote`.
@@ -43,6 +49,9 @@ pub fn check_listen(addr: SocketAddr, allow_remote: bool) -> Result<(), String> 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/v1/models", get(models))
+        .route("/api/pull", post(pull))
+        .route("/api/models/{name}", delete(remove))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), guard))
@@ -57,6 +66,170 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
         "pid": std::process::id(),
         "uptime_s": st.started.elapsed().as_secs(),
     }))
+}
+
+/// §2.5 `GET /v1/models`, `?pulled=true|false` filtering on `x_pulled`.
+async fn models(
+    State(st): State<Arc<AppState>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let pulled = match query.get("pulled").map(String::as_str) {
+        None => None,
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        Some(other) => {
+            return Err(ApiError {
+                param: Some("pulled"),
+                ..ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "unsupported_value",
+                    format!("pulled must be true or false, not {other:?}"),
+                )
+            });
+        }
+    };
+    let registry = st.registry.clone();
+    let data: Vec<Value> = tokio::task::spawn_blocking(move || registry.list())
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
+        .map_err(registry_error)?
+        .into_iter()
+        .filter(|e| pulled.is_none_or(|p| p == e.pulled))
+        .map(|e| {
+            json!({
+                "id": e.manifest.model.name,
+                "object": "model",
+                "created": e.created,
+                "owned_by": "naru-audio",
+                "x_kind": e.manifest.model.kind.as_str(),
+                "x_backend": e.manifest.model.backend,
+                "x_available": e.available.is_ok(),
+                "x_unavailable_reason": e.available.err(),
+                "x_pulled": e.pulled,
+                // No model manager yet: nothing is ever loaded.
+                "x_loaded": false,
+                "x_size_bytes": e.size_bytes,
+                // §3.3 default resolution is not implemented yet.
+                "x_default": false,
+            })
+        })
+        .collect();
+    Ok(Json(json!({"object": "list", "data": data})))
+}
+
+/// §2.5 `POST /api/pull`: NDJSON progress, then `success`. Unknown models
+/// and unavailable backends fail before the stream starts; a later failure
+/// ends the stream with an `{"error":…}` line.
+async fn pull(State(st): State<Arc<AppState>>, body: Bytes) -> Result<Response, ApiError> {
+    let name = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(str::to_string))
+        .ok_or_else(|| ApiError {
+            param: Some("model"),
+            ..ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the body must be JSON with a string \"model\"",
+            )
+        })?;
+    st.registry
+        .check_pull(&name, false)
+        .map_err(registry_error)?;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let registry = st.registry.clone();
+    tokio::task::spawn_blocking(move || {
+        // A send fails only once the client has gone; the pull still finishes.
+        let send = |v: Value| {
+            let _ = tx.send(format!("{v}\n"));
+        };
+        let result = registry.pull_with(&name, false, &mut |p| {
+            send(match p {
+                Progress::Downloading {
+                    file,
+                    completed,
+                    total,
+                } => json!({"status": "downloading", "file": file, "completed": completed, "total": total}),
+                Progress::Verifying => json!({"status": "verifying"}),
+            })
+        });
+        match result {
+            Ok(_) => send(json!({"status": "success"})),
+            Err(e) => send(json!({"error": {
+                "message": e.to_string(),
+                "type": "server_error",
+                "code": "pull_failed",
+                "param": null,
+            }})),
+        }
+    });
+    let lines = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|line| (Ok::<_, Infallible>(line), rx))
+    });
+    Ok((
+        [(CONTENT_TYPE, "application/x-ndjson")],
+        Body::from_stream(lines),
+    )
+        .into_response())
+}
+
+/// §2.5 `DELETE /api/models/{name}`. With no model manager nothing is ever
+/// loaded, so `model_in_use` cannot happen yet. A catalog model that is not
+/// pulled is 404: there is nothing to delete, and the usual `model_not_pulled`
+/// advice (pull it) is wrong here.
+async fn remove(
+    State(st): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let registry = st.registry.clone();
+    // `remove` waits on the model's lock, which a pull may hold for minutes.
+    tokio::task::spawn_blocking(move || registry.remove(&name, false, &[]))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
+        .map_err(|e| match e {
+            RegistryError::NotPulled(name) => ApiError {
+                param: Some("model"),
+                ..ApiError::new(
+                    StatusCode::NOT_FOUND,
+                    "model_not_found",
+                    format!("the model \"{name}\" is not pulled; see GET /v1/models?pulled=true"),
+                )
+            },
+            e => registry_error(e),
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// §2.6 codes for registry failures.
+fn registry_error(e: RegistryError) -> ApiError {
+    let (status, code, message) = match &e {
+        RegistryError::UnknownModel(name) => (
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+            format!("the model \"{name}\" is not in the catalog; see GET /v1/models"),
+        ),
+        RegistryError::NotPulled(name) => (
+            StatusCode::CONFLICT,
+            "model_not_pulled",
+            format!("the model \"{name}\" is not pulled; run `naru-audio pull {name}`"),
+        ),
+        RegistryError::RequiredBy { .. } => (StatusCode::CONFLICT, "model_required", e.to_string()),
+        RegistryError::BackendUnavailable { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unavailable",
+            e.to_string(),
+        ),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()),
+    };
+    let param = matches!(
+        e,
+        RegistryError::UnknownModel(_) | RegistryError::NotPulled(_)
+    )
+    .then_some("model");
+    ApiError {
+        param,
+        ..ApiError::new(status, code, message)
+    }
 }
 
 async fn not_found(req: Request) -> ApiError {
@@ -179,6 +352,9 @@ mod tests {
             allow_remote,
             started: Instant::now(),
             log: Arc::new(Logger::stderr()),
+            // These tests never touch the registry: a missing home is an
+            // empty catalog.
+            registry: Arc::new(Registry::open("/nonexistent/naru-audio-home").unwrap()),
         }))
     }
 

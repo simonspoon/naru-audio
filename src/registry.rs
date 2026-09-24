@@ -10,14 +10,14 @@
 //!
 //! A per-model `tmp/<name>.lock` (an advisory `flock`, so it holds across
 //! threads and processes) serialises pulls: whoever waited finds the model
-//! installed and does nothing.
+//! installed and does nothing. `remove` and `verify` take the same lock.
 
 pub mod manifest;
 
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -35,6 +35,19 @@ pub enum RegistryError {
         message: String,
     },
     UnknownModel(String),
+    /// In the catalog, but not under `models/`.
+    NotPulled(String),
+    /// §3.6: `pull` refuses a model whose backend cannot run here.
+    BackendUnavailable {
+        name: String,
+        backend: String,
+        reason: String,
+    },
+    /// §3.2: `rm` refuses a model that other pulled models `require`.
+    RequiredBy {
+        name: String,
+        by: Vec<String>,
+    },
     /// `requires` loops back on itself; the chain of names.
     RequiresCycle(Vec<String>),
     Download {
@@ -76,6 +89,20 @@ impl std::fmt::Display for RegistryError {
                 write!(f, "invalid manifest {origin}: {message}")
             }
             RegistryError::UnknownModel(name) => write!(f, "unknown model `{name}`"),
+            RegistryError::NotPulled(name) => write!(f, "model `{name}` is not pulled"),
+            RegistryError::BackendUnavailable {
+                name,
+                backend,
+                reason,
+            } => write!(
+                f,
+                "model `{name}` needs backend {backend}, which is unavailable: {reason}"
+            ),
+            RegistryError::RequiredBy { name, by } => write!(
+                f,
+                "model `{name}` is required by {}; remove those first or use --force",
+                by.join(", ")
+            ),
             RegistryError::RequiresCycle(chain) => {
                 write!(f, "`requires` cycle: {}", chain.join(" -> "))
             }
@@ -108,6 +135,44 @@ pub enum Pulled {
     AlreadyInstalled,
 }
 
+/// Pull progress, the §2.5 `/api/pull` NDJSON lines before `success`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress<'a> {
+    /// `file` is a `[[file]]` path or an archive's base name; `total` is the
+    /// pinned size, if any.
+    Downloading {
+        file: &'a str,
+        completed: u64,
+        total: Option<u64>,
+    },
+    /// The download is complete; its size and sha256 are being checked.
+    Verifying,
+}
+
+/// Progress is reported at most once per this many bytes, plus at each end.
+const PROGRESS_STEP: u64 = 1 << 20;
+
+/// One `list` / `GET /v1/models` row.
+#[derive(Debug)]
+pub struct Entry {
+    pub manifest: Manifest,
+    pub available: Result<(), String>,
+    pub pulled: bool,
+    /// Pulled: `pulled_at` as Unix seconds; otherwise 0.
+    pub created: u64,
+    /// Pulled: bytes on disk. Otherwise the download size, when every
+    /// download pins one.
+    pub size_bytes: Option<u64>,
+}
+
+/// `$NARU_AUDIO_HOME`, else `~/.naru-audio` (§3.1).
+pub fn default_home() -> Option<PathBuf> {
+    match std::env::var_os("NARU_AUDIO_HOME") {
+        Some(h) if !h.is_empty() => Some(h.into()),
+        _ => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".naru-audio")),
+    }
+}
+
 pub struct Registry {
     home: PathBuf,
     catalog: Catalog,
@@ -136,13 +201,251 @@ impl Registry {
     /// Pulls `name` after everything it `requires`. Reports what happened to
     /// `name` itself.
     pub fn pull(&self, name: &str) -> Result<Pulled, RegistryError> {
-        let mut order = Vec::new();
-        self.resolve(name, &mut Vec::new(), &mut order)?;
+        self.pull_with(name, false, &mut |_| {})
+    }
+
+    /// `pull`, reporting progress. `force` pulls models whose backend is
+    /// unavailable here (§3.6).
+    pub fn pull_with(
+        &self,
+        name: &str,
+        force: bool,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<Pulled, RegistryError> {
         let mut pulled = Pulled::AlreadyInstalled;
-        for m in order {
-            pulled = self.install(m)?;
+        for m in self.plan(name, force)? {
+            pulled = self.install(m, progress)?;
         }
         Ok(pulled)
+    }
+
+    /// The errors `pull_with` would raise before downloading anything.
+    pub fn check_pull(&self, name: &str, force: bool) -> Result<(), RegistryError> {
+        self.plan(name, force).map(|_| ())
+    }
+
+    /// `name` and its `requires`, in install order, each with an available
+    /// backend unless `force`.
+    fn plan(&self, name: &str, force: bool) -> Result<Vec<&Manifest>, RegistryError> {
+        let mut order = Vec::new();
+        self.resolve(name, &mut Vec::new(), &mut order)?;
+        if !force {
+            for m in &order {
+                crate::backend::available(&m.model.backend).map_err(|reason| {
+                    RegistryError::BackendUnavailable {
+                        name: m.model.name.clone(),
+                        backend: m.model.backend.clone(),
+                        reason,
+                    }
+                })?;
+            }
+        }
+        Ok(order)
+    }
+
+    /// Pulled model names, sorted.
+    pub fn pulled(&self) -> Result<Vec<String>, RegistryError> {
+        let models = self.home.join("models");
+        let entries = match std::fs::read_dir(&models) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(RegistryError::io(format!("read {}", models.display()))(e)),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(RegistryError::io(format!("read {}", models.display())))?;
+            if let Some(name) = entry.file_name().to_str()
+                && self.is_installed(name)
+            {
+                names.push(name.to_string());
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// The manifest a pulled model was installed with, from its `manifest.json`.
+    pub fn pulled_manifest(&self, name: &str) -> Result<Manifest, RegistryError> {
+        let path = self.model_dir(name).join(MANIFEST_JSON);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(self.not_pulled(name));
+            }
+            Err(e) => return Err(RegistryError::io(format!("read {}", path.display()))(e)),
+        };
+        let origin = path.display().to_string();
+        let raw: toml::Table =
+            serde_json::from_slice(&bytes).map_err(|e| RegistryError::Manifest {
+                origin: origin.clone(),
+                message: e.to_string(),
+            })?;
+        Manifest::from_table(raw, &origin)
+    }
+
+    /// `NotPulled` for a catalog model, `UnknownModel` otherwise.
+    fn not_pulled(&self, name: &str) -> RegistryError {
+        if self.catalog.models.contains_key(name) {
+            RegistryError::NotPulled(name.to_string())
+        } else {
+            RegistryError::UnknownModel(name.to_string())
+        }
+    }
+
+    /// Pulled models plus catalog models that can run on this machine
+    /// (§2.5), sorted by name. A pulled model is described by its own
+    /// `manifest.json`, even if the catalog has since changed. A pulled model
+    /// whose `manifest.json` cannot be read is left out with a warning.
+    pub fn list(&self) -> Result<Vec<Entry>, RegistryError> {
+        let mut entries = std::collections::BTreeMap::new();
+        let mut unreadable = std::collections::BTreeSet::new();
+        for name in self.pulled()? {
+            let manifest = match self.pulled_manifest(&name) {
+                Ok(m) => m,
+                // Removed since `pulled()` looked.
+                Err(RegistryError::NotPulled(_) | RegistryError::UnknownModel(_)) => continue,
+                Err(e) => {
+                    warn_unreadable(&name, &e);
+                    unreadable.insert(name);
+                    continue;
+                }
+            };
+            let created = manifest
+                .raw
+                .get("pulled_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| humantime::parse_rfc3339(s).ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            let dir = self.model_dir(&name);
+            let size =
+                dir_size(&dir).map_err(RegistryError::io(format!("read {}", dir.display())))?;
+            entries.insert(
+                name,
+                Entry {
+                    available: crate::backend::available(&manifest.model.backend),
+                    manifest,
+                    pulled: true,
+                    created,
+                    size_bytes: Some(size),
+                },
+            );
+        }
+        for (name, m) in &self.catalog.models {
+            // An unreadable pulled model is still pulled: not listed as pullable.
+            if entries.contains_key(name) || unreadable.contains(name) || !m.runs_here() {
+                continue;
+            }
+            let downloads = m.archives.iter().map(|a| a.size);
+            let downloads =
+                downloads.chain(m.files.iter().filter(|f| f.url.is_some()).map(|f| f.size));
+            entries.insert(
+                name.clone(),
+                Entry {
+                    available: crate::backend::available(&m.model.backend),
+                    manifest: m.clone(),
+                    pulled: false,
+                    created: 0,
+                    size_bytes: downloads.sum(),
+                },
+            );
+        }
+        Ok(entries.into_values().collect())
+    }
+
+    /// Removes a pulled model. Unless `force`, refuses while another pulled
+    /// model `requires` it (§3.2); models named in `also_removing` do not
+    /// count, and neither do pulled models whose `manifest.json` cannot be
+    /// read (with a warning).
+    pub fn remove(
+        &self,
+        name: &str,
+        force: bool,
+        also_removing: &[String],
+    ) -> Result<(), RegistryError> {
+        let _lock = self.lock_pulled(name)?;
+        if !force {
+            let mut by = Vec::new();
+            for other in self.pulled()? {
+                if other == name || also_removing.contains(&other) {
+                    continue;
+                }
+                match self.pulled_manifest(&other) {
+                    Ok(m) if m.model.requires.iter().any(|r| r == name) => by.push(other),
+                    Ok(_) | Err(RegistryError::NotPulled(_) | RegistryError::UnknownModel(_)) => {}
+                    Err(e) => warn_unreadable(&other, &e),
+                }
+            }
+            if !by.is_empty() {
+                return Err(RegistryError::RequiredBy {
+                    name: name.to_string(),
+                    by,
+                });
+            }
+        }
+        // Dropping `manifest.json` first uninstalls the model in one step;
+        // a leftover directory is what `promote` already replaces.
+        let dir = self.model_dir(name);
+        let json = dir.join(MANIFEST_JSON);
+        std::fs::remove_file(&json)
+            .map_err(RegistryError::io(format!("remove {}", json.display())))?;
+        std::fs::remove_dir_all(&dir)
+            .map_err(RegistryError::io(format!("remove {}", dir.display())))
+    }
+
+    /// Re-hashes every `[[file]]` of a pulled model against the manifest it
+    /// was installed with (§3.2 `naru-audio verify`).
+    pub fn verify(&self, name: &str) -> Result<(), RegistryError> {
+        let _lock = self.lock_pulled(name)?;
+        let m = self.pulled_manifest(name)?;
+        let dir = self.model_dir(name);
+        for f in &m.files {
+            let path = dir.join(&f.path);
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(RegistryError::MissingFile(f.path.clone()));
+                }
+                Err(e) => return Err(RegistryError::io(format!("open {}", path.display()))(e)),
+            };
+            let got = hash_copy(file, std::io::sink(), &mut |_| {})
+                .map_err(RegistryError::io(format!("read {}", path.display())))?;
+            check(&f.path, f.size, sha(&f.sha256), got)?;
+        }
+        Ok(())
+    }
+
+    /// `lock` for a model that is pulled, checked before and after locking.
+    /// Matching `name` against `models/` first keeps a name like `../x`
+    /// from reaching the filesystem.
+    fn lock_pulled(&self, name: &str) -> Result<File, RegistryError> {
+        if !self.pulled()?.iter().any(|n| n == name) {
+            return Err(self.not_pulled(name));
+        }
+        let lock = self.lock(name)?;
+        if !self.is_installed(name) {
+            return Err(self.not_pulled(name));
+        }
+        Ok(lock)
+    }
+
+    /// The per-model advisory lock, held until the returned file is dropped.
+    fn lock(&self, name: &str) -> Result<File, RegistryError> {
+        let tmp = self.home.join("tmp");
+        std::fs::create_dir_all(&tmp)
+            .map_err(RegistryError::io(format!("create {}", tmp.display())))?;
+        // Never unlinked: removing a lock file races with a waiter that has
+        // it open.
+        let lock_path = tmp.join(format!("{name}.lock"));
+        let lock = File::options()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(RegistryError::io(format!("open {}", lock_path.display())))?;
+        lock.lock()
+            .map_err(RegistryError::io(format!("lock {}", lock_path.display())))?;
+        Ok(lock)
     }
 
     /// Depth-first, so each model lands after its `requires`.
@@ -174,26 +477,18 @@ impl Registry {
         Ok(())
     }
 
-    fn install(&self, m: &Manifest) -> Result<Pulled, RegistryError> {
+    fn install(
+        &self,
+        m: &Manifest,
+        progress: &mut dyn FnMut(Progress),
+    ) -> Result<Pulled, RegistryError> {
         let name = &m.model.name;
         if self.is_installed(name) {
             return Ok(Pulled::AlreadyInstalled);
         }
 
+        let _lock = self.lock(name)?;
         let tmp = self.home.join("tmp");
-        std::fs::create_dir_all(&tmp)
-            .map_err(RegistryError::io(format!("create {}", tmp.display())))?;
-        // Never unlinked: removing a lock file races with a waiter that has
-        // it open. Released when `lock` is dropped.
-        let lock_path = tmp.join(format!("{name}.lock"));
-        let lock = File::options()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(RegistryError::io(format!("open {}", lock_path.display())))?;
-        lock.lock()
-            .map_err(RegistryError::io(format!("lock {}", lock_path.display())))?;
 
         // Whoever held the lock before us may have just finished this model.
         if self.is_installed(name) {
@@ -211,7 +506,8 @@ impl Registry {
         std::fs::create_dir_all(&staging)
             .map_err(RegistryError::io(format!("create {}", staging.display())))?;
 
-        let result = stage(m, &staging).and_then(|()| promote(&staging, &self.model_dir(name)));
+        let result =
+            stage(m, &staging, progress).and_then(|()| promote(&staging, &self.model_dir(name)));
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&staging);
         }
@@ -221,11 +517,15 @@ impl Registry {
 
 /// Fills `staging` with the verified model: archives, then files, then
 /// derived files, then `manifest.json`.
-fn stage(m: &Manifest, staging: &Path) -> Result<(), RegistryError> {
+fn stage(
+    m: &Manifest,
+    staging: &Path,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<(), RegistryError> {
     for a in &m.archives {
         let base = a.url.rsplit('/').next().unwrap_or("archive");
         let part = staging.join(format!("{base}.part"));
-        download(&a.url, &part, a.size, sha(&a.sha256))?;
+        download(&a.url, base, &part, a.size, sha(&a.sha256), progress)?;
         extract(&part, &a.url, staging, a.strip)?;
         std::fs::remove_file(&part)
             .map_err(RegistryError::io(format!("remove {}", part.display())))?;
@@ -240,7 +540,7 @@ fn stage(m: &Manifest, staging: &Path) -> Result<(), RegistryError> {
                         .map_err(RegistryError::io(format!("create {}", parent.display())))?;
                 }
                 let part = staging.join(format!("{}.part", f.path));
-                download(url, &part, f.size, sha(&f.sha256))?;
+                download(url, &f.path, &part, f.size, sha(&f.sha256), progress)?;
                 std::fs::rename(&part, &dest).map_err(RegistryError::io(format!(
                     "rename {} into place",
                     part.display()
@@ -254,7 +554,7 @@ fn stage(m: &Manifest, staging: &Path) -> Result<(), RegistryError> {
                     }
                     Err(e) => return Err(RegistryError::io(format!("open {}", dest.display()))(e)),
                 };
-                let got = hash_copy(file, std::io::sink())
+                let got = hash_copy(file, std::io::sink(), &mut |_| {})
                     .map_err(RegistryError::io(format!("read {}", dest.display())))?;
                 check(&f.path, f.size, sha(&f.sha256), got)?;
             }
@@ -292,8 +592,15 @@ fn sha(s: &Option<String>) -> &str {
 }
 
 /// Streams `url` into `part`, then checks size and sha256. On any failure
-/// `part` is removed.
-fn download(url: &str, part: &Path, size: Option<u64>, sha256: &str) -> Result<(), RegistryError> {
+/// `part` is removed. Progress names the download `file`.
+fn download(
+    url: &str,
+    file: &str,
+    part: &Path,
+    size: Option<u64>,
+    sha256: &str,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<(), RegistryError> {
     let result = (|| {
         let reader = open_url(url)?;
         // One byte past the pinned size is enough to fail the size check, so
@@ -304,10 +611,27 @@ fn download(url: &str, part: &Path, size: Option<u64>, sha256: &str) -> Result<(
         };
         let out =
             File::create(part).map_err(RegistryError::io(format!("create {}", part.display())))?;
-        let got = hash_copy(reader, out).map_err(|e| RegistryError::Download {
+        let report = |completed| Progress::Downloading {
+            file,
+            completed,
+            total: size,
+        };
+        progress(report(0));
+        let mut reported = 0;
+        let got = hash_copy(reader, out, &mut |n| {
+            if n - reported >= PROGRESS_STEP {
+                reported = n;
+                progress(report(n));
+            }
+        })
+        .map_err(|e| RegistryError::Download {
             url: url.to_string(),
             message: e.to_string(),
         })?;
+        if got.0 != reported {
+            progress(report(got.0));
+        }
+        progress(Progress::Verifying);
         check(url, size, sha256, got)
     })();
     if result.is_err() {
@@ -330,7 +654,12 @@ fn open_url(url: &str) -> Result<Box<dyn Read>, RegistryError> {
 }
 
 /// Copies `r` into `w`, returning the byte count and the lowercase hex sha256.
-fn hash_copy(mut r: impl Read, mut w: impl Write) -> std::io::Result<(u64, String)> {
+/// `on_chunk` gets the running byte count after each chunk.
+fn hash_copy(
+    mut r: impl Read,
+    mut w: impl Write,
+    on_chunk: &mut dyn FnMut(u64),
+) -> std::io::Result<(u64, String)> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK_SIZE];
     let mut n_total = 0u64;
@@ -342,6 +671,7 @@ fn hash_copy(mut r: impl Read, mut w: impl Write) -> std::io::Result<(u64, Strin
         hasher.update(&buf[..n]);
         w.write_all(&buf[..n])?;
         n_total += n as u64;
+        on_chunk(n_total);
     }
     w.flush()?;
     let hex: String = hasher
@@ -424,6 +754,27 @@ fn extract(archive: &Path, url: &str, dest: &Path, strip: usize) -> Result<(), R
         entry.unpack(&out).map_err(&ioe)?;
     }
     Ok(())
+}
+
+/// The registry has no logger; stderr reaches the terminal for the CLI and
+/// the daemon's log under `brew services`.
+fn warn_unreadable(name: &str, e: &RegistryError) {
+    eprintln!("naru-audio: warning: skipping pulled model `{name}`: {e}");
+}
+
+/// Total size of the regular files under `dir`.
+fn dir_size(dir: &Path) -> std::io::Result<u64> {
+    let mut total = 0;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        total += if meta.is_dir() {
+            dir_size(&entry.path())?
+        } else {
+            meta.len()
+        };
+    }
+    Ok(total)
 }
 
 /// Line n (1-based) of `tokens.txt` becomes `<piece> <-(n-1)>`, where

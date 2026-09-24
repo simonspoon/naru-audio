@@ -23,11 +23,24 @@ pub enum Kind {
     Vad,
 }
 
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Stt => "stt",
+            Kind::Tts => "tts",
+            Kind::Vad => "vad",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Model {
     pub name: String,
     pub kind: Kind,
     pub backend: String,
+    /// `<os>-<arch>` pairs such as `macos-arm64`; empty means every platform.
+    #[serde(default)]
+    pub platforms: Vec<String>,
     #[serde(default)]
     pub requires: Vec<String>,
 }
@@ -75,10 +88,29 @@ impl Manifest {
             message,
         };
         let raw: toml::Table = toml::from_str(text).map_err(|e| err(e.to_string()))?;
+        Self::from_table(raw, origin)
+    }
+
+    /// Validates an already-parsed manifest, e.g. a pulled `manifest.json`.
+    pub fn from_table(raw: toml::Table, origin: &str) -> Result<Self, RegistryError> {
+        let err = |message: String| RegistryError::Manifest {
+            origin: origin.to_string(),
+            message,
+        };
         let mut m = Manifest::deserialize(raw.clone()).map_err(|e| err(e.to_string()))?;
         m.raw = raw;
         m.validate().map_err(err)?;
         Ok(m)
+    }
+
+    /// §2.5 "can run on this machine": `platforms` names this OS and arch.
+    pub fn runs_here(&self) -> bool {
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let here = format!("{}-{arch}", std::env::consts::OS);
+        self.model.platforms.is_empty() || self.model.platforms.contains(&here)
     }
 
     /// `backend.<model.backend>.derive`, e.g. `["bpe.vocab"]`.
