@@ -15,6 +15,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/parakeet-tdt-0.6b-v2-int8.toml"),
     ),
     (
+        "parakeet-tdt-0.6b-v2-mlx.toml",
+        include_str!("../../catalog/parakeet-tdt-0.6b-v2-mlx.toml"),
+    ),
+    (
         "silero-vad.toml",
         include_str!("../../catalog/silero-vad.toml"),
     ),
@@ -113,11 +117,17 @@ impl Manifest {
 
     /// §2.5 "can run on this machine": `platforms` names this OS and arch.
     pub fn runs_here(&self) -> bool {
-        let arch = match std::env::consts::ARCH {
+        self.runs_on(std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    /// [`Manifest::runs_here`] on `os` and `arch`, as `std::env::consts`
+    /// names them.
+    pub fn runs_on(&self, os: &str, arch: &str) -> bool {
+        let arch = match arch {
             "aarch64" => "arm64",
             other => other,
         };
-        let here = format!("{}-{arch}", std::env::consts::OS);
+        let here = format!("{os}-{arch}");
         self.model.platforms.is_empty() || self.model.platforms.contains(&here)
     }
 
@@ -289,7 +299,11 @@ mod tests {
         let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
         assert_eq!(
             cat.models.keys().collect::<Vec<_>>(),
-            ["parakeet-tdt-0.6b-v2-int8", "silero-vad"]
+            [
+                "parakeet-tdt-0.6b-v2-int8",
+                "parakeet-tdt-0.6b-v2-mlx",
+                "silero-vad"
+            ]
         );
         for m in cat.models.values() {
             assert!(!m.files.is_empty(), "{}", m.model.name);
@@ -311,6 +325,11 @@ mod tests {
         assert_eq!(stt.model.requires, ["silero-vad"]);
         assert_eq!(stt.derive(), [BPE_VOCAB]);
         assert_eq!(stt.files.len(), 4);
+        let mlx = &cat.models["parakeet-tdt-0.6b-v2-mlx"];
+        assert_eq!(mlx.model.kind, Kind::Stt);
+        assert_eq!(mlx.model.backend, "mlx");
+        assert_eq!(mlx.model.requires, ["silero-vad"]);
+        assert_eq!(mlx.files.len(), 2);
         assert_eq!(cat.models["silero-vad"].model.kind, Kind::Vad);
     }
 }

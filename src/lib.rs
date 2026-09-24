@@ -4,6 +4,8 @@ pub mod backend;
 pub mod error;
 pub mod log;
 pub mod manager;
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+pub mod mlx;
 pub mod profile;
 pub mod registry;
 pub mod server;

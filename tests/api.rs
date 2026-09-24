@@ -22,6 +22,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const HOSTPORT: &str = "127.0.0.1:7870";
+/// Built in, and listed on macOS only.
+const MLX: &str = "parakeet-tdt-0.6b-v2-mlx";
 
 fn app(home: &Path) -> Router {
     let log = Arc::new(Logger::stderr());
@@ -122,8 +124,13 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["object"], "list");
     let data = body["data"].as_array().unwrap();
-    let ids: Vec<&str> = data.iter().map(|m| m["id"].as_str().unwrap()).collect();
-    // The built-in catalog is listed too; the checks below are about the rest.
+    // The built-in catalog is listed too; the checks below are about the
+    // rest. The MLX parakeet is listed on macOS only, its platforms.
+    let ids: Vec<&str> = data
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .filter(|&id| id != MLX)
+        .collect();
     assert_eq!(
         ids,
         [
@@ -137,7 +144,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     let data: Vec<&Value> = data
         .iter()
         .filter(|m| {
-            !["parakeet-tdt-0.6b-v2-int8", "silero-vad"].contains(&m["id"].as_str().unwrap())
+            !["parakeet-tdt-0.6b-v2-int8", MLX, "silero-vad"].contains(&m["id"].as_str().unwrap())
         })
         .collect();
 
@@ -314,6 +321,7 @@ async fn unreadable_manifest_json_is_skipped() {
         .unwrap()
         .iter()
         .map(|m| m["id"].as_str().unwrap())
+        .filter(|&id| id != MLX)
         .collect();
     assert_eq!(ids, ["parakeet-tdt-0.6b-v2-int8", "silero-vad", "vad"]);
 

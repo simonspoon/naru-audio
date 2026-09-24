@@ -1,0 +1,25 @@
+# The same model as parakeet-tdt-0.6b-v2-int8, served by the MLX sidecar
+# (§5.3). `from_pretrained` needs only these two files.
+
+[model]
+name        = "parakeet-tdt-0.6b-v2-mlx"
+kind        = "stt"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["en"]
+license     = "CC-BY-4.0"
+resident_bytes = 2_600_000_000           # estimate; the sidecar's `stats` corrects it
+requires    = ["silero-vad"]
+
+[[file]]
+path   = "model.safetensors"
+url    = "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2/resolve/8ae155301e23d820d82aa60d24817c900e69e487/model.safetensors"
+sha256 = "b958c37a6baa6874a279108755c8f2818e27bf647d72d54800a234a421341dfe"
+size   = 2_471_559_904
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2/resolve/8ae155301e23d820d82aa60d24817c900e69e487/config.json"
+sha256 = "9bd323e60afe2615c983a5d9fc3a2c0470df2a03edf90c0f861bd59509d07264"
+size   = 36_176

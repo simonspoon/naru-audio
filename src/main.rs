@@ -97,6 +97,20 @@ enum Command {
         #[arg(long)]
         partials: bool,
     },
+    /// The MLX sidecar's Python environment (Apple Silicon only).
+    Mlx {
+        #[command(subcommand)]
+        action: MlxAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum MlxAction {
+    /// Install the sidecar's venv with uv into $NARU_AUDIO_HOME/mlx and
+    /// record its interpreter in config.toml.
+    Setup,
+    /// Show the recorded interpreter and whether it imports the sidecar.
+    Status,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -139,6 +153,7 @@ async fn main() -> ExitCode {
             )
             .await;
         }
+        Command::Mlx { action } => return mlx_command(action),
         // §3.7: these work without a daemon, directly on $NARU_AUDIO_HOME.
         command => return registry_command(command),
     };
@@ -221,6 +236,46 @@ fn open_registry() -> Result<Registry, ExitCode> {
     })
 }
 
+/// §3.7 `mlx setup|status`, on $NARU_AUDIO_HOME; both exit 1 on failure.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+fn mlx_command(action: MlxAction) -> ExitCode {
+    use naru_audio::mlx;
+
+    let Some(home) = registry::default_home() else {
+        eprintln!("naru-audio: set NARU_AUDIO_HOME or HOME");
+        return ExitCode::FAILURE;
+    };
+    if let MlxAction::Setup = action
+        && let Err(e) = mlx::setup(&home)
+    {
+        eprintln!("naru-audio: mlx setup: {e}");
+        return ExitCode::FAILURE;
+    }
+    let (python, result) = mlx::status(&home);
+    if let Some(python) = python {
+        println!("python   {}", python.display());
+        println!("exists   {}", if python.is_file() { "yes" } else { "no" });
+    }
+    match result {
+        Ok(()) => {
+            println!("imports  yes");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("naru-audio: mlx: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+fn mlx_command(_: MlxAction) -> ExitCode {
+    eprintln!(
+        "naru-audio: mlx requires Apple Silicon (arm64 macOS); this build has no MLX backend"
+    );
+    ExitCode::FAILURE
+}
+
 /// `pull`, `list`, `rm` and `verify`. Every named model is attempted; the
 /// exit code is 1 if any failed.
 fn registry_command(command: Command) -> ExitCode {
@@ -238,7 +293,8 @@ fn registry_command(command: Command) -> ExitCode {
         | Command::Health
         | Command::Ps
         | Command::Transcribe { .. }
-        | Command::Stream { .. } => {
+        | Command::Stream { .. }
+        | Command::Mlx { .. } => {
             unreachable!("handled by main")
         }
         Command::Pull { names, force } => {

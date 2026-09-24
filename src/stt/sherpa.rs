@@ -20,16 +20,8 @@ pub struct SherpaStt {
 }
 
 impl SherpaStt {
-    /// `dir` is `models/<name>/`; a `requires`d model is its sibling
-    /// `models/<required>/` (§3.1).
     pub fn load(manifest: &Manifest, dir: &Path) -> Result<Self, SttError> {
-        let vad_model = manifest
-            .model
-            .requires
-            .iter()
-            .filter_map(|name| Some(dir.parent()?.join(name).join(VAD_FILENAME)))
-            .find(|path| path.is_file())
-            .ok_or_else(|| SttError::NoVadModel(manifest.model.name.clone()))?;
+        let vad_model = vad_model(manifest, dir)?;
         let recognizer = Recognizer::load(&EngineConfig {
             model_dir: dir.to_path_buf(),
             ..Default::default()
@@ -86,56 +78,8 @@ impl SttModel for SherpaStt {
         let vocabulary = hotwords.filter(|v| !v.terms.is_empty());
         let hotwords = vocabulary.map(Vocabulary::hotwords_string);
 
-        // Parakeet hallucinates on digital silence, so the recognizer (and
-        // the VAD) never sees it.
-        if audio::is_silent(pcm16k) {
-            return Ok(());
-        }
-
-        // (utterance, slice start, slice end). Slices partition the buffer
-        // at utterance starts, so one utterance decodes the whole buffer
-        // (`super::vad`).
-        let mut utterances: Vec<(Span, usize, usize)> = Vec::new();
-        match vad {
-            None => utterances.push((
-                Span {
-                    start: 0,
-                    len: pcm16k.len(),
-                },
-                0,
-                pcm16k.len(),
-            )),
-            Some(cfg) => {
-                let vad = Vad::load(&self.vad_model, cfg)?;
-                let mut segmenter = vad.segmenter();
-                let mut spans = Vec::new();
-                // Fed and drained per read chunk, as auris's streaming loop
-                // does; the detector's queue is finite.
-                for chunk in pcm16k.chunks(READ_CHUNK_FRAMES) {
-                    segmenter.accept(chunk);
-                    while let Some(span) = segmenter.next_span() {
-                        spans.push(span);
-                    }
-                }
-                segmenter.finish();
-                while let Some(span) = segmenter.next_span() {
-                    spans.push(span);
-                }
-
-                let mut slice_start = 0;
-                for (i, span) in spans.iter().enumerate() {
-                    let cut = match spans.get(i + 1) {
-                        Some(next) => next.start.max(slice_start),
-                        None => pcm16k.len(),
-                    };
-                    utterances.push((*span, slice_start, cut));
-                    slice_start = cut;
-                }
-            }
-        }
-
         let rate = TARGET_SAMPLE_RATE as f64;
-        for (span, from, to) in utterances {
+        for (span, from, to) in utterances(pcm16k, &self.vad_model, vad)? {
             if let Some(text) =
                 self.decode_utterance(&pcm16k[from..to], vocabulary, hotwords.as_deref())?
             {
@@ -152,4 +96,72 @@ impl SttModel for SherpaStt {
     fn vad_model(&self) -> Option<&Path> {
         Some(&self.vad_model)
     }
+}
+
+/// The `requires`d model's Silero file. `dir` is `models/<name>/`; a
+/// `requires`d model is its sibling `models/<required>/` (§3.1).
+pub(super) fn vad_model(manifest: &Manifest, dir: &Path) -> Result<PathBuf, SttError> {
+    manifest
+        .model
+        .requires
+        .iter()
+        .filter_map(|name| Some(dir.parent()?.join(name).join(VAD_FILENAME)))
+        .find(|path| path.is_file())
+        .ok_or_else(|| SttError::NoVadModel(manifest.model.name.clone()))
+}
+
+/// The gates in front of the recognizer, shared with the MLX model: the
+/// utterances of `pcm16k` to decode, as (utterance, slice start, slice end).
+pub(super) fn utterances(
+    pcm16k: &[f32],
+    vad_model: &Path,
+    vad: Option<&VadConfig>,
+) -> Result<Vec<(Span, usize, usize)>, SttError> {
+    // Parakeet hallucinates on digital silence, so the recognizer (and
+    // the VAD) never sees it.
+    if audio::is_silent(pcm16k) {
+        return Ok(Vec::new());
+    }
+
+    // Slices partition the buffer at utterance starts, so one utterance
+    // decodes the whole buffer (`super::vad`).
+    let mut utterances: Vec<(Span, usize, usize)> = Vec::new();
+    match vad {
+        None => utterances.push((
+            Span {
+                start: 0,
+                len: pcm16k.len(),
+            },
+            0,
+            pcm16k.len(),
+        )),
+        Some(cfg) => {
+            let vad = Vad::load(vad_model, cfg)?;
+            let mut segmenter = vad.segmenter();
+            let mut spans = Vec::new();
+            // Fed and drained per read chunk, as auris's streaming loop
+            // does; the detector's queue is finite.
+            for chunk in pcm16k.chunks(READ_CHUNK_FRAMES) {
+                segmenter.accept(chunk);
+                while let Some(span) = segmenter.next_span() {
+                    spans.push(span);
+                }
+            }
+            segmenter.finish();
+            while let Some(span) = segmenter.next_span() {
+                spans.push(span);
+            }
+
+            let mut slice_start = 0;
+            for (i, span) in spans.iter().enumerate() {
+                let cut = match spans.get(i + 1) {
+                    Some(next) => next.start.max(slice_start),
+                    None => pcm16k.len(),
+                };
+                utterances.push((*span, slice_start, cut));
+                slice_start = cut;
+            }
+        }
+    }
+    Ok(utterances)
 }

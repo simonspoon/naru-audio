@@ -1,0 +1,13 @@
+# The MLX sidecar's environment (docs/design.md §5.3). `naru-audio mlx setup`
+# writes this file and uv.lock into $NARU_AUDIO_HOME/mlx/ and runs
+# `uv sync --frozen`. Regenerate the lock with `uv lock` in this directory.
+
+[project]
+name = "naru-audio-mlx"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = ["parakeet-mlx==0.5.2"]
+
+[tool.uv]
+# Only the dependencies are installed; the module sits next to the venv.
+package = false

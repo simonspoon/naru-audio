@@ -24,7 +24,7 @@ use crate::manager::{Guard, KeepAlive};
 use crate::registry::RegistryError;
 use crate::registry::manifest::{Kind, Manifest};
 use crate::stt::audio::{self, AudioError, TARGET_SAMPLE_RATE};
-use crate::stt::{Segment, VadConfig, Vocabulary};
+use crate::stt::{Segment, SttError, VadConfig, Vocabulary};
 
 /// The request body cap: the §2.2 256 MiB audio cap plus room for the other
 /// fields and the multipart framing.
@@ -165,7 +165,7 @@ pub(super) async fn transcriptions(
     })
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))?;
-    let segments = result.map_err(|e| internal(&st, &req_id, e.to_string()))?;
+    let segments = result.map_err(|e| decode_error(&st, &req_id, e))?;
     let text = join(&segments);
 
     Ok(match format {
@@ -437,18 +437,18 @@ fn sse(
                     text.push_str(&delta);
                     send(json!({"type": "transcript.text.delta", "delta": delta}));
                 })
-                .map_err(|e| e.to_string())
+                .map_err(|e| (decode_code(&e), e.to_string()))
         }))
-        .unwrap_or_else(|_| Err("the decode panicked".to_string()));
+        .unwrap_or_else(|_| Err(("internal", "the decode panicked".to_string())));
         match result {
             Ok(()) => send(json!({"type": "transcript.text.done", "text": text})),
-            Err(e) => {
+            Err((code, e)) => {
                 st.log
                     .line("error", Some(&req_id), &format!("decode_failed {e}"));
                 send(json!({"type": "error", "error": {
                     "message": e,
                     "type": "server_error",
-                    "code": "internal",
+                    "code": code,
                     "param": null,
                 }}));
             }
@@ -483,6 +483,29 @@ fn bad_request(param: &'static str, code: &'static str, message: impl Into<Strin
         param: Some(param),
         ..ApiError::new(StatusCode::BAD_REQUEST, code, message)
     }
+}
+
+/// §2.6 code for a failed decode: the backend went away mid-decode (a
+/// crashed MLX sidecar, §5.3), or anything else.
+fn decode_code(e: &SttError) -> &'static str {
+    match e {
+        SttError::BackendUnavailable { .. } => "backend_unavailable",
+        _ => "internal",
+    }
+}
+
+/// A failed decode, logged: 503 `backend_unavailable`, or a 500.
+pub(super) fn decode_error(st: &AppState, req_id: &str, e: SttError) -> ApiError {
+    if let SttError::BackendUnavailable { .. } = e {
+        st.log
+            .line("warn", Some(req_id), &format!("decode_failed {e}"));
+        return ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unavailable",
+            e.to_string(),
+        );
+    }
+    internal(st, req_id, e.to_string())
 }
 
 /// A 500, logged: the log line carries the request id (§2.6).

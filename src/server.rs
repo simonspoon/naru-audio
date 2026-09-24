@@ -93,6 +93,15 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
             Err(reason) => json!({"name": name, "available": false, "reason": reason}),
         })
         .collect();
+    // §5.3: a crashed sidecar says so, until it is back.
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    let backends = {
+        let mut backends = backends;
+        if let Some(reason) = crate::mlx::sidecar::reason(st.registry.home()) {
+            backends[1]["reason"] = json!(reason);
+        }
+        backends
+    };
     let problems: Vec<Value> = profile
         .problem()
         .map(|message| json!({"code": "rosetta", "message": message}))

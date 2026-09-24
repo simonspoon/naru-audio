@@ -7,6 +7,8 @@
 
 pub mod audio;
 pub mod engine;
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+pub(crate) mod mlx;
 pub(crate) mod sherpa;
 pub mod vad;
 pub mod vocabulary;
@@ -56,6 +58,12 @@ pub trait SttModel: Send + Sync {
     fn vad_model(&self) -> Option<&Path> {
         None
     }
+
+    /// The bytes the model holds outside the daemon's own RSS (§3.5: an
+    /// MLX model lives in the sidecar), when it reports them.
+    fn resident_bytes(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -71,6 +79,8 @@ pub enum SttError {
     NoVadModel(String),
     Engine(engine::EngineError),
     Vad(vad::VadError),
+    /// The MLX sidecar answered a request with an error (§5.3).
+    Sidecar(String),
 }
 
 impl std::fmt::Display for SttError {
@@ -89,6 +99,7 @@ impl std::fmt::Display for SttError {
             }
             SttError::Engine(e) => e.fmt(f),
             SttError::Vad(e) => e.fmt(f),
+            SttError::Sidecar(message) => write!(f, "the MLX sidecar failed: {message}"),
         }
     }
 }

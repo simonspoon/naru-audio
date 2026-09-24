@@ -26,13 +26,13 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio_tungstenite::tungstenite;
 
-use super::transcriptions::{internal, join, stt_manifest};
+use super::transcriptions::{decode_error, internal, join, stt_manifest};
 use super::{AppState, RequestId, manager_error};
 use crate::error::ApiError;
 use crate::manager::{Guard, KeepAlive};
 use crate::stt::audio::TARGET_SAMPLE_RATE;
 use crate::stt::vad::{Segmenter, Span, Vad};
-use crate::stt::{VadConfig, Vocabulary};
+use crate::stt::{SttError, VadConfig, Vocabulary};
 
 const RATE: usize = TARGET_SAMPLE_RATE as usize;
 
@@ -227,8 +227,8 @@ enum Job {
 /// Either thread to the socket task.
 enum Event {
     Send(Value),
-    /// A decode failed: `internal`, 1011.
-    Fail(String),
+    /// A decode failed: `backend_unavailable` or `internal`, 1011.
+    Fail(SttError),
     /// Every final of a `stop` has been sent.
     Done,
 }
@@ -474,7 +474,7 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
                     }
                     return Ok(Ended::Stopped);
                 }
-                Some(Event::Fail(message)) => return Err(internal(st, req_id, message).into()),
+                Some(Event::Fail(e)) => return Err(decode_error(st, req_id, e).into()),
                 // Both threads ended without `Done`: one panicked.
                 None => {
                     return Err(internal(st, req_id, "the session's workers stopped".to_string()).into());
@@ -899,7 +899,7 @@ fn decode(
                     None => continue,
                     Some(Ok(segments)) => join(&segments),
                     Some(Err(e)) => {
-                        let _ = events.send(Event::Fail(e.to_string()));
+                        let _ = events.send(Event::Fail(e));
                         return;
                     }
                 };
@@ -925,7 +925,7 @@ fn decode(
         let text = match result {
             Ok(segments) => join(&segments),
             Err(e) => {
-                let _ = events.send(Event::Fail(e.to_string()));
+                let _ = events.send(Event::Fail(e));
                 return;
             }
         };

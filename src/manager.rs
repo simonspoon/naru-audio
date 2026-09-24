@@ -119,7 +119,8 @@ pub trait Loader: Send + Sync {
     fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, SttError>;
 }
 
-/// The real loader: `backend::load_stt`, measured by the RSS delta.
+/// The real loader: `backend::load_stt`, measured by the RSS delta or by
+/// what the model reports ([`SttModel::resident_bytes`]).
 pub struct BackendLoader;
 
 /// One load at a time, so no other load's allocations land in a delta.
@@ -131,12 +132,16 @@ impl Loader for BackendLoader {
         let before = crate::profile::rss();
         let model = crate::backend::load_stt(manifest, dir)?;
         let after = crate::profile::rss();
-        Ok(LoadedModel {
-            model: Resident::Stt(Arc::from(model)),
-            measured_bytes: before
+        // An MLX model's bytes are in the sidecar, not in this delta.
+        let measured_bytes = model.resident_bytes().or_else(|| {
+            before
                 .zip(after)
                 .map(|(b, a)| a.saturating_sub(b))
-                .filter(|&d| d > 0),
+                .filter(|&d| d > 0)
+        });
+        Ok(LoadedModel {
+            model: Resident::Stt(Arc::from(model)),
+            measured_bytes,
         })
     }
 }
@@ -182,9 +187,11 @@ struct Inner {
     slots: HashMap<String, Slot>,
     /// `state/measured.json`: model name, then backend, to resident bytes.
     measured: BTreeMap<String, BTreeMap<String, u64>>,
-    /// Models unloaded or evicted so far, counted once they are dropped. A
+    /// Models unloaded or evicted so far, counted as their drop starts. A
     /// load that sees it change has an RSS delta that is not its own.
     unloads: u64,
+    /// Drops still running ([`ModelManager::dispose`]).
+    disposing: usize,
 }
 
 struct Slot {
@@ -274,6 +281,7 @@ impl ModelManager {
                 slots: HashMap::new(),
                 measured,
                 unloads: 0,
+                disposing: 0,
             }),
             measured_write: Mutex::new(()),
         }
@@ -334,17 +342,24 @@ impl ModelManager {
                 Step::Load { tx, need, evicted } => break (tx, need, evicted),
             }
         };
-        for (evicted, slot) in evicted {
-            self.dispose(&evicted, "evict", Some(slot));
-        }
-        // After the evictions are dropped: they free memory before the load.
-        let unloads = self.lock().unloads;
-        // The load runs in its own task so a caller that goes away
-        // mid-load cannot strand the `loading` slot; its guard is then
-        // dropped with the task's output.
+        // The evictions and the load run in their own task so a caller
+        // that goes away mid-load cannot strand the `loading` slot; its
+        // guard is then dropped with the task's output.
         let this = self.clone();
         let task = tokio::spawn(async move {
             let _wake_waiters = tx;
+            for (evicted, slot) in evicted {
+                if let Some(dropped) = this.dispose(&evicted, "evict", Some(slot)) {
+                    let _ = dropped.await;
+                }
+            }
+            // After the evictions are dropped: they free memory before the
+            // load. A drop still running elsewhere could free memory during
+            // it, so its delta would not be its own.
+            let unloads = {
+                let inner = this.lock();
+                (inner.disposing == 0).then_some(inner.unloads)
+            };
             let started = Instant::now();
             let loader = this.loader.clone();
             let dir = this.registry.model_dir(&manifest.model.name);
@@ -405,7 +420,7 @@ impl ModelManager {
         self: &Arc<Self>,
         name: String,
         need: u64,
-        unloads: u64,
+        unloads: Option<u64>,
         started: Instant,
         result: Result<Result<LoadedModel, SttError>, tokio::task::JoinError>,
     ) -> Result<Guard, ManagerError> {
@@ -422,7 +437,9 @@ impl ModelManager {
         };
         let mut inner = self.lock();
         // Memory freed during the load would shrink the delta: keep the estimate.
-        let measured = loaded.measured_bytes.filter(|_| inner.unloads == unloads);
+        let measured = loaded
+            .measured_bytes
+            .filter(|_| unloads == Some(inner.unloads));
         let Some(slot) = inner.slots.get_mut(&name) else {
             unreachable!("a loading slot is never removed by anyone else");
         };
@@ -534,7 +551,7 @@ impl ModelManager {
     }
 
     /// The idle timer fired: unload unless the model was used since.
-    fn expire(&self, name: &str, generation: u64) {
+    fn expire(self: &Arc<Self>, name: &str, generation: u64) {
         let mut inner = self.lock();
         if inner
             .slots
@@ -549,7 +566,7 @@ impl ModelManager {
 
     /// `keep_alive: 0` (§2.5 `POST /api/load`): unload now if idle,
     /// otherwise when the last request ends. Whether it is still loaded.
-    pub fn unload_when_idle(&self, name: &str) -> bool {
+    pub fn unload_when_idle(self: &Arc<Self>, name: &str) -> bool {
         match self.unload(name, "idle") {
             Ok(()) => false,
             Err(Busy) => {
@@ -563,7 +580,7 @@ impl ModelManager {
 
     /// Unloads an idle model; `Busy` while it has requests or is loading.
     /// A model that is not loaded is fine.
-    pub fn unload(&self, name: &str, reason: &str) -> Result<(), Busy> {
+    pub fn unload(self: &Arc<Self>, name: &str, reason: &str) -> Result<(), Busy> {
         let mut inner = self.lock();
         match inner.slots.get(name) {
             None => return Ok(()),
@@ -576,12 +593,35 @@ impl ModelManager {
         Ok(())
     }
 
-    /// Drops an unloaded or evicted model, outside the lock, then counts it.
-    fn dispose(&self, name: &str, reason: &str, slot: Option<Slot>) {
+    /// Counts an unloaded or evicted model, then drops it outside the lock.
+    /// A drop can block (an MLX model waits for its sidecar), so on the
+    /// runtime it runs on the blocking pool, and the task returned ends
+    /// once the model is gone.
+    fn dispose(
+        self: &Arc<Self>,
+        name: &str,
+        reason: &str,
+        slot: Option<Slot>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         self.log
             .info(None, &format!("unload model={name} reason={reason}"));
-        drop(slot);
-        self.lock().unloads += 1;
+        {
+            let mut inner = self.lock();
+            inner.unloads += 1;
+            inner.disposing += 1;
+        }
+        let this = self.clone();
+        let drop_slot = move || {
+            drop(slot);
+            this.lock().disposing -= 1;
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => Some(rt.spawn_blocking(drop_slot)),
+            Err(_) => {
+                drop_slot();
+                None
+            }
+        }
     }
 }
 
