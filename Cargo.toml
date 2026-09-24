@@ -6,7 +6,7 @@ license = "GPL-3.0-or-later"
 description = "Local speech-to-text and text-to-speech daemon for Naru"
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 bzip2 = "0.6"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false }

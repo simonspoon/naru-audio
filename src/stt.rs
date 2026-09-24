@@ -27,13 +27,27 @@ pub struct Segment {
 pub trait SttModel: Send + Sync {
     /// Transcribes `pcm16k`, biased towards `hotwords` when given and
     /// non-empty. `vad: None` skips the Silero gate and decodes the whole
-    /// buffer as one utterance (§2.2 `vad=false`).
+    /// buffer as one utterance (§2.2 `vad=false`). Each segment goes to
+    /// `on_segment` as soon as it is decoded (§2.2 `stream`).
+    fn decode_each(
+        &self,
+        pcm16k: &[f32],
+        hotwords: Option<&Vocabulary>,
+        vad: Option<&VadConfig>,
+        on_segment: &mut dyn FnMut(Segment),
+    ) -> Result<(), SttError>;
+
+    /// [`SttModel::decode_each`], collected.
     fn decode(
         &self,
         pcm16k: &[f32],
         hotwords: Option<&Vocabulary>,
         vad: Option<&VadConfig>,
-    ) -> Result<Vec<Segment>, SttError>;
+    ) -> Result<Vec<Segment>, SttError> {
+        let mut segments = Vec::new();
+        self.decode_each(pcm16k, hotwords, vad, &mut |s| segments.push(s))?;
+        Ok(segments)
+    }
 }
 
 #[derive(Debug)]

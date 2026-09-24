@@ -1,5 +1,7 @@
-//! HTTP surface: §2.1 guards, §2.5 `/health` and registry routes, §2.6
-//! errors, `X-Request-Id`.
+//! HTTP surface: §2.1 guards, §2.2 transcriptions, §2.5 `/health` and
+//! registry routes, §2.6 errors, `X-Request-Id`.
+
+mod transcriptions;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -9,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::header::{CONTENT_TYPE, HOST, ORIGIN};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -35,6 +37,10 @@ pub struct AppState {
     pub registry: Arc<Registry>,
 }
 
+/// The request's `X-Request-Id`, for handlers' log lines.
+#[derive(Clone)]
+struct RequestId(String);
+
 /// §2.1: a non-loopback bind needs `--allow-remote`.
 pub fn check_listen(addr: SocketAddr, allow_remote: bool) -> Result<(), String> {
     if addr.ip().is_loopback() || allow_remote {
@@ -50,6 +56,11 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/models", get(models))
+        .route(
+            "/v1/audio/transcriptions",
+            post(transcriptions::transcriptions)
+                .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
+        )
         .route("/api/pull", post(pull))
         .route("/api/models/{name}", delete(remove))
         .fallback(not_found)
@@ -249,10 +260,11 @@ async fn method_not_allowed(req: Request) -> ApiError {
 }
 
 /// Request id, Origin and Host guards, and the `request` log line.
-async fn guard(State(st): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+async fn guard(State(st): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
     let started = Instant::now();
     let req_id = request_id(&req);
     let route = req.uri().path().to_owned();
+    req.extensions_mut().insert(RequestId(req_id.clone()));
 
     let mut resp = match rejection(&st, &req) {
         Some(err) => err.into_response(),

@@ -74,12 +74,13 @@ impl SherpaStt {
 }
 
 impl SttModel for SherpaStt {
-    fn decode(
+    fn decode_each(
         &self,
         pcm16k: &[f32],
         hotwords: Option<&Vocabulary>,
         vad: Option<&VadConfig>,
-    ) -> Result<Vec<Segment>, SttError> {
+        on_segment: &mut dyn FnMut(Segment),
+    ) -> Result<(), SttError> {
         // An empty vocabulary means no vocabulary: auris never hands
         // sherpa-onnx a wholly empty hotwords string.
         let vocabulary = hotwords.filter(|v| !v.terms.is_empty());
@@ -88,7 +89,7 @@ impl SttModel for SherpaStt {
         // Parakeet hallucinates on digital silence, so the recognizer (and
         // the VAD) never sees it.
         if audio::is_silent(pcm16k) {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         // (utterance, slice start, slice end). Slices partition the buffer
@@ -134,18 +135,17 @@ impl SttModel for SherpaStt {
         }
 
         let rate = TARGET_SAMPLE_RATE as f64;
-        let mut segments = Vec::new();
         for (span, from, to) in utterances {
             if let Some(text) =
                 self.decode_utterance(&pcm16k[from..to], vocabulary, hotwords.as_deref())?
             {
-                segments.push(Segment {
+                on_segment(Segment {
                     start: span.start as f64 / rate,
                     end: (span.start + span.len) as f64 / rate,
                     text,
                 });
             }
         }
-        Ok(segments)
+        Ok(())
     }
 }

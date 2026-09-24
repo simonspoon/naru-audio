@@ -1,8 +1,8 @@
 //! WAV bytes to 16 kHz mono `f32`, ported from auris `src/audio.rs`
 //! (d8644d6), plus the `is_silent` energy gate.
 //!
-//! Accepts 16-bit PCM and 32-bit float WAV, any channel count (averaged to
-//! mono), at 1 kHz–384 kHz (resampled with rubato). Input is capped at
+//! Accepts 8/16/24/32-bit PCM and 32-bit float WAV, any channel count
+//! (averaged to mono), at 1 kHz–384 kHz (resampled with rubato). Input is capped at
 //! 256 MiB and 10 minutes.
 
 use std::io::{Cursor, ErrorKind, Read};
@@ -237,6 +237,7 @@ struct WavStream<R: Read> {
     channels: u16,
     sample_rate: u32,
     format: hound::SampleFormat,
+    bits_per_sample: u16,
     frames_read: u64,
 }
 
@@ -264,9 +265,12 @@ impl<R: Read> WavStream<R> {
         if !(MIN_SAMPLE_RATE..=MAX_SAMPLE_RATE).contains(&spec.sample_rate) {
             return Err(AudioError::UnsupportedRate(spec.sample_rate));
         }
+        // §2.2: 8/16/24/32-bit int or 32-bit float. hound reads 8-bit WAV,
+        // which is unsigned, as signed around zero.
         let format = match (spec.sample_format, spec.bits_per_sample) {
-            (hound::SampleFormat::Int, 16) => hound::SampleFormat::Int,
-            (hound::SampleFormat::Float, 32) => hound::SampleFormat::Float,
+            (hound::SampleFormat::Int, 8 | 16 | 24 | 32) | (hound::SampleFormat::Float, 32) => {
+                spec.sample_format
+            }
             _ => return Err(AudioError::Wav(hound::Error::Unsupported)),
         };
 
@@ -275,6 +279,7 @@ impl<R: Read> WavStream<R> {
             channels: spec.channels,
             sample_rate: spec.sample_rate,
             format,
+            bits_per_sample: spec.bits_per_sample,
             frames_read: 0,
         })
     }
@@ -283,12 +288,15 @@ impl<R: Read> WavStream<R> {
     fn next_chunk(&mut self, frames: usize) -> Result<Vec<f32>, AudioError> {
         let wanted = frames * self.channels as usize;
         let interleaved: Vec<f32> = match self.format {
-            hound::SampleFormat::Int => self
-                .wav
-                .samples::<i16>()
-                .take(wanted)
-                .map(|s| s.map(|v| v as f32 / 32768.0).map_err(map_hound_error))
-                .collect::<Result<_, _>>()?,
+            hound::SampleFormat::Int => {
+                // Full scale is 2^(bits-1): 32768.0 at 16 bits.
+                let scale = (1u64 << (self.bits_per_sample - 1)) as f32;
+                self.wav
+                    .samples::<i32>()
+                    .take(wanted)
+                    .map(|s| s.map(|v| v as f32 / scale).map_err(map_hound_error))
+                    .collect::<Result<_, _>>()?
+            }
             hound::SampleFormat::Float => self
                 .wav
                 .samples::<f32>()
@@ -410,6 +418,49 @@ mod tests {
         assert!((out[1] - 1000.0 / 32768.0).abs() < 1e-6);
         assert!((out[3] - 32767.0 / 32768.0).abs() < 1e-6);
         assert!((out[4] - (-1.0)).abs() < 1e-6);
+    }
+
+    fn write_wav_int(bits_per_sample: u16, samples: &[i32]) -> Vec<u8> {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
+            for &s in samples {
+                writer.write_sample(s).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    /// Minimum, a negative half, zero, a positive half and maximum at each
+    /// int depth §2.2 promises, scaled to [-1, 1).
+    #[test]
+    fn every_int_depth_scales_to_unit_range() {
+        for bits in [8u16, 16, 24, 32] {
+            let full = 1i64 << (bits - 1);
+            let samples = [-full, -full / 2, 0, full / 2, full - 1].map(|v| v as i32);
+            let out = decode(Cursor::new(write_wav_int(bits, &samples))).unwrap();
+            let expected = [-1.0, -0.5, 0.0, 0.5, (full - 1) as f32 / full as f32];
+            assert_eq!(out.len(), expected.len(), "{bits}-bit");
+            for (a, b) in out.iter().zip(expected) {
+                assert!((a - b).abs() < 1e-6, "{bits}-bit: {a} != {b}");
+            }
+        }
+    }
+
+    /// 8-bit WAV is unsigned: the byte 0x80 is zero, 0x00 is -1.0.
+    #[test]
+    fn eight_bit_is_unsigned_on_disk() {
+        let wav = write_wav_int(8, &[-128, 0, 127]);
+        assert_eq!(&wav[wav.len() - 3..], &[0x00, 0x80, 0xFF]);
+        let out = decode(Cursor::new(wav)).unwrap();
+        assert_eq!(out, vec![-1.0, 0.0, 127.0 / 128.0]);
     }
 
     #[test]
