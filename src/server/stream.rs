@@ -1,17 +1,19 @@
 //! §2.4 `GET /v1/audio/transcriptions/stream`: speech-to-text over a
-//! WebSocket, finals only.
+//! WebSocket: finals, and partials when the `start` asks for them.
 //!
 //! A session runs in three stages, so a decode never stalls the socket or
 //! the VAD: the socket task checks frames and writes events; a VAD thread
 //! segments the audio with Silero (authoritative, §2.4 "VAD placement");
 //! a decode thread decodes each closed segment in order through the model's
 //! `decode`, as `POST /v1/audio/transcriptions` does, so the energy and
-//! Silero gates run on every segment and a gated one is dropped.
+//! Silero gates run on every segment and a gated one is dropped. A partial
+//! is a decode of the open segment's window so far, queued to the same
+//! thread, so it always comes before its segment's final.
 
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
@@ -64,11 +66,19 @@ const CUT_SEARCH: usize = RATE;
 /// The quietest-point search's window: 20 ms.
 const CUT_WINDOW: usize = RATE / 50;
 
-/// The first message: §2.4 "Handshake". `partials` is not implemented
-/// and, like any other unknown field, ignored.
+/// §2.4 "Optional partials": the open segment is re-decoded after every
+/// 700 ms of its audio...
+const PARTIAL_EVERY: usize = 7 * RATE / 10;
+
+/// ...until its window is longer than this.
+const PARTIAL_MAX: usize = 8 * RATE;
+
+/// The first message: §2.4 "Handshake". Unknown fields are ignored.
 #[derive(Deserialize)]
 struct Start {
     model: Option<String>,
+    #[serde(default)]
+    partials: bool,
     #[serde(default = "s16le")]
     format: String,
     sample_rate: u64,
@@ -143,6 +153,7 @@ struct Config {
     pad: usize,
     hotwords: Option<Arc<Vocabulary>>,
     keep_alive: Option<KeepAlive>,
+    partials: bool,
 }
 
 /// Why a session ends other than normally: sent as an `error` event, then
@@ -201,6 +212,12 @@ enum Job {
         /// The speech, in seconds since `start`; the padding is not in it.
         start: f64,
         end: f64,
+        hotwords: Option<Arc<Vocabulary>>,
+    },
+    /// The open segment's window so far, for a `partial`.
+    Partial {
+        pcm: Vec<f32>,
+        start: f64,
         hotwords: Option<Arc<Vocabulary>>,
     },
     /// After the last segment of a `stop`.
@@ -361,19 +378,32 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
     if send(socket, ready).await.is_err() {
         return Ok(Ended::Gone);
     }
+    // An x86_64 build under Rosetta is x86_64 too (§3.3).
+    if cfg.partials && st.models.settings().profile.arch == "x86_64" {
+        let warning = json!({
+            "type": "warning",
+            "code": "partials_expensive",
+            "message": "partials re-decode the open segment every 700 ms; on x86_64 that costs up to about 0.5 s of CPU each and competes with TTS",
+        });
+        if send(socket, warning).await.is_err() {
+            return Ok(Ended::Gone);
+        }
+    }
 
     let backlog = Arc::new(AtomicUsize::new(0));
+    // A partial is queued or decoding.
+    let busy = Arc::new(AtomicBool::new(false));
     let (input_tx, input_rx) = unbounded_channel();
     let (job_tx, job_rx) = unbounded_channel();
     let (event_tx, mut events) = unbounded_channel();
     {
-        let (events, backlog) = (event_tx.clone(), backlog.clone());
-        let segments = Segments::new(&cfg, job_tx, events, backlog);
+        let (events, backlog, busy) = (event_tx.clone(), backlog.clone(), busy.clone());
+        let segments = Segments::new(&cfg, job_tx, events, backlog, busy);
         tokio::task::spawn_blocking(move || segment(vad, segments, input_rx));
     }
     {
         let (vad, backlog) = (cfg.vad.clone(), backlog.clone());
-        tokio::task::spawn_blocking(move || decode(model, vad, job_rx, event_tx, backlog));
+        tokio::task::spawn_blocking(move || decode(model, vad, job_rx, event_tx, backlog, busy));
     }
 
     let mut stopping = false;
@@ -608,6 +638,7 @@ fn validate(start: Start, default_model: &str) -> Result<Config, Fail> {
         pad: (pad * RATE as f32) as usize,
         hotwords,
         keep_alive,
+        partials: start.partials,
     })
 }
 
@@ -655,6 +686,10 @@ struct Segments {
     max_segment: usize,
     pad: usize,
     hotwords: Option<Arc<Vocabulary>>,
+    partials: bool,
+    /// Where the last partial tick was, queued or skipped.
+    partial_at: usize,
+    busy: Arc<AtomicBool>,
     jobs: UnboundedSender<Job>,
     events: UnboundedSender<Event>,
     backlog: Arc<AtomicUsize>,
@@ -666,6 +701,7 @@ impl Segments {
         jobs: UnboundedSender<Job>,
         events: UnboundedSender<Event>,
         backlog: Arc<AtomicUsize>,
+        busy: Arc<AtomicBool>,
     ) -> Self {
         Segments {
             ring: VecDeque::new(),
@@ -677,6 +713,9 @@ impl Segments {
             max_segment: cfg.max_segment,
             pad: cfg.pad,
             hotwords: cfg.hotwords.clone(),
+            partials: cfg.partials,
+            partial_at: 0,
+            busy,
             jobs,
             events,
             backlog,
@@ -706,6 +745,7 @@ impl Segments {
                     self.cut(cut);
                 }
             }
+            self.tick();
         }
         // Keep `pad` before the earliest start a span can still report:
         // the open one's, or one detected from the next window on.
@@ -722,6 +762,8 @@ impl Segments {
         let end = span.start + span.len;
         if self.open.take().is_some() {
             self.speech(false, end);
+            // The next segment's partials count from its own start.
+            self.partial_at = 0;
         }
         let start = span.start.max(self.floor);
         // A remainder shorter than `min_speech` after a cut is not speech
@@ -761,6 +803,37 @@ impl Segments {
         });
     }
 
+    /// A partial of the open segment every [`PARTIAL_EVERY`] of its audio
+    /// while its decoded window, `pad` included, is at most
+    /// [`PARTIAL_MAX`]; a tick while the last one is still queued or
+    /// decoding is skipped. Not counted in the backlog: at most one is ever
+    /// waiting.
+    fn tick(&mut self) {
+        let Some(open) = self.open.filter(|_| self.partials) else {
+            return;
+        };
+        let start = open.max(self.floor);
+        let from = start
+            .saturating_sub(self.pad)
+            .max(self.floor)
+            .max(self.ring_start);
+        if self.received < self.partial_at.max(start) + PARTIAL_EVERY
+            || self.received - from > PARTIAL_MAX
+        {
+            return;
+        }
+        self.partial_at = self.received;
+        if self.busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let pcm = self.slice(from, self.received).to_vec();
+        let _ = self.jobs.send(Job::Partial {
+            pcm,
+            start: start as f64 / RATE as f64,
+            hotwords: self.hotwords.clone(),
+        });
+    }
+
     fn slice(&mut self, from: usize, to: usize) -> &[f32] {
         &self.ring.make_contiguous()[from - self.ring_start..to - self.ring_start]
     }
@@ -796,6 +869,7 @@ fn decode(
     mut jobs: UnboundedReceiver<Job>,
     events: UnboundedSender<Event>,
     backlog: Arc<AtomicUsize>,
+    busy: Arc<AtomicBool>,
 ) {
     let mut index = 0;
     while let Some(job) = jobs.blocking_recv() {
@@ -810,6 +884,36 @@ fn decode(
                 end,
                 hotwords,
             } => (pcm, start, end, hotwords),
+            Job::Partial {
+                pcm,
+                start,
+                hotwords,
+            } => {
+                // Anything queued after it means its segment has closed:
+                // the final is next, and replaces it.
+                let result = jobs
+                    .is_empty()
+                    .then(|| model.stt().decode(&pcm, hotwords.as_deref(), Some(&vad)));
+                busy.store(false, Ordering::SeqCst);
+                let text = match result {
+                    None => continue,
+                    Some(Ok(segments)) => join(&segments),
+                    Some(Err(e)) => {
+                        let _ = events.send(Event::Fail(e.to_string()));
+                        return;
+                    }
+                };
+                if !text.is_empty() {
+                    // `index` is the one its segment's final will take.
+                    let _ = events.send(Event::Send(json!({
+                        "type": "partial",
+                        "segment": index,
+                        "start": start,
+                        "text": text,
+                    })));
+                }
+                continue;
+            }
             Job::Stop => {
                 let _ = events.send(Event::Done);
                 return;
@@ -865,5 +969,114 @@ mod tests {
             .collect();
         assert_eq!(Format::S16le.samples(&s16), [0.0, 0.5, -1.0]);
         assert_eq!(Format::F32le.samples(&f32), [0.0, 0.5, -1.0]);
+    }
+
+    /// Segments with a segment open from `pad`, so the whole pad is in
+    /// its window, and its job queue.
+    fn open_segment(partials: bool) -> (Segments, UnboundedReceiver<Job>, Arc<AtomicBool>) {
+        let start: Start =
+            serde_json::from_value(json!({"sample_rate": 16000, "partials": partials})).unwrap();
+        let Ok(cfg) = validate(start, "m") else {
+            panic!("a valid start")
+        };
+        let (jobs, rx) = unbounded_channel();
+        let busy = Arc::new(AtomicBool::new(false));
+        let mut segments = Segments::new(
+            &cfg,
+            jobs,
+            unbounded_channel().0,
+            Arc::new(AtomicUsize::new(0)),
+            busy.clone(),
+        );
+        segments.open = Some(cfg.pad);
+        (segments, rx, busy)
+    }
+
+    /// Feeds `windows` VAD windows of the open segment, as `push` does;
+    /// the lengths of the partials queued. `decoded` clears `busy` after
+    /// each, as the decode thread does.
+    fn feed(
+        segments: &mut Segments,
+        jobs: &mut UnboundedReceiver<Job>,
+        busy: &AtomicBool,
+        windows: usize,
+        decoded: bool,
+    ) -> Vec<usize> {
+        let mut lens = Vec::new();
+        for _ in 0..windows {
+            segments.ring.extend([0.0; VAD_WINDOW]);
+            segments.received += VAD_WINDOW;
+            segments.tick();
+            while let Ok(job) = jobs.try_recv() {
+                let Job::Partial { pcm, .. } = job else {
+                    panic!("only partials are queued")
+                };
+                lens.push(pcm.len());
+                if decoded {
+                    busy.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+        lens
+    }
+
+    fn partials_over_10_s(partials: bool, decoded: bool) -> Vec<usize> {
+        let (mut segments, mut jobs, busy) = open_segment(partials);
+        feed(
+            &mut segments,
+            &mut jobs,
+            &busy,
+            10 * RATE / VAD_WINDOW,
+            decoded,
+        )
+    }
+
+    /// The window starts `pad` before the speech, and it is the window
+    /// that stops at 8 s.
+    #[test]
+    fn partials_tick_every_700_ms_until_8_s() {
+        let lens = partials_over_10_s(true, true);
+        assert_eq!(lens.len(), 10, "{lens:?}");
+        let mut last = 0;
+        for len in lens {
+            assert!(len >= last + PARTIAL_EVERY, "{len} after {last}");
+            assert!(len <= PARTIAL_MAX, "{len}");
+            last = len;
+        }
+    }
+
+    #[test]
+    fn a_tick_while_a_partial_is_busy_is_skipped() {
+        // The first window at or past 700 ms of speech, after the pad.
+        assert_eq!(partials_over_10_s(true, false), [32 * VAD_WINDOW]);
+    }
+
+    /// A segment that opens before the last one's final tick still gets
+    /// its first partial 700 ms after its own start.
+    #[test]
+    fn a_new_segment_ticks_from_its_own_start() {
+        let (mut segments, mut jobs, busy) = open_segment(true);
+        let pad = segments.pad;
+        // One tick, at 16 384.
+        assert_eq!(
+            feed(&mut segments, &mut jobs, &busy, 32, true),
+            [32 * VAD_WINDOW]
+        );
+        // Silero closes the span at 12 800, before that tick.
+        segments.close(Span {
+            start: pad,
+            len: 8000,
+        });
+        assert!(matches!(jobs.try_recv(), Ok(Job::Decode { .. })));
+        segments.open = Some(13_000);
+        // 13 000 + 700 ms is first reached at 24 576, not 700 ms after
+        // the old tick (27 648); the window starts at the floor, 12 800.
+        let lens = feed(&mut segments, &mut jobs, &busy, 24, true);
+        assert_eq!(lens.first(), Some(&(48 * VAD_WINDOW - 12_800)), "{lens:?}");
+    }
+
+    #[test]
+    fn partials_off_queue_nothing() {
+        assert!(partials_over_10_s(false, true).is_empty());
     }
 }

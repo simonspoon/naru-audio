@@ -93,6 +93,9 @@ enum Command {
         /// Times faster than real time; 0 sends as fast as possible.
         #[arg(long, default_value_t = 1.0)]
         speed: f64,
+        /// Ask for `partial` events.
+        #[arg(long)]
+        partials: bool,
     },
 }
 
@@ -124,7 +127,18 @@ async fn main() -> ExitCode {
             model,
             frame_ms,
             speed,
-        } => return stream(&daemon_url(), &file, model.as_deref(), frame_ms, speed).await,
+            partials,
+        } => {
+            return stream(
+                &daemon_url(),
+                &file,
+                model.as_deref(),
+                frame_ms,
+                speed,
+                partials,
+            )
+            .await;
+        }
         // §3.7: these work without a daemon, directly on $NARU_AUDIO_HOME.
         command => return registry_command(command),
     };
@@ -590,6 +604,7 @@ async fn stream(
     model: Option<&str>,
     frame_ms: u64,
     speed: f64,
+    partials: bool,
 ) -> ExitCode {
     if !(speed.is_finite() && speed >= 0.0) {
         eprintln!("naru-audio: --speed must be a non-negative number, got {speed}");
@@ -629,7 +644,7 @@ async fn stream(
     let (mut tx, mut rx) = socket.split();
     let start = serde_json::json!({
         "type": "start", "model": model.unwrap_or("default"), "format": "s16le",
-        "sample_rate": audio::TARGET_SAMPLE_RATE,
+        "sample_rate": audio::TARGET_SAMPLE_RATE, "partials": partials,
     });
     if let Err(e) = tx.send(WsMessage::text(start.to_string())).await {
         eprintln!("naru-audio: {ws_url}: {e}");

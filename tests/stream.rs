@@ -9,15 +9,19 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use naru_audio::log::Logger;
-use naru_audio::manager::{BackendLoader, KeepAlive, ModelManager, Settings};
+use naru_audio::manager::{
+    BackendLoader, KeepAlive, LoadedModel, Loader, ModelManager, Resident, Settings,
+};
 use naru_audio::profile::Profile;
+use naru_audio::registry::manifest::Manifest;
 use naru_audio::registry::{self, Registry};
 use naru_audio::server::{AppState, router};
-use naru_audio::stt::audio;
+use naru_audio::stt::{Segment, SttError, SttModel, VadConfig, Vocabulary, audio};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -75,19 +79,18 @@ fn model_home() -> Option<tempfile::TempDir> {
 
 /// The daemon on an ephemeral port, on the test's runtime; its address.
 async fn serve(home: &Path) -> String {
+    serve_with(home, Profile::detect().unwrap(), Arc::new(BackendLoader)).await
+}
+
+async fn serve_with(home: &Path, profile: Profile, loader: Arc<dyn Loader>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let log = Arc::new(Logger::stderr());
     let registry = Arc::new(Registry::open(home).unwrap());
-    let mut settings = Settings::from_env(Profile::detect().unwrap()).unwrap();
+    let mut settings = Settings::from_env(profile).unwrap();
     settings.stt_default = MODEL.to_string();
     settings.keep_alive = KeepAlive::For(Duration::from_secs(300));
-    let models = ModelManager::new(
-        registry.clone(),
-        log.clone(),
-        settings,
-        Arc::new(BackendLoader),
-    );
+    let models = ModelManager::new(registry.clone(), log.clone(), settings, loader);
     let app = router(Arc::new(AppState {
         port,
         allow_remote: false,
@@ -491,6 +494,152 @@ async fn max_segment_cuts_long_speech() {
     assert!(finals.len() >= 2, "{events:?}");
     for (start, end) in &finals {
         assert!(end - start <= 1.0 + 1e-9, "{finals:?}");
+    }
+}
+
+/// The real model, counting its decodes.
+struct CountingModel {
+    inner: Arc<dyn SttModel>,
+    decodes: Arc<AtomicUsize>,
+}
+
+impl SttModel for CountingModel {
+    fn decode_each(
+        &self,
+        pcm16k: &[f32],
+        hotwords: Option<&Vocabulary>,
+        vad: Option<&VadConfig>,
+        on_segment: &mut dyn FnMut(Segment),
+    ) -> Result<(), SttError> {
+        self.decodes.fetch_add(1, Ordering::SeqCst);
+        self.inner.decode_each(pcm16k, hotwords, vad, on_segment)
+    }
+
+    fn vad_model(&self) -> Option<&Path> {
+        self.inner.vad_model()
+    }
+}
+
+struct CountingLoader {
+    decodes: Arc<AtomicUsize>,
+}
+
+impl Loader for CountingLoader {
+    fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, SttError> {
+        let loaded = BackendLoader.load(manifest, dir)?;
+        let Resident::Stt(inner) = loaded.model;
+        Ok(LoadedModel {
+            model: Resident::Stt(Arc::new(CountingModel {
+                inner,
+                decodes: self.decodes.clone(),
+            })),
+            measured_bytes: loaded.measured_bytes,
+        })
+    }
+}
+
+/// The daemon with a [`CountingModel`]; its address and decode count.
+async fn serve_counting(home: &Path) -> (String, Arc<AtomicUsize>) {
+    let decodes = Arc::new(AtomicUsize::new(0));
+    let loader = Arc::new(CountingLoader {
+        decodes: decodes.clone(),
+    });
+    let addr = serve_with(home, Profile::detect().unwrap(), loader).await;
+    (addr, decodes)
+}
+
+/// Without `partials` the model decodes each segment once, and no more.
+#[tokio::test(flavor = "multi_thread")]
+async fn partials_off_run_no_extra_decode() {
+    let Some(home) = model_home() else { return };
+    let (addr, decodes) = serve_counting(home.path()).await;
+    let mut ws = ready(&addr, json!({})).await;
+    send_audio(&mut ws, &four_plains()).await;
+    ws.send(Message::text(r#"{"type":"stop"}"#)).await.unwrap();
+    let (events, close) = until_close(&mut ws).await;
+    assert_eq!(close, Some(1000), "{events:?}");
+    assert!(!events.iter().any(|e| e["type"] == "partial"), "{events:?}");
+    let finals = events.iter().filter(|e| e["type"] == "final").count();
+    assert_eq!(finals, 4, "{events:?}");
+    assert_eq!(decodes.load(Ordering::SeqCst), finals);
+}
+
+/// Paced at real time, `partials` gives each segment at least one partial,
+/// every one of them before that segment's final.
+#[tokio::test(flavor = "multi_thread")]
+async fn partials_come_before_their_final() {
+    let Some(home) = model_home() else { return };
+    let (addr, decodes) = serve_counting(home.path()).await;
+    let mut ws = ready(&addr, json!({"partials": true})).await;
+    let mut pcm = samples("plain.wav");
+    pcm.extend(vec![0.0f32; 16_000]);
+    pcm.extend(samples("plain.wav"));
+    pcm.extend(vec![0.0f32; 16_000]);
+    for frame in pcm.chunks(640) {
+        ws.send(Message::binary(s16le(frame))).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    ws.send(Message::text(r#"{"type":"stop"}"#)).await.unwrap();
+    let (events, close) = until_close(&mut ws).await;
+    assert_eq!(close, Some(1000), "{events:?}");
+    eprintln!("partials: {events:?}");
+    let finals: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e["type"] == "final")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(finals.len(), 2, "{events:?}");
+    let mut partials = 0;
+    for (segment, &at) in finals.iter().enumerate() {
+        let before = events[..at]
+            .iter()
+            .filter(|e| e["type"] == "partial" && e["segment"] == segment)
+            .count();
+        assert!(before >= 1, "no partial for segment {segment}: {events:?}");
+        partials += before;
+        assert!(
+            !events[at..]
+                .iter()
+                .any(|e| e["type"] == "partial" && e["segment"] == segment),
+            "a partial after final {segment}: {events:?}"
+        );
+    }
+    for e in events.iter().filter(|e| e["type"] == "partial") {
+        assert!(
+            e["start"].is_f64() && e["text"].as_str().is_some_and(|t| !t.is_empty()),
+            "{e}"
+        );
+    }
+    assert!(decodes.load(Ordering::SeqCst) >= finals.len() + partials);
+}
+
+/// `partials` on an x86_64 build gets a `warning` right after `ready`; on
+/// arm64, or without `partials`, nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn partials_on_x86_64_warn() {
+    let Some(home) = model_home() else { return };
+    let ram = 64 * 1024 * 1024 * 1024;
+    for (arch, partials, warned) in [
+        ("x86_64", true, true),
+        ("x86_64", false, false),
+        ("aarch64", true, false),
+    ] {
+        let profile = Profile::new(ram, arch, false);
+        let addr = serve_with(home.path(), profile, Arc::new(BackendLoader)).await;
+        let mut ws = ready(&addr, json!({"partials": partials})).await;
+        ws.send(Message::text(r#"{"type":"stop"}"#)).await.unwrap();
+        let (events, close) = until_close(&mut ws).await;
+        assert_eq!(close, Some(1000), "{events:?}");
+        assert_eq!(events.last().unwrap()["type"], "done");
+        if warned {
+            assert_eq!(events.len(), 2, "{arch}: {events:?}");
+            assert_eq!(events[0]["type"], "warning", "{events:?}");
+            assert_eq!(events[0]["code"], "partials_expensive", "{events:?}");
+            assert!(events[0]["message"].as_str().is_some_and(|m| !m.is_empty()));
+        } else {
+            assert_eq!(events.len(), 1, "{arch} partials={partials}: {events:?}");
+        }
     }
 }
 
