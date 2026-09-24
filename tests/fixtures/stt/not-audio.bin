@@ -1,0 +1,5 @@
+This is not an audio file. It is a plain-text fixture used to exercise
+auris's "input is not a wav stream" error path. Repeated to pad the file
+out past a trivially small size.
+This is not an audio file. It is a plain-text fixture used to exercise
+auris's "input is not a wav stream" error path.

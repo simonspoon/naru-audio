@@ -1,0 +1,6 @@
+mesa :3.0
+auris :3.0
+khora :6.5
+qorvex :5.0
+helios :3.0
+kokoro :3.0
