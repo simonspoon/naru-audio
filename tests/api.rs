@@ -111,7 +111,23 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     assert_eq!(body["object"], "list");
     let data = body["data"].as_array().unwrap();
     let ids: Vec<&str> = data.iter().map(|m| m["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["odd", "stt", "vad"]);
+    // The built-in catalog is listed too; the checks below are about the rest.
+    assert_eq!(
+        ids,
+        [
+            "odd",
+            "parakeet-tdt-0.6b-v2-int8",
+            "silero-vad",
+            "stt",
+            "vad"
+        ]
+    );
+    let data: Vec<&Value> = data
+        .iter()
+        .filter(|m| {
+            !["parakeet-tdt-0.6b-v2-int8", "silero-vad"].contains(&m["id"].as_str().unwrap())
+        })
+        .collect();
 
     let fields = [
         "created",
@@ -127,7 +143,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         "x_size_bytes",
         "x_unavailable_reason",
     ];
-    for m in data {
+    for m in &data {
         let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, fields, "{m}");
         assert_eq!(m["object"], "model");
@@ -287,7 +303,7 @@ async fn unreadable_manifest_json_is_skipped() {
         .iter()
         .map(|m| m["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["vad"]);
+    assert_eq!(ids, ["parakeet-tdt-0.6b-v2-int8", "silero-vad", "vad"]);
 
     // The unreadable stt no longer blocks removing what it requires.
     assert_eq!(delete(dir.path(), "vad").await.0, StatusCode::NO_CONTENT);

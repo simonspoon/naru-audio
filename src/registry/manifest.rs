@@ -9,8 +9,16 @@ use serde::Deserialize;
 use super::RegistryError;
 
 /// Built-in manifests, `(file name, contents)`, compiled in from `catalog/`.
-/// Empty until task 4 pins the STT and VAD entries.
-const BUILTIN: &[(&str, &str)] = &[];
+const BUILTIN: &[(&str, &str)] = &[
+    (
+        "parakeet-tdt-0.6b-v2-int8.toml",
+        include_str!("../../catalog/parakeet-tdt-0.6b-v2-int8.toml"),
+    ),
+    (
+        "silero-vad.toml",
+        include_str!("../../catalog/silero-vad.toml"),
+    ),
+];
 
 /// Derived files the registry knows how to generate (§3.2 `derive`).
 pub const BPE_VOCAB: &str = "bpe.vocab";
@@ -269,5 +277,40 @@ impl Catalog {
         }
         cat.models.extend(user);
         Ok(cat)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_catalog_pins_parakeet_and_its_vad() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        assert_eq!(
+            cat.models.keys().collect::<Vec<_>>(),
+            ["parakeet-tdt-0.6b-v2-int8", "silero-vad"]
+        );
+        for m in cat.models.values() {
+            assert!(!m.files.is_empty(), "{}", m.model.name);
+            for f in &m.files {
+                assert!(f.size.is_some_and(|s| s > 0), "{}", f.path);
+                assert!(f.url.as_deref().is_some_and(|u| u.starts_with("https://")));
+            }
+            for r in &m.model.requires {
+                assert!(
+                    cat.models.contains_key(r),
+                    "{} requires unknown {r}",
+                    m.model.name
+                );
+            }
+        }
+
+        let stt = &cat.models["parakeet-tdt-0.6b-v2-int8"];
+        assert_eq!(stt.model.kind, Kind::Stt);
+        assert_eq!(stt.model.requires, ["silero-vad"]);
+        assert_eq!(stt.derive(), [BPE_VOCAB]);
+        assert_eq!(stt.files.len(), 4);
+        assert_eq!(cat.models["silero-vad"].model.kind, Kind::Vad);
     }
 }

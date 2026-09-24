@@ -1,0 +1,40 @@
+# Sizes and hashes copied from auris/src/model.rs:36, 46–67 (§3.2).
+
+[model]
+name        = "parakeet-tdt-0.6b-v2-int8"
+kind        = "stt"
+backend     = "sherpa-onnx"
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+languages   = ["en"]
+license     = "CC-BY-4.0"
+resident_bytes = 1_600_000_000           # estimate; state/measured.json corrects it
+requires    = ["silero-vad"]
+
+[backend.sherpa-onnx]
+model_type = "nemo_transducer"
+decoding   = "modified_beam_search"
+derive     = ["bpe.vocab"]               # generated from tokens.txt after verify
+
+[[file]]
+path   = "encoder.int8.onnx"
+url    = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/encoder.int8.onnx"
+sha256 = "a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab"
+size   = 652_184_296
+
+[[file]]
+path   = "decoder.int8.onnx"
+url    = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/decoder.int8.onnx"
+sha256 = "b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e"
+size   = 7_257_753
+
+[[file]]
+path   = "joiner.int8.onnx"
+url    = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/joiner.int8.onnx"
+sha256 = "7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2"
+size   = 1_739_080
+
+[[file]]
+path   = "tokens.txt"
+url    = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/1ab9323565ddb038682214b292f588070a538ce2/tokens.txt"
+sha256 = "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"
+size   = 9_384
