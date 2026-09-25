@@ -11,6 +11,10 @@ use super::RegistryError;
 /// Built-in manifests, `(file name, contents)`, compiled in from `catalog/`.
 const BUILTIN: &[(&str, &str)] = &[
     (
+        "kokoro-v1.0.toml",
+        include_str!("../../catalog/kokoro-v1.0.toml"),
+    ),
+    (
         "parakeet-tdt-0.6b-v2-int8.toml",
         include_str!("../../catalog/parakeet-tdt-0.6b-v2-int8.toml"),
     ),
@@ -300,6 +304,7 @@ mod tests {
         assert_eq!(
             cat.models.keys().collect::<Vec<_>>(),
             [
+                "kokoro-v1.0",
                 "parakeet-tdt-0.6b-v2-int8",
                 "parakeet-tdt-0.6b-v2-mlx",
                 "silero-vad"
@@ -309,7 +314,10 @@ mod tests {
             assert!(!m.files.is_empty(), "{}", m.model.name);
             for f in &m.files {
                 assert!(f.size.is_some_and(|s| s > 0), "{}", f.path);
-                assert!(f.url.as_deref().is_some_and(|u| u.starts_with("https://")));
+                match &f.url {
+                    Some(u) => assert!(u.starts_with("https://"), "{u}"),
+                    None => assert!(!m.archives.is_empty(), "{}", f.path),
+                }
             }
             for r in &m.model.requires {
                 assert!(
@@ -331,5 +339,53 @@ mod tests {
         assert_eq!(mlx.model.requires, ["silero-vad"]);
         assert_eq!(mlx.files.len(), 2);
         assert_eq!(cat.models["silero-vad"].model.kind, Kind::Vad);
+    }
+
+    #[test]
+    fn builtin_kokoro_pins_54_voices_with_af_heart_default() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["kokoro-v1.0"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        for a in &m.archives {
+            assert!(a.url.starts_with("https://"), "{}", a.url);
+            assert!(a.size.is_some_and(|s| s > 0), "{}", a.url);
+        }
+        assert_eq!(
+            m.raw["backend"]["sherpa-onnx"]["lang"].as_str(),
+            Some("en-us")
+        );
+        for p in ["model.onnx", "voices.bin", "tokens.txt"] {
+            assert!(m.files.iter().any(|f| f.path == p), "{p}");
+        }
+        assert!(
+            m.files
+                .iter()
+                .any(|f| f.path.starts_with("espeak-ng-data/"))
+        );
+
+        let voices = m.raw["voice"].as_array().unwrap();
+        let ids: BTreeSet<&str> = voices.iter().map(|v| v["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), 54);
+        let mut sids: Vec<i64> = voices
+            .iter()
+            .map(|v| v["sid"].as_integer().unwrap())
+            .collect();
+        sids.sort();
+        assert_eq!(sids, (0..54).collect::<Vec<_>>());
+        let defaults: Vec<&str> = voices
+            .iter()
+            .filter(|v| v.get("default").and_then(|d| d.as_bool()) == Some(true))
+            .map(|v| v["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(defaults, ["af_heart"]);
+        // The model's speaker2id order, not alphabetical: em_santa is last.
+        let sid = |id: &str| {
+            voices
+                .iter()
+                .find(|v| v["id"].as_str() == Some(id))
+                .and_then(|v| v["sid"].as_integer())
+        };
+        assert_eq!(sid("af_heart"), Some(3));
+        assert_eq!(sid("em_santa"), Some(53));
     }
 }

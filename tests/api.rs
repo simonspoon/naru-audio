@@ -134,6 +134,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     assert_eq!(
         ids,
         [
+            "kokoro-v1.0",
             "odd",
             "parakeet-tdt-0.6b-v2-int8",
             "silero-vad",
@@ -144,7 +145,13 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     let data: Vec<&Value> = data
         .iter()
         .filter(|m| {
-            !["parakeet-tdt-0.6b-v2-int8", MLX, "silero-vad"].contains(&m["id"].as_str().unwrap())
+            ![
+                "kokoro-v1.0",
+                "parakeet-tdt-0.6b-v2-int8",
+                MLX,
+                "silero-vad",
+            ]
+            .contains(&m["id"].as_str().unwrap())
         })
         .collect();
 
@@ -323,7 +330,15 @@ async fn unreadable_manifest_json_is_skipped() {
         .map(|m| m["id"].as_str().unwrap())
         .filter(|&id| id != MLX)
         .collect();
-    assert_eq!(ids, ["parakeet-tdt-0.6b-v2-int8", "silero-vad", "vad"]);
+    assert_eq!(
+        ids,
+        [
+            "kokoro-v1.0",
+            "parakeet-tdt-0.6b-v2-int8",
+            "silero-vad",
+            "vad"
+        ]
+    );
 
     // The unreadable stt no longer blocks removing what it requires.
     assert_eq!(delete(dir.path(), "vad").await.0, StatusCode::NO_CONTENT);
