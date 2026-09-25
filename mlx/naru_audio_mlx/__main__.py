@@ -7,6 +7,7 @@ needs it."""
 
 import argparse
 import gc
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import mlx.core as mx
@@ -89,15 +90,54 @@ def synth(model, header):
     # voice.
     if header.get("instruct"):
         kwargs["instruct"] = header["instruct"]
-    for result in model.generate(
-        text=header["text"],
-        voice=header.get("voice"),
-        speed=header.get("speed", 1.0),
-        stream=True,
-        streaming_interval=STREAMING_INTERVAL,
-        **kwargs,
-    ):
-        yield np.asarray(result.audio, dtype="<f4").tobytes()
+    cloned = "ref_audio" in kwargs and "ref_text" in kwargs
+    with primed(model) if cloned else nullcontext():
+        for result in model.generate(
+            text=header["text"],
+            voice=header.get("voice"),
+            speed=header.get("speed", 1.0),
+            stream=True,
+            streaming_interval=STREAMING_INTERVAL,
+            **kwargs,
+        ):
+            yield np.asarray(result.audio, dtype="<f4").tobytes()
+
+
+@contextmanager
+def primed(model):
+    """Qwen3-TTS in-context cloning with the reference clip's codes fed
+    to the streaming decoder first. Without them the decoder starts from a
+    reset state and the first second or so comes out in another voice;
+    mlx-audio's non-streaming path prepends them and trims their audio, so
+    this does the same: the codes `_prepare_icl_generation_inputs` returns
+    go through `streaming_step` once, right after the decoder's first reset
+    in `generate`, and their audio is thrown away. Both hooks are instance
+    attributes, removed on the way out."""
+    # `load_model` wraps the decoder in `mx.compile`, which forwards
+    # attribute reads but not writes: hook the module underneath.
+    decoder = model.speech_tokenizer.decoder.reset_streaming_state.__self__
+    prepare = model._prepare_icl_generation_inputs
+    reset = decoder.reset_streaming_state
+    reference = []
+
+    def capture(*args, **kwargs):
+        inputs = prepare(*args, **kwargs)
+        reference.append(inputs[3])
+        return inputs
+
+    # `generate` resets again when the stream ends; only the first primes.
+    def reset_and_prime():
+        reset()
+        if reference:
+            mx.eval(decoder.streaming_step(reference.pop()))
+
+    model._prepare_icl_generation_inputs = capture
+    decoder.reset_streaming_state = reset_and_prime
+    try:
+        yield
+    finally:
+        del model._prepare_icl_generation_inputs
+        del decoder.reset_streaming_state
 
 
 def main():
@@ -106,4 +146,5 @@ def main():
     serve(parser.parse_args().socket, handle)
 
 
-main()
+if __name__ == "__main__":
+    main()
