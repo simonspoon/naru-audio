@@ -188,7 +188,7 @@ The request body is JSON.
 | `response_format` | **Supported:** `wav` (default here; OpenAI's default is mp3) and `pcm`. `mp3/opus/aac/flac` return 400 `unsupported_value`. See the open question on mp3. |
 | `speed` | **Supported** in the range 0.5–2.0. Outside that range returns 400. |
 | `stream_format` | `audio` is **supported**. `sse` returns 400 `unsupported_value`. |
-| `instructions` | **Ignored.** Kokoro cannot be steered by a prompt. |
+| `instructions` | **Supported** by a model whose manifest sets `instruct = true` (§3.2), passed to mlx-audio as `instruct`; **ignored** by every other model (Kokoro cannot be steered by a prompt). For Qwen3-TTS 1.7B VoiceDesign, which has no preset voices, it is the voice's description plus any style direction in one string (for example "A warm, husky woman in her thirties, a little amused. Speak slowly."); `voice` is accepted and ignored, and a request without `instructions` returns 400 before any load. |
 
 Extensions: `gap` (default 0.12 s), `level` (default `true`, the leveller),
 `keep_alive`. There is **no per-request `lang`**. sherpa fixes `lang` in
@@ -406,6 +406,8 @@ size   = 652_184_296                     # auris model.rs pins sizes too
 # A TTS manifest adds:
 # [backend.sherpa-onnx] lang="en" lexicon=["lexicon-us-en.txt", …] dict_dir="dict"   (fixed at load)
 # [[voice]] id="af_heart" sid=3 accent="us" gender="f" default=true
+# [backend.mlx] clone=true      speaks in the cloned voices (§5.3)
+# [backend.mlx] instruct=true   takes the request's `instructions` (§2.3, §5.3)
 # An archive source: [[archive]] url=… sha256=… strip=1, followed by [[file]] entries whose sha256 is checked after extraction.
 ```
 
@@ -705,6 +707,15 @@ Sidecar design:
   <clip> --text <transcript>` or `POST /v1/audio/voices` (§2.5) and listed by `/v1/audio/voices` after the
   manifest's. Each goes to mlx-audio as `ref_audio` and `ref_text`. No gap or leveller: the chunks are cut mid-sentence, as
   with Pocket.
+- **Instructions:** a manifest that sets `[backend.mlx] instruct = true`
+  gets the request's `instructions` (§2.3) in the `synth` header as
+  `instruct`, which the sidecar passes to mlx-audio's `generate`; no other
+  model is sent it. Qwen3-TTS 1.7B VoiceDesign 8-bit
+  (`qwen3-tts-1.7b-voicedesign-mlx`) is the only one: it has no preset or
+  cloned voices and makes its voice up from `instructions`, so it needs
+  them, and the `voice` asked for is ignored. The flag is ours, not
+  mlx-audio's: its guard that drops `instruct` for the 0.6B models is
+  dead code, so a model without the flag must not be sent it.
 - **Cost:** about 150–400 ms extra first-request latency for the process start
   **[assumption]**, then a per-request IPC overhead that is negligible
   compared with decode time.

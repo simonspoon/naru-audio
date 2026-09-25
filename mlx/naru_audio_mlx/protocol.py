@@ -16,7 +16,8 @@ Requests, one at a time, each answered before the next is sent:
     {"op": "transcribe", "model": NAME, "samples": S} + S samples at 16 kHz
     {"op": "synth", "model": NAME, "text": TEXT, "voice": ID (optional),
      "speed": X, "reference": PATH (optional), "reference_text": TEXT
-     (optional, the reference's transcript)}
+     (optional, the reference's transcript), "instruct": TEXT (optional,
+     the voice's description or style direction)}
     {"op": "stats"}
 
 Answers are {"ok": true, ...} or {"ok": false, "error": MESSAGE}. A `load`

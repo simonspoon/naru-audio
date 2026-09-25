@@ -527,3 +527,49 @@ fn a_cloned_voice_is_sent_as_its_reference_and_transcript() {
         assert!(matches!(err, TtsError::UnknownVoice { .. }), "{err}");
     }
 }
+
+/// A model that instructs is sent the request's `instructions` as
+/// `instruct`; with no voices (VoiceDesign), any voice is taken and none
+/// is sent. A model that does not instruct is sent no `instruct`.
+#[test]
+fn instructions_are_sent_as_instruct_only_to_a_model_that_instructs() {
+    let runs = std::process::Command::new(PYTHON)
+        .args(["-c", ""])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !runs {
+        eprintln!("skipped: {PYTHON} does not run");
+        return;
+    }
+    let home = home();
+    let registry = Registry::open(home.path()).unwrap();
+    let options = SynthOptions {
+        instructions: Some("A warm, husky woman. Speak slowly.".to_string()),
+        ..Default::default()
+    };
+    let sent = |voice: &str| {
+        let manifest = registry.pulled_manifest("fake-tts").unwrap();
+        let tts = load_tts(&manifest, &registry.model_dir("fake-tts")).unwrap();
+        tts.synth("1", voice, &options, Box::new(|_| true)).unwrap();
+        let json = std::fs::read(home.path().join("mlx").join("synth.json")).unwrap();
+        let header: Value = serde_json::from_slice(&json).unwrap();
+        header
+    };
+
+    let header = sent("fake");
+    assert_eq!(header["voice"], "fake");
+    assert!(header.get("instruct").is_none(), "{header}");
+
+    let design = json!({
+        "model": {"name": "fake-tts", "kind": "tts", "backend": "mlx", "languages": ["en"]},
+        "backend": {"mlx": {"instruct": true}},
+    });
+    std::fs::write(
+        registry.model_dir("fake-tts").join("manifest.json"),
+        design.to_string(),
+    )
+    .unwrap();
+    let header = sent("alloy");
+    assert_eq!(header["instruct"], "A warm, husky woman. Speak slowly.");
+    assert!(header.get("voice").is_none(), "{header}");
+}

@@ -61,7 +61,7 @@ pub(super) async fn speech(
     Extension(RequestId(req_id)): Extension<RequestId>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let job = validate(&body, &st.models.settings().tts_default)?;
+    let mut job = validate(&body, &st.models.settings().tts_default)?;
     let (manifest, voices) = {
         let (st, name) = (st.clone(), job.model.clone());
         tokio::task::spawn_blocking(move || {
@@ -72,7 +72,16 @@ pub(super) async fn speech(
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
-    let voice = voice(&manifest, &voices, job.voice.as_deref())?;
+    let voice = voice(
+        &manifest,
+        &voices,
+        job.voice.as_deref(),
+        job.options.instructions.as_deref(),
+    )?;
+    // Only a model that takes `instructions` sees them.
+    if !manifest.instructs() {
+        job.options.instructions = None;
+    }
     let model = st
         .models
         .acquire(manifest, job.keep_alive)
@@ -351,6 +360,12 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
         options.gap = gap as f32;
     }
     options.level = boolean("level", true)?;
+    // Read loosely: a model that does not take them ignores them, whatever
+    // they are.
+    options.instructions = field("instructions")
+        .and_then(Value::as_str)
+        .filter(|i| !i.trim().is_empty())
+        .map(str::to_string);
     let stream = boolean("stream", true)?;
 
     let keep_alive = match field("keep_alive") {
@@ -369,7 +384,7 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
         Some(m) if DEFAULT_ALIASES.contains(&m) => default_model,
         Some(m) => m,
     };
-    // `instructions` is ignored (§2.3), as is anything unknown.
+    // Anything unknown is ignored (§2.3).
     Ok(Job {
         model: model.to_string(),
         input: input.to_string(),
@@ -384,8 +399,30 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
 /// `voice` if it is one of `voices` (the manifest's, and any cloned ones),
 /// else 400 `unknown_voice` with the valid ids; no voice is the default
 /// one, else the first. A cloning model with no cloned voices and no
-/// voice asked for is a 400 that says how to add one.
-fn voice(manifest: &Manifest, voices: &[Voice], voice: Option<&str>) -> Result<String, ApiError> {
+/// voice asked for is a 400 that says how to add one. A model that
+/// instructs and has no voices (VoiceDesign) makes its voice up from
+/// `instructions`: any `voice` is taken and ignored, and no `instructions`
+/// is a 400.
+fn voice(
+    manifest: &Manifest,
+    voices: &[Voice],
+    voice: Option<&str>,
+    instructions: Option<&str>,
+) -> Result<String, ApiError> {
+    if manifest.instructs() && voices.is_empty() {
+        if instructions.is_none() {
+            return Err(bad_request(
+                "instructions",
+                "invalid_request",
+                format!(
+                    "the model \"{}\" needs \"instructions\" describing the voice",
+                    manifest.model.name
+                ),
+            ));
+        }
+        // No voice is "", which `synth` ignores as it does any other.
+        return Ok(voice.unwrap_or_default().to_string());
+    }
     if voice.is_none() && voices.is_empty() && manifest.clones() {
         return Err(bad_request(
             "voice",

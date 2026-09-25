@@ -21,7 +21,8 @@ use crate::registry::manifest::Voice;
 /// synthesised.
 pub type Sink = Box<dyn FnMut(&[f32]) -> bool + Send>;
 
-/// The per-request knobs (§2.3 `speed` and the `gap`/`level` extensions).
+/// The per-request knobs (§2.3 `speed` and `instructions`, and the
+/// `gap`/`level` extensions).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SynthOptions {
     /// 0.5–2.0; the API checks the range.
@@ -31,6 +32,9 @@ pub struct SynthOptions {
     pub gap: f32,
     /// Whether the [`level::Leveller`] runs.
     pub level: bool,
+    /// What the voice should be and how it should speak, for a model that
+    /// takes it (`Manifest::instructs`); `None` for any other.
+    pub instructions: Option<String>,
 }
 
 impl Default for SynthOptions {
@@ -39,6 +43,7 @@ impl Default for SynthOptions {
             speed: 1.0,
             gap: 0.12,
             level: true,
+            instructions: None,
         }
     }
 }

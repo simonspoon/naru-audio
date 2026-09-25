@@ -529,7 +529,8 @@ fn bad_requests_are_refused_before_a_load() {
 }
 
 /// OpenAI's model names stand for the default model; no voice is the
-/// manifest's default; the knobs reach the model.
+/// manifest's default; the knobs reach the model, but not `instructions`,
+/// which this model does not take.
 #[test]
 fn aliases_defaults_and_options_reach_the_model() {
     let server = Server::fake();
@@ -538,6 +539,11 @@ fn aliases_defaults_and_options_reach_the_model() {
         let reply =
             server.speech(json!({"model": model, "input": "Hi.", "instructions": "cheerful"}));
         assert_eq!(reply.status, 200, "{model}");
+        assert_eq!(last(), ("af_heart".to_string(), SynthOptions::default()));
+    }
+    for instructions in [json!({"style": "calm"}), Value::Null] {
+        let reply = server.speech(json!({"input": "Hi.", "instructions": instructions}));
+        assert_eq!(reply.status, 200, "{instructions}");
         assert_eq!(last(), ("af_heart".to_string(), SynthOptions::default()));
     }
     let long = "a".repeat(16_384);
@@ -551,8 +557,57 @@ fn aliases_defaults_and_options_reach_the_model() {
         speed: 1.5,
         gap: 0.0,
         level: false,
+        instructions: None,
     };
     assert_eq!(last(), ("bm_george".to_string(), expected));
+}
+
+/// A model that instructs and has no voices (VoiceDesign) is handed the
+/// `instructions`, and takes any voice; without `instructions` it is a
+/// 400 before a load.
+#[test]
+fn a_model_that_instructs_gets_the_instructions() {
+    let home = fake_home();
+    let dir = home.path().join("models").join("fake-design");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-design", "kind": "tts", "backend": "sherpa-onnx"},
+        "backend": {"sherpa-onnx": {"instruct": true}},
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+    let record = Arc::new(Record::default());
+    let server = Server::start(
+        home,
+        "fake-tts",
+        Arc::new(FakeLoader(record.clone())),
+        record,
+    );
+
+    for request in [
+        json!({"model": "fake-design", "input": "Hi."}),
+        json!({"model": "fake-design", "input": "Hi.", "voice": "alloy", "instructions": " "}),
+    ] {
+        let reply = server.speech(request.clone());
+        assert_eq!(reply.status, 400, "{request}");
+        let error = &reply.json()["error"];
+        assert_eq!(error["code"], "invalid_request", "{request}");
+        assert_eq!(error["param"], "instructions", "{request}");
+        assert_eq!(
+            error["message"],
+            "the model \"fake-design\" needs \"instructions\" describing the voice"
+        );
+    }
+    assert_eq!(server.record.loads.load(Ordering::SeqCst), 0);
+
+    let instructions = "A warm, husky woman. Speak slowly.";
+    for voice in [json!("alloy"), Value::Null] {
+        let reply = server.speech(json!({
+            "model": "fake-design", "input": "Hi.", "voice": voice, "instructions": instructions,
+        }));
+        assert_eq!(reply.status, 200, "{voice}");
+        let (_, options) = server.record.last.lock().unwrap().clone().unwrap();
+        assert_eq!(options.instructions.as_deref(), Some(instructions));
+    }
 }
 
 /// §2.3: an error after the first byte cannot change the 200; the body

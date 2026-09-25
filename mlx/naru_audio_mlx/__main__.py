@@ -85,6 +85,10 @@ def synth(model, header):
     # the voice in context.
     if header.get("reference_text"):
         kwargs["ref_text"] = header["reference_text"]
+    # What the voice should be and how it should speak: VoiceDesign's only
+    # voice.
+    if header.get("instruct"):
+        kwargs["instruct"] = header["instruct"]
     for result in model.generate(
         text=header["text"],
         voice=header.get("voice"),

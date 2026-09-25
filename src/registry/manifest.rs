@@ -35,6 +35,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/qwen3-tts-0.6b-mlx.toml"),
     ),
     (
+        "qwen3-tts-1.7b-voicedesign-mlx.toml",
+        include_str!("../../catalog/qwen3-tts-1.7b-voicedesign-mlx.toml"),
+    ),
+    (
         "silero-vad.toml",
         include_str!("../../catalog/silero-vad.toml"),
     ),
@@ -184,6 +188,16 @@ impl Manifest {
         self.backend
             .get(&self.model.backend)
             .and_then(|t| t.get("clone"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// `backend.<model.backend>.instruct`: the model takes a request's
+    /// `instructions` (§2.3), which mlx-audio calls `instruct`.
+    pub fn instructs(&self) -> bool {
+        self.backend
+            .get(&self.model.backend)
+            .and_then(|t| t.get("instruct"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
     }
@@ -360,6 +374,7 @@ mod tests {
                 "pocket-tts-int8",
                 "qwen3-tts-0.6b-base-mlx",
                 "qwen3-tts-0.6b-mlx",
+                "qwen3-tts-1.7b-voicedesign-mlx",
                 "silero-vad"
             ]
         );
@@ -526,6 +541,37 @@ mod tests {
             assert!(
                 url.starts_with(
                     "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/"
+                ) && url.ends_with(&format!("/{}", f.path)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_qwen3_tts_voicedesign_instructs_and_has_no_voices() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["qwen3-tts-1.7b-voicedesign-mlx"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(m.model.backend, "mlx");
+        assert!(m.instructs());
+        assert!(!m.clones());
+        assert!(m.voices.is_empty());
+        // Only VoiceDesign takes `instructions`.
+        for other in [
+            "qwen3-tts-0.6b-mlx",
+            "qwen3-tts-0.6b-base-mlx",
+            "kokoro-v1.0",
+        ] {
+            assert!(!cat.models[other].instructs(), "{other}");
+        }
+        // The same files as the 0.6B models', from the VoiceDesign repo.
+        let paths = |m: &Manifest| m.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+        assert_eq!(paths(m), paths(&cat.models["qwen3-tts-0.6b-mlx"]));
+        for f in &m.files {
+            let url = f.url.as_deref().unwrap();
+            assert!(
+                url.starts_with(
+                    "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit/resolve/"
                 ) && url.ends_with(&format!("/{}", f.path)),
                 "{url}"
             );
