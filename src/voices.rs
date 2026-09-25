@@ -21,6 +21,9 @@ pub const MAX_SECS: f64 = 30.0;
 /// rate anyway).
 const SAMPLE_RATE: u32 = 24_000;
 
+/// The cloning model `say` asks for when its voice is a cloned one.
+pub const CLONE_MODEL: &str = "qwen3-tts-0.6b-base-mlx";
+
 /// A cloned voice's clip and transcript.
 #[derive(Debug, PartialEq)]
 pub struct Cloned {
@@ -91,6 +94,16 @@ pub fn of(manifest: &Manifest, home: &Path) -> Vec<Voice> {
         }
     }
     voices
+}
+
+/// The model `say` asks for: `model` if given, else [`CLONE_MODEL`] if
+/// `voice` is a cloned voice in `home`, else the daemon's `default`.
+pub fn say_model<'a>(home: Option<&Path>, model: Option<&'a str>, voice: Option<&str>) -> &'a str {
+    match (model, voice) {
+        (Some(model), _) => model,
+        (None, Some(voice)) if home.is_some_and(|h| find(h, voice).is_some()) => CLONE_MODEL,
+        _ => "default",
+    }
 }
 
 /// Adds the voice `name` from `clip` (anything `afconvert` reads, such as
@@ -239,6 +252,21 @@ mod tests {
             ids(&manifest(true)),
             [ryan, ("amy".to_string(), None, false)]
         );
+    }
+
+    #[test]
+    fn say_asks_for_the_cloning_model_only_for_a_cloned_voice() {
+        let home = tempfile::tempdir().unwrap();
+        voice(home.path(), "elise", &[REF_WAV, REF_TXT]);
+        let h = Some(home.path());
+        assert_eq!(say_model(h, None, Some("elise")), CLONE_MODEL);
+        // A built-in or unknown voice, or none, is the daemon's default.
+        assert_eq!(say_model(h, None, Some("af_heart")), "default");
+        assert_eq!(say_model(h, None, None), "default");
+        assert_eq!(say_model(None, None, Some("elise")), "default");
+        // An explicit model wins.
+        assert_eq!(say_model(h, Some("kokoro"), Some("elise")), "kokoro");
+        assert_eq!(say_model(h, Some("kokoro"), None), "kokoro");
     }
 
     /// A clip of `secs` seconds of a 440 Hz tone at 44.1 kHz stereo.

@@ -86,6 +86,10 @@ enum Command {
         /// Voice id; the model's default voice if not given.
         #[arg(short, long)]
         voice: Option<String>,
+        /// Model name; if not given, qwen3-tts-0.6b-base-mlx for a cloned
+        /// voice, else the daemon's default TTS model.
+        #[arg(short, long)]
+        model: Option<String>,
         /// Speed, 0.5 to 2.0.
         #[arg(short, long)]
         speed: Option<f64>,
@@ -175,9 +179,19 @@ async fn main() -> ExitCode {
         Command::Say {
             text,
             voice,
+            model,
             speed,
             output,
-        } => return say(&daemon_url(), &text, voice.as_deref(), speed, &output),
+        } => {
+            return say(
+                &daemon_url(),
+                &text,
+                voice.as_deref(),
+                model.as_deref(),
+                speed,
+                &output,
+            );
+        }
         Command::Stream {
             file,
             model,
@@ -722,7 +736,14 @@ fn transcribe(url: &str, file: &str, model: Option<&str>, format: Format) -> Exi
 /// stream and copies each piece to stdout as it arrives, so a player can
 /// start at once; a file asks for `stream=false`, whose header has the exact
 /// sizes. A stream the daemon aborts (§2.3) is exit 1.
-fn say(url: &str, text: &str, voice: Option<&str>, speed: Option<f64>, output: &str) -> ExitCode {
+fn say(
+    url: &str,
+    text: &str,
+    voice: Option<&str>,
+    model: Option<&str>,
+    speed: Option<f64>,
+    output: &str,
+) -> ExitCode {
     // As `transcribe`: a stopped daemon is exit 3, before stdin is read.
     if let Err(code) = read(
         url,
@@ -745,8 +766,9 @@ fn say(url: &str, text: &str, voice: Option<&str>, speed: Option<f64>, output: &
         text.to_string()
     };
     let stream = output == "-";
+    let model = voices::say_model(registry::default_home().as_deref(), model, voice);
     let mut request = serde_json::json!({
-        "model": "default", "input": text, "response_format": "wav", "stream": stream,
+        "model": model, "input": text, "response_format": "wav", "stream": stream,
     });
     if let Some(voice) = voice {
         request["voice"] = voice.into();
