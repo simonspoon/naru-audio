@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use crate::error::ApiError;
 use crate::log::Logger;
 use crate::manager::{KeepAlive, ManagerError, ModelManager};
+use crate::registry::manifest::Kind;
 use crate::registry::{Progress, Registry, RegistryError};
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7870";
@@ -81,7 +82,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// §2.5 `/health`. The model manager's lock is never held across a load or
 /// a decode, so this never waits behind either (§4.3). `ready` reads and
-/// parses the default model's small `manifest.json` and `stat`s what it
+/// parses each default model's small `manifest.json` and `stat`s what it
 /// requires, so a pull or `rm` by the CLI shows at once.
 async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
     let settings = st.models.settings();
@@ -89,6 +90,8 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
     let ps = st.models.ps();
     let stt = &settings.stt_default;
     let state = ps.iter().find(|m| &m.name == stt);
+    let tts = &settings.tts_default;
+    let tts_state = ps.iter().find(|m| &m.name == tts);
     let backends: Vec<Value> = ["sherpa-onnx", "mlx"]
         .iter()
         .map(|name| match crate::backend::available(name) {
@@ -110,7 +113,8 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
         .map(|message| json!({"code": "rosetta", "message": message}))
         .into_iter()
         .collect();
-    let stt_problem = stt_problem(&st.registry, stt);
+    let stt_problem = default_problem(&st.registry, stt);
+    let tts_problem = default_problem(&st.registry, tts);
     Json(json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
@@ -132,18 +136,20 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
             "loading": state.is_some_and(|m| m.loading),
         },
         "tts": {
-            "default": settings.tts_default,
-            "ready": false,
-            "problem": {"code": "not_implemented", "message": "text-to-speech is not implemented yet"},
+            "default": tts,
+            "ready": tts_problem.is_none(),
+            "problem": tts_problem,
+            "loaded": tts_state.is_some_and(|m| !m.loading),
+            "loading": tts_state.is_some_and(|m| m.loading),
         },
         "backends": backends,
         "problems": problems,
     }))
 }
 
-/// Why the default STT model is not ready (§2.5: pulled and loadable), if
-/// it is not: not pulled, a `requires` not pulled, or its backend.
-fn stt_problem(registry: &Registry, name: &str) -> Option<Value> {
+/// Why a default model is not ready (§2.5: pulled and loadable), if it is
+/// not: not pulled, a `requires` not pulled, or its backend.
+fn default_problem(registry: &Registry, name: &str) -> Option<Value> {
     let problem = |code: &str, message: String| Some(json!({"code": code, "message": message}));
     let manifest = match registry.pulled_manifest(name) {
         Ok(m) => m,
@@ -335,7 +341,7 @@ async fn ps(State(st): State<Arc<AppState>>) -> Json<Value> {
     ))
 }
 
-/// §2.5 `POST /api/load` `{"model":"default"|name,"kind":"stt","keep_alive":"10m"}`
+/// §2.5 `POST /api/load` `{"model":"default"|name,"kind":"stt"|"tts","keep_alive":"10m"}`
 /// warms a model; `keep_alive: 0` unloads it (once idle, if busy).
 async fn load(
     State(st): State<Arc<AppState>>,
@@ -365,15 +371,9 @@ async fn load(
     .transpose()
     .map_err(|e| bad("keep_alive", "invalid_request", e))?;
 
-    let name = match (model, body["kind"].as_str()) {
-        ("default", Some("stt")) => st.models.settings().stt_default.clone(),
-        ("default", Some("tts")) => {
-            return Err(bad(
-                "kind",
-                "unsupported_value",
-                "text-to-speech is not implemented yet".to_string(),
-            ));
-        }
+    let (name, kind) = match (model, body["kind"].as_str()) {
+        ("default", Some("stt")) => (st.models.settings().stt_default.clone(), Kind::Stt),
+        ("default", Some("tts")) => (st.models.settings().tts_default.clone(), Kind::Tts),
         ("default", None) => {
             return Err(bad(
                 "kind",
@@ -385,15 +385,15 @@ async fn load(
             return Err(bad(
                 "kind",
                 "unsupported_value",
-                format!("kind {other:?} has no default; use stt"),
+                format!("kind {other:?} has no default; use stt or tts"),
             ));
         }
-        (name, _) => name.to_string(),
+        (name, _) => (name.to_string(), Kind::Stt),
     };
 
     let manifest = {
         let (st, name) = (st.clone(), name.clone());
-        tokio::task::spawn_blocking(move || transcriptions::stt_manifest(&st, &name))
+        tokio::task::spawn_blocking(move || transcriptions::kind_manifest(&st, &name, kind))
     }
     .await
     .map_err(|e| transcriptions::internal(&st, &req_id, e.to_string()))??;

@@ -164,6 +164,7 @@ impl Server {
         let mut settings = Settings::from_env(Profile::detect().unwrap()).unwrap();
         settings.budget_bytes = budget;
         settings.stt_default = "a".to_string();
+        settings.tts_default = "t".to_string();
         // Not `NARU_AUDIO_KEEP_ALIVE`, whatever the environment says.
         settings.keep_alive = KeepAlive::For(Duration::from_secs(300));
         let models = ModelManager::new(registry.clone(), log.clone(), settings, loader);
@@ -596,7 +597,7 @@ fn api_load_validates_its_body() {
         (json!({"kind": "stt"}), "model", "invalid_request"),
         (json!({"model": "default"}), "kind", "invalid_request"),
         (
-            json!({"model": "default", "kind": "tts"}),
+            json!({"model": "default", "kind": "vad"}),
             "kind",
             "unsupported_value",
         ),
@@ -618,4 +619,42 @@ fn api_load_validates_its_body() {
         assert_eq!(resp["error"]["code"], "model_not_found");
     }
     assert!(server.loaded().is_empty());
+}
+
+/// §2.5: the TTS default reports ready, problem, loaded and loading as the
+/// STT one does, and `/api/load` resolves `default` for `kind: tts` to it.
+#[test]
+fn health_and_load_follow_the_tts_default() {
+    let home = home();
+    let server = Server::start(
+        home.path(),
+        FakeLoader::new(Gate::new(false), Gate::new(false)),
+    );
+    let (status, health) = server.get("/health");
+    assert_eq!(status, 200, "{health}");
+    let tts = &health["tts"];
+    assert_eq!(tts["default"], "t", "{health}");
+    assert_eq!(tts["ready"], false, "{health}");
+    // Not pulled, and not in the catalog either.
+    assert_eq!(tts["problem"]["code"], "model_not_found", "{health}");
+    assert_eq!(tts["loaded"], false, "{health}");
+    assert_eq!(tts["loading"], false, "{health}");
+
+    let model_dir = home.path().join("models/t");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let manifest = json!({"model": {
+        "name": "t", "kind": "tts", "backend": "sherpa-onnx", "resident_bytes": MODEL_BYTES,
+    }});
+    std::fs::write(model_dir.join("manifest.json"), manifest.to_string()).unwrap();
+    let (_, health) = server.get("/health");
+    assert_eq!(health["tts"]["ready"], true, "{health}");
+    assert_eq!(health["tts"]["problem"], Value::Null, "{health}");
+
+    let (status, body) = server.load(json!({"model": "default", "kind": "tts"}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["model"], "t");
+    assert_eq!(server.loaded(), ["t"]);
+    let (_, health) = server.get("/health");
+    assert_eq!(health["tts"]["loaded"], true, "{health}");
+    assert_eq!(health["stt"]["loaded"], false, "{health}");
 }
