@@ -164,7 +164,7 @@ pub trait Loader: Send + Sync {
 
 /// The real loader: `backend::load_stt` or `backend::load_tts` by the
 /// manifest's kind, measured by the RSS delta or by what the model reports
-/// ([`SttModel::resident_bytes`]).
+/// ([`SttModel::resident_bytes`], [`TtsModel::resident_bytes`]).
 pub struct BackendLoader;
 
 /// One load at a time, so no other load's allocations land in a delta.
@@ -174,12 +174,13 @@ impl Loader for BackendLoader {
     fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, LoadError> {
         let _one_at_a_time = LOADS.lock().unwrap_or_else(|e| e.into_inner());
         let before = crate::profile::rss();
+        // An MLX model's bytes are in the sidecar, not in this delta.
         let (model, reported) = if manifest.model.kind == Kind::Tts {
             let model = crate::backend::load_tts(manifest, dir)?;
-            (Resident::Tts(Arc::from(model)), None)
+            let reported = model.resident_bytes();
+            (Resident::Tts(Arc::from(model)), reported)
         } else {
             let model = crate::backend::load_stt(manifest, dir)?;
-            // An MLX model's bytes are in the sidecar, not in this delta.
             let reported = model.resident_bytes();
             (Resident::Stt(Arc::from(model)), reported)
         };

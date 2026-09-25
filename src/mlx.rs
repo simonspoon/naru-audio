@@ -27,7 +27,7 @@ const FILES: &[(&str, &str)] = &[
 ];
 
 /// What `mlx status` imports: the sidecar and what it runs on.
-const IMPORT_CHECK: &str = "import naru_audio_mlx, mlx.core, parakeet_mlx";
+const IMPORT_CHECK: &str = "import naru_audio_mlx, mlx.core, parakeet_mlx, mlx_audio.tts.utils";
 
 /// `<home>/mlx/`: the module, the lock and the venv.
 pub fn dir(home: &Path) -> PathBuf {

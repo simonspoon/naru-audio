@@ -4,7 +4,7 @@
 #![cfg(all(target_arch = "aarch64", target_os = "macos"))]
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -12,11 +12,13 @@ use axum::body::Body;
 use axum::http::header::{CONTENT_TYPE, HOST};
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use naru_audio::backend::load_tts;
 use naru_audio::log::Logger;
 use naru_audio::manager::{BackendLoader, ModelManager, Settings};
 use naru_audio::profile::Profile;
 use naru_audio::registry::Registry;
 use naru_audio::server::{AppState, router};
+use naru_audio::tts::{SynthOptions, TtsError, TtsModel};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -25,17 +27,38 @@ const BOUNDARY: &str = "naru-audio-test-boundary";
 /// What the fake's `stats` adds per loaded model.
 const FAKE_BYTES: u64 = 123_456_789;
 
+/// `synth` of "N" streams N chunks of 3 samples, chunk i all i; "N!" fails
+/// after them. Each synth appends the chunks it yielded to `synth.log`.
 const FAKE_MAIN: &str = r#"
-import argparse, os
+import argparse, os, struct
 from .protocol import serve
 
 loaded = set()
 
+def chunks(text):
+    n = int(text.rstrip("!"))
+    yielded = 0
+    try:
+        for i in range(n):
+            yielded += 1
+            yield struct.pack("<3f", i, i, i)
+        if text.endswith("!"):
+            raise RuntimeError("failed after %d" % n)
+    finally:
+        with open("synth.log", "a") as f:
+            f.write("%d\n" % yielded)
+
 def handle(header, samples):
     op = header["op"]
     if op == "load":
+        kind = "tts" if header["model"] == "fake-tts" else "stt"
+        if header.get("kind") != kind:
+            raise ValueError("%s is %s, not %r" % (header["model"], kind, header.get("kind")))
         loaded.add(header["model"])
-        return {}
+        return {"sample_rate": 24000} if kind == "tts" else {}
+    if op == "synth":
+        int(header["text"].rstrip("!"))
+        return chunks(header["text"])
     if op == "unload":
         loaded.discard(header["model"])
         return {}
@@ -74,6 +97,16 @@ fn home() -> tempfile::TempDir {
         )
         .unwrap();
     }
+    let tts = json!({
+        "model": {"name": "fake-tts", "kind": "tts", "backend": "mlx", "languages": ["en"]},
+        "voice": [{"id": "fake", "sid": 0, "default": true}],
+    });
+    std::fs::create_dir_all(models.join("fake-tts")).unwrap();
+    std::fs::write(
+        models.join("fake-tts").join("manifest.json"),
+        tts.to_string(),
+    )
+    .unwrap();
     // Never loaded: the requests ask for `vad=false`.
     std::fs::write(models.join("fake-vad").join("silero_vad.onnx"), b"").unwrap();
 
@@ -264,4 +297,178 @@ async fn a_killed_sidecar_is_503_then_the_retry_succeeds() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!alive(restarted), "the sidecar outlived its last model");
+}
+
+/// Synthesises `text` with the fake: the result and the chunks the sink
+/// got. The sink cancels once it has `keep` chunks, and panics on the first
+/// if `keep` is 0.
+fn synth(tts: &dyn TtsModel, text: &str, keep: usize) -> (Result<(), TtsError>, Vec<Vec<f32>>) {
+    let pieces = Arc::new(Mutex::new(Vec::new()));
+    let got = pieces.clone();
+    let sink = Box::new(move |samples: &[f32]| {
+        assert!(keep > 0, "the sink panics");
+        let mut got = got.lock().unwrap();
+        got.push(samples.to_vec());
+        got.len() < keep
+    });
+    let result = tts.synth(text, "fake", &SynthOptions::default(), sink);
+    let pieces = std::mem::take(&mut *pieces.lock().unwrap());
+    (result, pieces)
+}
+
+/// How many chunks the last synth yielded, from the fake's `synth.log`.
+fn yielded(home: &Path) -> usize {
+    let log = std::fs::read_to_string(home.join("mlx").join("synth.log")).unwrap();
+    log.lines().last().unwrap().parse().unwrap()
+}
+
+/// §5.3 `synth`: the chunks reach the sink in order until the end frame.
+/// A sink that cancels stops the sidecar early; an error answer, a
+/// cancelled stream and a panicking sink each leave the connection in step,
+/// so the next synth on the same sidecar gets exactly its own chunks.
+#[test]
+fn synth_streams_chunks_and_cancelling_leaves_the_sidecar_in_step() {
+    let runs = std::process::Command::new(PYTHON)
+        .args(["-c", ""])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !runs {
+        eprintln!("skipped: {PYTHON} does not run");
+        return;
+    }
+    let home = home();
+    let registry = Registry::open(home.path()).unwrap();
+    let manifest = registry.pulled_manifest("fake-tts").unwrap();
+    let tts = load_tts(&manifest, &registry.model_dir("fake-tts")).unwrap();
+    assert_eq!(tts.sample_rate(), 24_000);
+    assert_eq!(tts.resident_bytes(), Some(FAKE_BYTES));
+    let pid = sidecar_pid(home.path());
+    let five: Vec<Vec<f32>> = (0..5).map(|i| vec![i as f32; 3]).collect();
+
+    let (result, pieces) = synth(&*tts, "5", usize::MAX);
+    result.unwrap();
+    assert_eq!(pieces, five);
+
+    // Cancelled after the first chunk: `Ok`, and the sidecar stopped long
+    // before the 100 000th.
+    let (result, pieces) = synth(&*tts, "100000", 1);
+    result.unwrap();
+    assert_eq!(pieces, [vec![0.0; 3]]);
+    assert!(yielded(home.path()) < 100_000, "{}", yielded(home.path()));
+    let (result, pieces) = synth(&*tts, "5", usize::MAX);
+    result.unwrap();
+    assert_eq!(pieces, five);
+
+    // Cancelled on the last chunk: the cancel may land after the end frame,
+    // where the sidecar ignores it.
+    let (result, pieces) = synth(&*tts, "1", 1);
+    result.unwrap();
+    assert_eq!(pieces, [vec![0.0; 3]]);
+    let (result, pieces) = synth(&*tts, "5", usize::MAX);
+    result.unwrap();
+    assert_eq!(pieces, five);
+
+    // An error after two chunks is the end frame's.
+    let (result, pieces) = synth(&*tts, "2!", usize::MAX);
+    let err = result.unwrap_err();
+    assert!(
+        matches!(&err, TtsError::Sidecar(m) if m.contains("failed after 2")),
+        "{err}"
+    );
+    assert_eq!(pieces.len(), 2);
+    let (result, pieces) = synth(&*tts, "5", usize::MAX);
+    result.unwrap();
+    assert_eq!(pieces, five);
+
+    // A panicking sink is re-raised after the stream is read to its end.
+    let panicked =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| synth(&*tts, "100000", 0)));
+    assert!(panicked.is_err());
+    let (result, pieces) = synth(&*tts, "5", usize::MAX);
+    result.unwrap();
+    assert_eq!(pieces, five);
+
+    // Checked before the sidecar is asked.
+    let (result, _) = synth(&*tts, "5\0", usize::MAX);
+    assert!(matches!(result, Err(TtsError::NulInText)));
+
+    assert_eq!(sidecar_pid(home.path()), pid, "the sidecar restarted");
+
+    // Killed, the next synth is `BackendUnavailable`; the restart reloads
+    // the model as a TTS model (the fake refuses any other kind), and
+    // synthesis works again.
+    // SAFETY: a plain kill of the sidecar this test started.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    std::thread::sleep(Duration::from_millis(200));
+    let (result, _) = synth(&*tts, "5", usize::MAX);
+    assert!(
+        matches!(result, Err(TtsError::BackendUnavailable { .. })),
+        "{result:?}"
+    );
+    let (result, pieces) = synth(&*tts, "5", usize::MAX);
+    result.unwrap();
+    assert_eq!(pieces, five);
+    let restarted = sidecar_pid(home.path());
+    assert_ne!(restarted, pid);
+
+    drop(tts);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(restarted) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!alive(restarted), "the sidecar outlived its last model");
+}
+
+/// A sink that blocks (a client that stops reading) does not hold the
+/// sidecar: another synth on it completes meanwhile, and the blocked one
+/// still gets all its chunks once the sink is released.
+#[test]
+fn a_blocked_sink_does_not_hold_the_sidecar() {
+    let runs = std::process::Command::new(PYTHON)
+        .args(["-c", ""])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !runs {
+        eprintln!("skipped: {PYTHON} does not run");
+        return;
+    }
+    let home = home();
+    let registry = Registry::open(home.path()).unwrap();
+    let manifest = registry.pulled_manifest("fake-tts").unwrap();
+    let tts = load_tts(&manifest, &registry.model_dir("fake-tts")).unwrap();
+    let five: Vec<Vec<f32>> = (0..5).map(|i| vec![i as f32; 3]).collect();
+
+    let (release, blocked) = std::sync::mpsc::channel::<()>();
+    let (entered, in_sink) = std::sync::mpsc::channel::<()>();
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let tts = &*tts;
+        let first = scope.spawn(move || {
+            let pieces = Arc::new(Mutex::new(Vec::new()));
+            let got = pieces.clone();
+            let sink = Box::new(move |samples: &[f32]| {
+                if got.lock().unwrap().is_empty() {
+                    let _ = entered.send(());
+                    let _ = blocked.recv();
+                }
+                got.lock().unwrap().push(samples.to_vec());
+                true
+            });
+            let result = tts.synth("5", "fake", &SynthOptions::default(), sink);
+            let pieces = std::mem::take(&mut *pieces.lock().unwrap());
+            (result, pieces)
+        });
+        in_sink.recv().unwrap();
+        scope.spawn(move || {
+            let _ = done.send(synth(tts, "5", usize::MAX));
+        });
+        let other = finished.recv_timeout(Duration::from_secs(5));
+        release.send(()).unwrap();
+        let (result, pieces) = other.expect("the blocked sink held the sidecar");
+        result.unwrap();
+        assert_eq!(pieces, five);
+        let (result, pieces) = first.join().unwrap();
+        result.unwrap();
+        assert_eq!(pieces, five);
+    });
 }

@@ -1,0 +1,151 @@
+# Qwen3-TTS 0.6B CustomVoice, mlx-community's 8-bit conversion, served
+# by mlx-audio in the MLX sidecar (§5.3). CustomVoice, not Base: it has
+# preset speakers, where Base only clones a reference recording. 8-bit,
+# not 4-bit: 2.0 GB on disk against 1.7 GB, both far under the 4 GB
+# budget. Every [[file]] of the repo at the pinned commit but README.md and
+# .gitattributes; sizes and hashes from the HF API, recomputed 2026-09-25
+# from the downloaded files.
+#
+# The [[voice]] ids are the model's `spk_id` keys, which mlx-audio takes as
+# `voice`; `accent` is each speaker's native language (Dylan: Beijing
+# dialect, Eric: Sichuan). `sid` is unused by the mlx backend.
+
+[model]
+name        = "qwen3-tts-0.6b-mlx"
+kind        = "tts"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["en", "zh", "de", "it", "pt", "es", "ja", "ko", "fr", "ru"]
+license     = "Apache-2.0"
+# MLX peak while generating, 2026-09-25. What a load measures replaces it:
+# the load's delta in `stats`, 2.04 GB, without the 0.5 GB that
+# generating adds on top.
+resident_bytes = 2_600_000_000
+
+[[voice]]
+id = "serena"
+sid = 0
+accent = "zh"
+gender = "f"
+
+[[voice]]
+id = "vivian"
+sid = 0
+accent = "zh"
+gender = "f"
+
+[[voice]]
+id = "uncle_fu"
+sid = 0
+accent = "zh"
+gender = "m"
+
+[[voice]]
+id = "ryan"
+sid = 0
+accent = "en"
+gender = "m"
+default = true
+
+[[voice]]
+id = "aiden"
+sid = 0
+accent = "en"
+gender = "m"
+
+[[voice]]
+id = "ono_anna"
+sid = 0
+accent = "ja"
+gender = "f"
+
+[[voice]]
+id = "sohee"
+sid = 0
+accent = "ko"
+gender = "f"
+
+[[voice]]
+id = "eric"
+sid = 0
+accent = "zh"
+gender = "m"
+
+[[voice]]
+id = "dylan"
+sid = 0
+accent = "zh"
+gender = "m"
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/config.json"
+sha256 = "2eea3665564268139c3beb8d497fd3c2e4524e9eed5452836cdf1de96ed3cdbd"
+size   = 6_058
+
+[[file]]
+path   = "generation_config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/generation_config.json"
+sha256 = "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa"
+size   = 245
+
+[[file]]
+path   = "merges.txt"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/merges.txt"
+sha256 = "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+size   = 1_671_839
+
+[[file]]
+path   = "model.safetensors"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/model.safetensors"
+sha256 = "3bcb2c4a127e6243e81a30b7126c7865f686d3559de4f938e5d3b150c6a9560d"
+size   = 1_286_743_170
+
+[[file]]
+path   = "model.safetensors.index.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/model.safetensors.index.json"
+sha256 = "0c92041960fa189cf35ae538c8d9ca07c468edddd0c9bb52274c5d4d287a860b"
+size   = 71_447
+
+[[file]]
+path   = "preprocessor_config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/preprocessor_config.json"
+sha256 = "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119"
+size   = 127
+
+[[file]]
+path   = "speech_tokenizer/config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/speech_tokenizer/config.json"
+sha256 = "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167"
+size   = 2_336
+
+[[file]]
+path   = "speech_tokenizer/configuration.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/speech_tokenizer/configuration.json"
+sha256 = "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd"
+size   = 76
+
+[[file]]
+path   = "speech_tokenizer/model.safetensors"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/speech_tokenizer/model.safetensors"
+sha256 = "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+size   = 682_293_092
+
+[[file]]
+path   = "speech_tokenizer/preprocessor_config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/speech_tokenizer/preprocessor_config.json"
+sha256 = "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb"
+size   = 234
+
+[[file]]
+path   = "tokenizer_config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/tokenizer_config.json"
+sha256 = "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670"
+size   = 7_344
+
+[[file]]
+path   = "vocab.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/resolve/049ef77fe8816b536193c0c25f9a214d17921282/vocab.json"
+sha256 = "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+size   = 2_776_833

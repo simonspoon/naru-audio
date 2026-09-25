@@ -27,6 +27,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/pocket-tts-int8.toml"),
     ),
     (
+        "qwen3-tts-0.6b-mlx.toml",
+        include_str!("../../catalog/qwen3-tts-0.6b-mlx.toml"),
+    ),
+    (
         "silero-vad.toml",
         include_str!("../../catalog/silero-vad.toml"),
     ),
@@ -340,6 +344,7 @@ mod tests {
                 "parakeet-tdt-0.6b-v2-int8",
                 "parakeet-tdt-0.6b-v2-mlx",
                 "pocket-tts-int8",
+                "qwen3-tts-0.6b-mlx",
                 "silero-vad"
             ]
         );
@@ -454,6 +459,38 @@ mod tests {
                 .iter()
                 .all(|v| v.reference.is_none())
         );
+    }
+
+    #[test]
+    fn builtin_qwen3_tts_is_mlx_with_ryan_default() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["qwen3-tts-0.6b-mlx"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(m.model.backend, "mlx");
+        assert!(m.runs_on("macos", "aarch64"));
+        assert!(!m.runs_on("linux", "aarch64"));
+        for p in ["model.safetensors", "speech_tokenizer/model.safetensors"] {
+            assert!(m.files.iter().any(|f| f.path == p), "{p}");
+        }
+        for f in &m.files {
+            let url = f.url.as_deref().unwrap();
+            assert!(url.ends_with(&format!("/{}", f.path)), "{url}");
+        }
+        let ids: Vec<&str> = m.voices.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "serena", "vivian", "uncle_fu", "ryan", "aiden", "ono_anna", "sohee", "eric",
+                "dylan"
+            ]
+        );
+        let defaults: Vec<&str> = m
+            .voices
+            .iter()
+            .filter(|v| v.default)
+            .map(|v| v.id.as_str())
+            .collect();
+        assert_eq!(defaults, ["ryan"]);
     }
 
     #[test]

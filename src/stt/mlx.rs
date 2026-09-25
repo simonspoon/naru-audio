@@ -12,7 +12,7 @@ use super::vad::VadConfig;
 use super::vocabulary::Vocabulary;
 use super::{Segment, SttError, SttModel};
 use crate::mlx::sidecar::{self, Sidecar};
-use crate::registry::manifest::Manifest;
+use crate::registry::manifest::{Kind, Manifest};
 
 pub struct MlxStt {
     sidecar: Arc<Sidecar>,
@@ -31,7 +31,7 @@ impl MlxStt {
         let home = dir.parent().and_then(Path::parent).unwrap_or(dir);
         let sidecar = sidecar::for_home(home);
         let name = manifest.model.name.clone();
-        let (instance, resident_bytes) = sidecar.load(&name, dir)?;
+        let (instance, resident_bytes, _) = sidecar.load(&name, Kind::Stt, dir)?;
         Ok(MlxStt {
             sidecar,
             name,

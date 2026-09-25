@@ -23,7 +23,7 @@ use super::{AppState, RequestId, manager_error};
 use crate::error::ApiError;
 use crate::manager::{Guard, KeepAlive};
 use crate::registry::manifest::{Kind, Manifest};
-use crate::tts::SynthOptions;
+use crate::tts::{SynthOptions, TtsError};
 
 /// OpenAI model names that stand for `default`, so stock clients work.
 const DEFAULT_ALIASES: [&str; 4] = ["default", "tts-1", "tts-1-hd", "gpt-4o-mini-tts"];
@@ -78,7 +78,7 @@ pub(super) async fn speech(
     if !job.stream {
         let mut pcm = Vec::new();
         while let Some(piece) = rx.recv().await {
-            pcm.extend_from_slice(&piece.map_err(|e| internal(&st, &req_id, e))?);
+            pcm.extend_from_slice(&piece.map_err(|e| failed(&st, &req_id, e))?);
         }
         let body = match job.format {
             Format::Wav => {
@@ -96,7 +96,7 @@ pub(super) async fn speech(
     // before any audio is still a status code.
     let first = match rx.recv().await {
         Some(Ok(piece)) => Some(piece),
-        Some(Err(e)) => return Err(internal(&st, &req_id, e)),
+        Some(Err(e)) => return Err(failed(&st, &req_id, e)),
         None => None,
     };
     let head = match job.format {
@@ -117,9 +117,12 @@ pub(super) async fn speech(
                 tokio::task::yield_now().await;
                 // An `Err` makes hyper drop the connection without the
                 // terminating zero-length chunk.
-                st.log
-                    .line("error", Some(&req_id), &format!("tts_stream_aborted {e}"));
-                Some((Err(std::io::Error::other(e)), (rx, st, req_id)))
+                st.log.line(
+                    "error",
+                    Some(&req_id),
+                    &format!("tts_stream_aborted {}", e.message),
+                );
+                Some((Err(std::io::Error::other(e.message)), (rx, st, req_id)))
             }
         }
     });
@@ -140,7 +143,7 @@ fn synthesise(
     input: String,
     voice: String,
     options: SynthOptions,
-) -> tokio::sync::mpsc::Receiver<Result<Bytes, String>> {
+) -> tokio::sync::mpsc::Receiver<Result<Bytes, Failure>> {
     let (tx, rx) = tokio::sync::mpsc::channel(QUEUED_PIECES);
     tokio::task::spawn_blocking(move || {
         let sink_tx = tx.clone();
@@ -155,14 +158,44 @@ fn synthesise(
             model
                 .tts()
                 .synth(&input, &voice, &options, sink)
-                .map_err(|e| e.to_string())
+                .map_err(|e| Failure {
+                    unavailable: matches!(e, TtsError::BackendUnavailable { .. }),
+                    message: e.to_string(),
+                })
         }))
-        .unwrap_or_else(|_| Err("the synthesis panicked".to_string()));
+        .unwrap_or_else(|_| {
+            Err(Failure {
+                unavailable: false,
+                message: "the synthesis panicked".to_string(),
+            })
+        });
         if let Err(e) = result {
             let _ = tx.blocking_send(Err(e));
         }
     });
     rx
+}
+
+/// A failed synthesis, classified where the [`TtsError`] is still at hand.
+struct Failure {
+    /// The backend went away mid-synthesis (a crashed MLX sidecar, §5.3).
+    unavailable: bool,
+    message: String,
+}
+
+/// A failed synthesis before any audio, logged: 503 `backend_unavailable`,
+/// or a 500.
+fn failed(st: &AppState, req_id: &str, e: Failure) -> ApiError {
+    if e.unavailable {
+        st.log
+            .line("warn", Some(req_id), &format!("synth_failed {}", e.message));
+        return ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backend_unavailable",
+            e.message,
+        );
+    }
+    internal(st, req_id, e.message)
 }
 
 fn headers(format: Format, sample_rate: u32) -> Vec<(&'static str, String)> {

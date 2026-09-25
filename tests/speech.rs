@@ -43,7 +43,7 @@ struct Record {
 
 /// A piece of `LEVEL` per `.`-separated sentence, at 24 kHz. `endless`
 /// sends pieces until the sink cancels; `fail` fails after one piece and
-/// `fail first` before any.
+/// `fail first` before any; `unavailable` fails as a dead backend.
 struct FakeTts {
     voices: Vec<Voice>,
     record: Arc<Record>,
@@ -84,6 +84,10 @@ impl TtsModel for FakeTts {
                 Err(TtsError::GenerateFailed)
             }
             "fail first" => Err(TtsError::GenerateFailed),
+            "unavailable" => Err(TtsError::BackendUnavailable {
+                backend: "mlx".to_string(),
+                reason: "the sidecar died".to_string(),
+            }),
             _ => {
                 for _ in text.split('.').filter(|s| !s.trim().is_empty()) {
                     if !sink(&piece) {
@@ -538,6 +542,18 @@ fn an_error_before_any_audio_is_a_500() {
         let reply = server.speech(json!({"input": "fail first", "stream": stream}));
         assert_eq!(reply.status, 500, "stream={stream}");
         assert_eq!(reply.json()["error"]["code"], "internal");
+    }
+}
+
+/// A backend that went away before any audio (a crashed MLX sidecar) is
+/// 503 `backend_unavailable`, as for transcription.
+#[test]
+fn an_unavailable_backend_before_any_audio_is_a_503() {
+    let server = Server::fake();
+    for stream in [true, false] {
+        let reply = server.speech(json!({"input": "unavailable", "stream": stream}));
+        assert_eq!(reply.status, 503, "stream={stream}");
+        assert_eq!(reply.json()["error"]["code"], "backend_unavailable");
     }
 }
 

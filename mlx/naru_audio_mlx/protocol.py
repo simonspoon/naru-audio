@@ -11,14 +11,24 @@ an error, and the connection is closed.
 
 Requests, one at a time, each answered before the next is sent:
 
-    {"op": "load", "model": NAME, "dir": PATH}
+    {"op": "load", "model": NAME, "kind": "stt"|"tts", "dir": PATH}
     {"op": "unload", "model": NAME}
     {"op": "transcribe", "model": NAME, "samples": S} + S samples at 16 kHz
+    {"op": "synth", "model": NAME, "text": TEXT, "voice": ID, "speed": X,
+     "reference": PATH (optional)}
     {"op": "stats"}
 
-Answers are {"ok": true, ...} or {"ok": false, "error": MESSAGE}. A
-`transcribe` answer adds "segments": [{"start", "end", "text"}] (seconds
-into the samples sent); a `stats` answer adds "active_bytes".
+Answers are {"ok": true, ...} or {"ok": false, "error": MESSAGE}. A `load`
+of a "tts" model adds "sample_rate"; a `transcribe` answer adds
+"segments": [{"start", "end", "text"}] (seconds into the samples sent); a
+`stats` answer adds "active_bytes".
+
+A `synth` answer is a stream: zero or more {"samples": S} frames, each
+with S samples at the load's sample_rate, as they are generated, then the
+answer itself with "end": true added, {"end": true, "ok": ...}. While the
+stream runs the daemon may send {"op": "cancel"} once; the sidecar stops
+generating and sends the end frame. A cancel that arrives after the end
+frame is read as a request, and ignored: it has no answer.
 
 The sidecar serves one connection, the daemon's, and exits when it closes
 or when stdin (a pipe from the daemon) reaches EOF, so it never outlives
@@ -27,6 +37,7 @@ the daemon.
 
 import json
 import os
+import select
 import socket
 import struct
 import sys
@@ -62,10 +73,35 @@ def read_frame(f):
     return header, read_exact(f, 4 * samples)
 
 
-def write_frame(f, header):
+def write_frame(f, header, samples=b""):
     body = json.dumps(header).encode()
-    f.write(struct.pack("<I", len(body)) + body)
+    f.write(struct.pack("<I", len(body)) + body + samples)
     f.flush()
+
+
+class Desync(Exception):
+    """The daemon broke the protocol mid-stream: the connection cannot be
+    kept in step, so the sidecar exits."""
+
+
+def stream(conn, f, chunks):
+    """Writes each chunk (f32le bytes) of a `synth` answer as it comes,
+    until they run out or the daemon cancels."""
+    try:
+        for chunk in chunks:
+            write_frame(f, {"samples": len(chunk) // 4}, chunk)
+            # Nothing else is sent mid-stream, so anything readable is the
+            # cancel, and the request's frame is already out of the buffer.
+            if select.select([conn], [], [], 0)[0]:
+                try:
+                    frame = read_frame(f)
+                except Exception as e:
+                    raise Desync(e) from e
+                if frame is None or frame[0].get("op") != "cancel":
+                    raise Desync("the daemon sent a request mid-stream")
+                break
+    finally:
+        chunks.close()
 
 
 def _exit_with_daemon():
@@ -93,9 +129,20 @@ def serve(socket_path, handle):
         if frame is None:
             break
         header, samples = frame
+        op = header.get("op")
+        if op == "cancel":
+            continue
         try:
-            answer = dict(handle(header, samples), ok=True)
+            answer = handle(header, samples)
+            if op == "synth":
+                stream(conn, f, answer)
+                answer = {}
+            answer = dict(answer, ok=True)
+        except Desync:
+            break
         except Exception as e:  # the answer carries it; the sidecar stays up
             answer = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        if op == "synth":
+            answer["end"] = True
         write_frame(f, answer)
     os._exit(0)

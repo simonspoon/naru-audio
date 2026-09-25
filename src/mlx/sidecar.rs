@@ -4,7 +4,9 @@
 //!
 //! One [`Sidecar`] per home: it starts `python -m naru_audio_mlx` on the
 //! first MLX load, sends it one request at a time, and stops it when the
-//! last MLX model unloads. The child exits when its stdin, a pipe from the
+//! last MLX model unloads. [`Sidecar::synth`] is the one request with more
+//! than one answer frame: it reads the stream to its end frame, cancelled
+//! or not, so the next request starts in step. The child exits when its stdin, a pipe from the
 //! daemon, closes, so it never outlives the daemon, however that ends.
 //!
 //! A request that finds the sidecar dead, or loses it mid-request, gets
@@ -22,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::registry::manifest::Kind;
 use crate::stt::SttError;
 
 /// The largest header either side accepts: `MAX_HEADER` in `protocol.py`.
@@ -152,9 +155,10 @@ pub struct Sidecar {
 #[derive(Default)]
 struct State {
     process: Option<Process>,
-    /// Loaded models to their directories, reloaded into a restarted
-    /// sidecar, and the instance of each that [`Sidecar::load`] returned.
-    models: BTreeMap<String, (PathBuf, u64)>,
+    /// Loaded models to their kinds and directories, reloaded into a
+    /// restarted sidecar, and the instance of each that [`Sidecar::load`]
+    /// returned.
+    models: BTreeMap<String, (Kind, PathBuf, u64)>,
     /// The last instance handed out.
     instances: u64,
     /// A restart thread is waiting out the backoff.
@@ -184,15 +188,20 @@ impl Sidecar {
         *self.reason.lock().unwrap_or_else(|e| e.into_inner()) = reason;
     }
 
-    /// Loads `model` from `dir`, starting the sidecar if need be: the
-    /// instance to [`Sidecar::unload`], and the bytes the load added to
-    /// MLX's active memory (§3.5).
+    /// Loads `model`, a `kind` model, from `dir`, starting the sidecar if
+    /// need be: the instance to [`Sidecar::unload`], the bytes the load
+    /// added to MLX's active memory (§3.5), and the `load` answer.
     ///
     /// The model manager drops an unloaded model off the runtime, so a
     /// reload can come before the unload of the instance it replaces. The
     /// reload unloads that instance first, so its delta is its own, and the
     /// late unload then names an instance that is gone and does nothing.
-    pub fn load(self: &Arc<Self>, model: &str, dir: &Path) -> Result<(u64, u64), SttError> {
+    pub fn load(
+        self: &Arc<Self>,
+        model: &str,
+        kind: Kind,
+        dir: &Path,
+    ) -> Result<(u64, u64, Value), SttError> {
         let mut state = self.lock();
         let replaced = state.models.remove(model).is_some();
         if state.process.is_none() {
@@ -200,14 +209,14 @@ impl Sidecar {
         } else if replaced {
             self.request(&mut state, json!({"op": "unload", "model": model}), None)?;
         }
-        match self.load_one(&mut state, model, dir) {
-            Ok(bytes) => {
+        match self.load_one(&mut state, model, kind, dir) {
+            Ok((bytes, answer)) => {
                 state.instances += 1;
                 let instance = state.instances;
                 state
                     .models
-                    .insert(model.to_string(), (dir.to_path_buf(), instance));
-                Ok((instance, bytes))
+                    .insert(model.to_string(), (kind, dir.to_path_buf(), instance));
+                Ok((instance, bytes, answer))
             }
             Err(e) => {
                 if state.models.is_empty() {
@@ -222,15 +231,16 @@ impl Sidecar {
         self: &Arc<Self>,
         state: &mut State,
         model: &str,
+        kind: Kind,
         dir: &Path,
-    ) -> Result<u64, SttError> {
+    ) -> Result<(u64, Value), SttError> {
         let before = self.active_bytes(state)?;
-        self.request(
+        let answer = self.request(
             state,
-            json!({"op": "load", "model": model, "dir": dir}),
+            json!({"op": "load", "model": model, "kind": kind.as_str(), "dir": dir}),
             None,
         )?;
-        Ok(self.active_bytes(state)?.saturating_sub(before))
+        Ok((self.active_bytes(state)?.saturating_sub(before), answer))
     }
 
     fn active_bytes(self: &Arc<Self>, state: &mut State) -> Result<u64, SttError> {
@@ -264,11 +274,72 @@ impl Sidecar {
             .collect())
     }
 
+    /// Synthesises with `model`: `request` is the `synth` header's other
+    /// keys (`protocol.py`), and `sink` gets each chunk of samples as it
+    /// comes. A `false` from the sink cancels: the sidecar is told to stop,
+    /// and the chunks already on their way are read and dropped up to the
+    /// end frame. A panic in the sink does the same, then resumes.
+    pub fn synth(
+        self: &Arc<Self>,
+        model: &str,
+        mut request: Value,
+        sink: &mut dyn FnMut(&[f32]) -> bool,
+    ) -> Result<(), SttError> {
+        let mut state = self.lock();
+        if state.process.is_none() {
+            self.start(&mut state)?;
+        }
+        request["op"] = json!("synth");
+        request["model"] = json!(model);
+        let frame = encode(&request, None).map_err(|e| SttError::Sidecar(e.to_string()))?;
+        let cancel = encode(&json!({"op": "cancel"}), None).expect("a small header");
+        let Some(process) = &mut state.process else {
+            return Err(not_running());
+        };
+        let mut panic = None;
+        let end = process.stream.write_all(&frame).and_then(|()| {
+            let mut cancelled = false;
+            loop {
+                let (header, samples) = read_frame(&mut process.stream)?;
+                if header.get("end").is_some() {
+                    return Ok(header);
+                }
+                if cancelled {
+                    continue;
+                }
+                let samples = samples.unwrap_or_default();
+                let more =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(&samples)))
+                        .unwrap_or_else(|payload| {
+                            panic = Some(payload);
+                            false
+                        });
+                if !more {
+                    cancelled = true;
+                    process.stream.write_all(&cancel)?;
+                }
+            }
+        });
+        let result = match end {
+            Ok(end) => answer(end).map(drop),
+            Err(e) => Err(self.crashed(&mut state, e)),
+        };
+        if let Some(payload) = panic {
+            drop(state);
+            std::panic::resume_unwind(payload);
+        }
+        result
+    }
+
     /// Unloads `instance` of `model`, unless it has been replaced; the last
     /// model out stops the sidecar.
     pub fn unload(self: &Arc<Self>, model: &str, instance: u64) {
         let mut state = self.lock();
-        if state.models.get(model).is_none_or(|(_, i)| *i != instance) {
+        if state
+            .models
+            .get(model)
+            .is_none_or(|(_, _, i)| *i != instance)
+        {
             return;
         }
         state.models.remove(model);
@@ -324,13 +395,13 @@ impl Sidecar {
             std::thread::sleep(Duration::from_millis(20));
         };
         state.process = Some(Process { child, stream });
-        let models: Vec<(String, PathBuf)> = state
+        let models: Vec<(String, Kind, PathBuf)> = state
             .models
             .iter()
-            .map(|(m, (d, _))| (m.clone(), d.clone()))
+            .map(|(m, (k, d, _))| (m.clone(), *k, d.clone()))
             .collect();
-        for (model, dir) in models {
-            if let Err(e) = self.load_one(state, &model, &dir) {
+        for (model, kind, dir) in models {
+            if let Err(e) = self.load_one(state, &model, kind, &dir) {
                 state.stop();
                 return Err(e);
             }
@@ -349,28 +420,15 @@ impl Sidecar {
     ) -> Result<Value, SttError> {
         let frame = encode(&header, samples).map_err(|e| SttError::Sidecar(e.to_string()))?;
         let Some(process) = &mut state.process else {
-            return Err(SttError::BackendUnavailable {
-                backend: "mlx".to_string(),
-                reason: "the sidecar is not running".to_string(),
-            });
+            return Err(not_running());
         };
-        let answer = process
+        let reply = process
             .stream
             .write_all(&frame)
             .and_then(|()| read_frame(&mut process.stream));
-        let (answer, _) = match answer {
-            Ok(a) => a,
-            Err(e) => return Err(self.crashed(state, e)),
-        };
-        if answer["ok"].as_bool() == Some(true) {
-            Ok(answer)
-        } else {
-            Err(SttError::Sidecar(
-                answer["error"]
-                    .as_str()
-                    .unwrap_or("no reason given")
-                    .to_string(),
-            ))
+        match reply {
+            Ok((reply, _)) => answer(reply),
+            Err(e) => Err(self.crashed(state, e)),
         }
     }
 
@@ -423,6 +481,27 @@ impl Sidecar {
                 })),
             }
         }
+    }
+}
+
+fn not_running() -> SttError {
+    SttError::BackendUnavailable {
+        backend: "mlx".to_string(),
+        reason: "the sidecar is not running".to_string(),
+    }
+}
+
+/// An answer header: itself when `ok`, else [`SttError::Sidecar`].
+fn answer(header: Value) -> Result<Value, SttError> {
+    if header["ok"].as_bool() == Some(true) {
+        Ok(header)
+    } else {
+        Err(SttError::Sidecar(
+            header["error"]
+                .as_str()
+                .unwrap_or("no reason given")
+                .to_string(),
+        ))
     }
 }
 

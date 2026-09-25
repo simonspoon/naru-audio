@@ -10,6 +10,8 @@
 //! [`level::Leveller`] and the gap between sentences are kept.
 
 pub mod level;
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+pub(crate) mod mlx;
 pub(crate) mod sherpa;
 
 use crate::registry::manifest::Voice;
@@ -57,6 +59,12 @@ pub trait TtsModel: Send + Sync {
         options: &SynthOptions,
         sink: Sink,
     ) -> Result<(), TtsError>;
+
+    /// The bytes the model holds outside the daemon's own RSS (§3.5: an
+    /// MLX model lives in the sidecar), when it reports them.
+    fn resident_bytes(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -92,6 +100,8 @@ pub enum TtsError {
     InvalidGap(f32),
     /// `generate` returned no audio without being cancelled.
     GenerateFailed,
+    /// The MLX sidecar answered with an error.
+    Sidecar(String),
 }
 
 impl std::fmt::Display for TtsError {
@@ -118,6 +128,7 @@ impl std::fmt::Display for TtsError {
             TtsError::NulInText => write!(f, "the text contains a NUL character"),
             TtsError::InvalidGap(gap) => write!(f, "gap {gap} is not between 0 and 5 seconds"),
             TtsError::GenerateFailed => write!(f, "synthesis produced no audio"),
+            TtsError::Sidecar(message) => write!(f, "the MLX sidecar failed: {message}"),
         }
     }
 }

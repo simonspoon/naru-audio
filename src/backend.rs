@@ -1,6 +1,5 @@
 //! §3.6 backends: `available()`, used by `pull` and `/v1/models`, and
-//! loading. `sherpa-onnx` and `mlx` (§5.3) STT and `sherpa-onnx` TTS load
-//! so far.
+//! loading. `sherpa-onnx` and `mlx` (§5.3) STT and TTS load so far.
 
 use std::path::Path;
 
@@ -63,6 +62,8 @@ pub fn load_tts(manifest: &Manifest, dir: &Path) -> Result<Box<dyn TtsModel>, Tt
     }
     match backend.as_str() {
         "sherpa-onnx" => Ok(Box::new(SherpaTts::load(manifest, dir)?)),
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+        "mlx" => Ok(Box::new(crate::tts::mlx::MlxTts::load(manifest, dir)?)),
         _ => Err(unavailable(
             "cannot load text-to-speech models yet".to_string(),
         )),

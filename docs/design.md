@@ -683,8 +683,21 @@ Sidecar design:
 - **Protocol:** length-prefixed frames over the Unix socket (the idea behind
   auris's daemon framing, docs/daemon.md). Each frame is a JSON header
   `{op: load|unload|transcribe|synth|stats, model, …}`, optionally followed by
-  raw f32le samples. Synth answers are a stream of PCM frames terminated by an
-  `end` header. `stats` returns resident bytes for §3.5.
+  raw f32le samples (the full list is in `mlx/naru_audio_mlx/protocol.py`).
+  `load` names the model's kind; a TTS load answers with its `sample_rate`.
+  A `synth` answer is a stream of `{samples: S}` PCM frames, one per
+  mlx-audio chunk (0.32 s) as it is generated, terminated by an
+  `{end: true, ok, error?}` header. To cancel, the daemon sends
+  `{op: cancel}` once and reads on to the `end` header: the sidecar checks
+  for it after each frame and stops generating, and ignores a cancel that
+  arrives after the end, which has no answer. The connection is never
+  left mid-stream. `stats` returns resident bytes for §3.5.
+- **TTS models:** mlx-audio's `load_model` loads the pulled directory, so a
+  new mlx-audio model is a catalog entry (`backend = "mlx"`, `kind =
+  "tts"`, its `[[voice]]` ids passed as mlx-audio's `voice`, or a
+  `reference` recording as `ref_audio`). Qwen3-TTS 0.6B CustomVoice 8-bit
+  is the first. No gap or leveller: the chunks are cut mid-sentence, as
+  with Pocket.
 - **Cost:** about 150–400 ms extra first-request latency for the process start
   **[assumption]**, then a per-request IPC overhead that is negligible
   compared with decode time.

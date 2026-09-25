@@ -224,10 +224,11 @@ impl TtsModel for SherpaTts {
     }
 }
 
-/// What sherpa cannot be handed: a NUL panics in its `CString::new`, and a
-/// gap that is not a small non-negative number would allocate without bound
-/// inside the callback.
-fn check(text: &str, options: &SynthOptions) -> Result<(), TtsError> {
+/// What neither engine is handed: a NUL panics in sherpa's `CString::new`,
+/// and a gap that is not a small non-negative number would allocate without
+/// bound inside sherpa's callback. The MLX engine (`super::mlx`) checks the
+/// same, so a request means the same whatever model serves it.
+pub(super) fn check(text: &str, options: &SynthOptions) -> Result<(), TtsError> {
     if text.contains('\0') {
         return Err(TtsError::NulInText);
     }

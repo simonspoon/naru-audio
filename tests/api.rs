@@ -23,7 +23,7 @@ use tower::ServiceExt;
 
 const HOSTPORT: &str = "127.0.0.1:7870";
 /// Built in, and listed on macOS only.
-const MLX: &str = "parakeet-tdt-0.6b-v2-mlx";
+const MLX: &[&str] = &["parakeet-tdt-0.6b-v2-mlx", "qwen3-tts-0.6b-mlx"];
 
 fn app(home: &Path) -> Router {
     let log = Arc::new(Logger::stderr());
@@ -125,11 +125,11 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     assert_eq!(body["object"], "list");
     let data = body["data"].as_array().unwrap();
     // The built-in catalog is listed too; the checks below are about the
-    // rest. The MLX parakeet is listed on macOS only, its platforms.
+    // rest. The MLX models are listed on macOS only, their platforms.
     let ids: Vec<&str> = data
         .iter()
         .map(|m| m["id"].as_str().unwrap())
-        .filter(|&id| id != MLX)
+        .filter(|id| !MLX.contains(id))
         .collect();
     assert_eq!(
         ids,
@@ -146,14 +146,15 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     let data: Vec<&Value> = data
         .iter()
         .filter(|m| {
+            let id = m["id"].as_str().unwrap();
             ![
                 "kokoro-v1.0",
                 "parakeet-tdt-0.6b-v2-int8",
-                MLX,
                 "pocket-tts-int8",
                 "silero-vad",
             ]
-            .contains(&m["id"].as_str().unwrap())
+            .contains(&id)
+                && !MLX.contains(&id)
         })
         .collect();
 
@@ -330,7 +331,7 @@ async fn unreadable_manifest_json_is_skipped() {
         .unwrap()
         .iter()
         .map(|m| m["id"].as_str().unwrap())
-        .filter(|&id| id != MLX)
+        .filter(|id| !MLX.contains(id))
         .collect();
     assert_eq!(
         ids,
