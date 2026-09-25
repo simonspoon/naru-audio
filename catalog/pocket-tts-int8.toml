@@ -1,0 +1,110 @@
+# Kyutai Pocket TTS, the sherpa-onnx int8 export (2026-01-26). Archive size
+# and hash, and every [[file]] size and hash, computed 2026-09-25 from the
+# release tarball, one entry per file in it.
+#
+# Licence: the model is CC-BY-4.0 (kyutai/pocket-tts; LICENSE below). The
+# package README also says "It is for non-commercial" and points at the
+# ONNX export's LICENSE; the test_wavs are from
+# kyutai-labs/delayed-streams-modeling.
+#
+# Pocket has one speaker (`sid` 0) and clones the voice from a reference
+# recording, so each [[voice]] names one of the package's test_wavs. The
+# French sample is left out: the model speaks English only.
+
+[model]
+name        = "pocket-tts-int8"
+kind        = "tts"
+backend     = "sherpa-onnx"
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+languages   = ["en"]
+license     = "CC-BY-4.0"
+resident_bytes = 700_000_000             # daemon peak RSS serving it, 2026-09-25; state/measured.json corrects it
+
+[backend.sherpa-onnx]
+family           = "pocket"
+lm_flow          = "lm_flow.int8.onnx"
+lm_main          = "lm_main.int8.onnx"
+encoder          = "encoder.onnx"
+decoder          = "decoder.int8.onnx"
+text_conditioner = "text_conditioner.onnx"
+vocab_json       = "vocab.json"
+token_scores_json = "token_scores.json"
+
+[[archive]]
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2"
+sha256 = "2f3b88823cbbb9bf0b2477ec8ae7b3fec417b3a87b6bb5f256dba66f2ad967cb"
+size   = 98_336_520
+strip  = 1                               # sherpa-onnx-pocket-tts-int8-2026-01-26/
+
+[[voice]]
+id = "bria"
+sid = 0
+reference = "test_wavs/bria.wav"
+gender = "f"
+default = true
+
+[[voice]]
+id = "loona"
+sid = 0
+reference = "test_wavs/loona.wav"
+gender = "f"
+
+[[file]]
+path   = "LICENSE"
+sha256 = "fe7b4ce83b8381cc5b216bbb4af73c570688d1b819c73bbaed8ca401f4677cd6"
+size   = 18_655
+
+[[file]]
+path   = "README.md"
+sha256 = "2d05e627fe4fa3c625e822efcd20ad2ca62eb3b4fc1d67ae2625cb106b4f689c"
+size   = 389
+
+[[file]]
+path   = "decoder.int8.onnx"
+sha256 = "12b0857402d31aead94df19d6783b4350d1f740e811f3a3202c70ad89ae11eea"
+size   = 22_693_618
+
+[[file]]
+path   = "encoder.onnx"
+sha256 = "e8f2f6d301ffb96e398b138a7dc6d3038622d236044636b73d920bab85890260"
+size   = 72_713_165
+
+[[file]]
+path   = "lm_flow.int8.onnx"
+sha256 = "8d627d235c44a597da908e1085ebe241cbbe358964c502c5a5063d18851a5529"
+size   = 9_962_530
+
+[[file]]
+path   = "lm_main.int8.onnx"
+sha256 = "bfc0c7e7e3d72864fa3bb2ee499f62f21ddc1474b885f5f3ca570f8be73e787e"
+size   = 76_341_079
+
+[[file]]
+path   = "test_wavs/bria.wav"
+sha256 = "85f46d6f0642f657a6bd689ddaa52d5a5f53e4314715e1032704c80917392181"
+size   = 2_152_986
+
+[[file]]
+path   = "test_wavs/loona.wav"
+sha256 = "82bde825fe9ad43b3d7fa2b429a7e7acc9bcda2d3a208546e2db4863043ec64c"
+size   = 50_478
+
+[[file]]
+path   = "test_wavs/sample_fr_hibiki_crepes.wav"
+sha256 = "291ccf13f4bb2449c4f4131bcc967f8722cfd87451d53da022c985aa5f835736"
+size   = 2_701_766
+
+[[file]]
+path   = "text_conditioner.onnx"
+sha256 = "0b84e837d7bfaf2c896627b03e3f080320309f37f4fc7df7698c644f7ba5e6b1"
+size   = 16_388_343
+
+[[file]]
+path   = "token_scores.json"
+sha256 = "5be2f278caf9b9800741f0fd82bff677f4943ec764c356f907213434b622d958"
+size   = 123_616
+
+[[file]]
+path   = "vocab.json"
+sha256 = "6fb646346cf931016f70c4921aab0900ce7a304b893cb02135c74e294abfea01"
+size   = 69_478

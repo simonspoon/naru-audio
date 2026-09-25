@@ -73,6 +73,12 @@ pub enum TtsError {
         model: String,
         key: String,
     },
+    /// `[backend.sherpa-onnx] family` names no model family sherpa is
+    /// wired for here.
+    UnknownFamily {
+        model: String,
+        family: String,
+    },
     MissingModelFile(std::path::PathBuf),
     /// `OfflineTts::create` returned `None`.
     CreateFailed,
@@ -98,6 +104,10 @@ impl std::fmt::Display for TtsError {
             TtsError::MissingConfig { model, key } => {
                 write!(f, "`{model}` has no backend `{key}` setting")
             }
+            TtsError::UnknownFamily { model, family } => write!(
+                f,
+                "`{model}` has unknown family {family}; expected \"kokoro\" or \"pocket\""
+            ),
             TtsError::MissingModelFile(path) => {
                 write!(f, "model file missing: {}", path.display())
             }

@@ -23,6 +23,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/parakeet-tdt-0.6b-v2-mlx.toml"),
     ),
     (
+        "pocket-tts-int8.toml",
+        include_str!("../../catalog/pocket-tts-int8.toml"),
+    ),
+    (
         "silero-vad.toml",
         include_str!("../../catalog/silero-vad.toml"),
     ),
@@ -88,6 +92,9 @@ pub struct ArchiveEntry {
 pub struct Voice {
     pub id: String,
     pub sid: i32,
+    /// A voice-cloning model's reference recording (Pocket TTS), relative
+    /// to the model directory; it must be a [[file]].
+    pub reference: Option<String>,
     pub accent: Option<String>,
     pub gender: Option<String>,
     #[serde(default)]
@@ -199,6 +206,17 @@ impl Manifest {
                     ));
                 }
                 None => {}
+            }
+        }
+
+        for v in &self.voices {
+            if let Some(r) = &v.reference
+                && !paths.contains(r)
+            {
+                return Err(format!(
+                    "voice `{}` reference `{r}` is not a [[file]]",
+                    v.id
+                ));
             }
         }
 
@@ -321,6 +339,7 @@ mod tests {
                 "kokoro-v1.0",
                 "parakeet-tdt-0.6b-v2-int8",
                 "parakeet-tdt-0.6b-v2-mlx",
+                "pocket-tts-int8",
                 "silero-vad"
             ]
         );
@@ -405,5 +424,48 @@ mod tests {
         assert_eq!(m.voices.len(), 54);
         let heart = m.voices.iter().find(|v| v.id == "af_heart").unwrap();
         assert_eq!((heart.sid, heart.default), (3, true));
+    }
+
+    #[test]
+    fn builtin_pocket_clones_two_reference_voices() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["pocket-tts-int8"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(
+            m.raw["backend"]["sherpa-onnx"]["family"].as_str(),
+            Some("pocket")
+        );
+        let voices: Vec<(&str, i32, Option<&str>, bool)> = m
+            .voices
+            .iter()
+            .map(|v| (v.id.as_str(), v.sid, v.reference.as_deref(), v.default))
+            .collect();
+        assert_eq!(
+            voices,
+            [
+                ("bria", 0, Some("test_wavs/bria.wav"), true),
+                ("loona", 0, Some("test_wavs/loona.wav"), false),
+            ]
+        );
+        // Kokoro's voices have no reference.
+        assert!(
+            cat.models["kokoro-v1.0"]
+                .voices
+                .iter()
+                .all(|v| v.reference.is_none())
+        );
+    }
+
+    #[test]
+    fn a_voice_reference_must_be_a_pinned_file() {
+        let text = include_str!("../../catalog/pocket-tts-int8.toml").replace(
+            "test_wavs/loona.wav\"\ngender",
+            "test_wavs/other.wav\"\ngender",
+        );
+        let err = Manifest::parse(&text, "pocket").unwrap_err().to_string();
+        assert!(
+            err.contains("reference `test_wavs/other.wav` is not a [[file]]"),
+            "{err}"
+        );
     }
 }

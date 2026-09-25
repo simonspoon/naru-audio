@@ -1,6 +1,6 @@
-//! Kokoro v1.0 through the library (`backend::load_tts`).
+//! Kokoro v1.0 and Pocket TTS through the library (`backend::load_tts`).
 //!
-//! Model-dependent tests skip (eprintln and return) when `kokoro-v1.0` is
+//! Model-dependent tests skip (eprintln and return) when their model is
 //! not pulled under `$NARU_AUDIO_TEST_HOME`, else `$NARU_AUDIO_HOME` or
 //! `~/.naru-audio`, as tests/stt.rs does. `NARU_AUDIO_REQUIRE_MODELS=1`
 //! turns the skip into a failure. Timings are printed; run with
@@ -18,6 +18,7 @@ use naru_audio::tts::{Sink, SynthOptions, TtsError, TtsModel};
 
 const MODEL: &str = "kokoro-v1.0";
 const VOICE: &str = "af_heart";
+const POCKET: &str = "pocket-tts-int8";
 
 /// The first `n` sentences of the spike corpus (docs/tts-spike-corpus.txt).
 fn corpus(n: usize) -> String {
@@ -32,27 +33,32 @@ fn corpus(n: usize) -> String {
 /// Loaded once and shared: a load holds ~0.95 GB.
 fn model() -> Option<&'static dyn TtsModel> {
     static MODEL_CELL: OnceLock<Option<Box<dyn TtsModel>>> = OnceLock::new();
-    MODEL_CELL
-        .get_or_init(|| {
-            let home = std::env::var_os("NARU_AUDIO_TEST_HOME")
-                .map(PathBuf::from)
-                .or_else(registry::default_home)?;
-            let registry = Registry::open(&home).expect("open registry");
-            if !registry.is_installed(MODEL) {
-                let message = format!(
-                    "{MODEL} not pulled under {} (set NARU_AUDIO_TEST_HOME to override)",
-                    home.display()
-                );
-                if std::env::var_os("NARU_AUDIO_REQUIRE_MODELS").is_some_and(|v| v == "1") {
-                    panic!("{message}; NARU_AUDIO_REQUIRE_MODELS=1 forbids skipping");
-                }
-                eprintln!("skip: {message}");
-                return None;
-            }
-            let manifest = registry.pulled_manifest(MODEL).expect("pulled manifest");
-            Some(load_tts(&manifest, &registry.model_dir(MODEL)).expect("load"))
-        })
-        .as_deref()
+    MODEL_CELL.get_or_init(|| load(MODEL)).as_deref()
+}
+
+fn pocket() -> Option<&'static dyn TtsModel> {
+    static POCKET_CELL: OnceLock<Option<Box<dyn TtsModel>>> = OnceLock::new();
+    POCKET_CELL.get_or_init(|| load(POCKET)).as_deref()
+}
+
+fn load(name: &str) -> Option<Box<dyn TtsModel>> {
+    let home = std::env::var_os("NARU_AUDIO_TEST_HOME")
+        .map(PathBuf::from)
+        .or_else(registry::default_home)?;
+    let registry = Registry::open(&home).expect("open registry");
+    if !registry.is_installed(name) {
+        let message = format!(
+            "{name} not pulled under {} (set NARU_AUDIO_TEST_HOME to override)",
+            home.display()
+        );
+        if std::env::var_os("NARU_AUDIO_REQUIRE_MODELS").is_some_and(|v| v == "1") {
+            panic!("{message}; NARU_AUDIO_REQUIRE_MODELS=1 forbids skipping");
+        }
+        eprintln!("skip: {message}");
+        return None;
+    }
+    let manifest = registry.pulled_manifest(name).expect("pulled manifest");
+    Some(load_tts(&manifest, &registry.model_dir(name)).expect("load"))
 }
 
 /// One sink call: when it started and returned, on which thread, and the
@@ -68,6 +74,16 @@ struct Delivery {
 /// `keep` says so.
 fn synth(
     model: &dyn TtsModel,
+    text: &str,
+    options: &SynthOptions,
+    keep: fn(usize) -> bool,
+) -> (Instant, Result<(), TtsError>, Vec<Delivery>) {
+    synth_as(model, VOICE, text, options, keep)
+}
+
+fn synth_as(
+    model: &dyn TtsModel,
+    voice: &str,
     text: &str,
     options: &SynthOptions,
     keep: fn(usize) -> bool,
@@ -88,7 +104,7 @@ fn synth(
         keep(n)
     });
     let start = Instant::now();
-    let result = model.synth(text, VOICE, options, sink);
+    let result = model.synth(text, voice, options, sink);
     let deliveries = std::mem::take(&mut *deliveries.lock().unwrap());
     (start, result, deliveries)
 }
@@ -251,6 +267,87 @@ fn an_unknown_voice_is_an_error() {
     let sink: Sink = Box::new(|_| panic!("no audio for an unknown voice"));
     let err = model
         .synth("Hello.", "alloy", &SynthOptions::default(), sink)
+        .unwrap_err();
+    assert!(matches!(err, TtsError::UnknownVoice { .. }), "{err}");
+}
+
+/// The longest run of exact zeros in `samples`, in samples: the sentence gap
+/// is digital silence, which a model's own pauses never are.
+fn longest_zero_run(samples: &[f32]) -> usize {
+    let (mut longest, mut run) = (0, 0);
+    for &s in samples {
+        run = if s == 0.0 { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    longest
+}
+
+/// Voiced RMS (|s| above 300/32768, as the leveller counts it) of `samples`.
+fn voiced_rms(samples: &[f32]) -> f32 {
+    let voiced: Vec<f32> = samples
+        .iter()
+        .copied()
+        .filter(|s| s.abs() > 300.0 / 32768.0)
+        .collect();
+    (voiced.iter().map(|s| s * s).sum::<f32>() / voiced.len().max(1) as f32).sqrt()
+}
+
+/// Pocket's callback pieces are decoder chunks, several per sentence, so
+/// none of them gets the sentence gap: with the default options no chunk
+/// carries a gap's run of digital silence. Prints what each boundary looks
+/// like: the step between the samples either side of it, against the
+/// typical step inside a chunk, and the voiced RMS either side.
+#[test]
+fn pocket_chunks_reach_the_sink_without_a_gap() {
+    let Some(model) = pocket() else { return };
+    assert!(model.voices().iter().any(|v| v.id == "bria" && v.default));
+    let (start, result, deliveries) =
+        synth_as(model, "bria", &corpus(3), &SynthOptions::default(), |_| {
+            true
+        });
+    let done = Instant::now();
+    result.expect("synth");
+    let rate = model.sample_rate() as f64;
+    let audio: usize = deliveries.iter().map(|d| d.samples.len()).sum();
+    eprintln!(
+        "{} chunks; first at {:.3} s; synth wall {:.3} s for {:.2} s of audio",
+        deliveries.len(),
+        deliveries[0].entered.duration_since(start).as_secs_f64(),
+        done.duration_since(start).as_secs_f64(),
+        audio as f64 / rate
+    );
+    assert!(deliveries.len() > 3, "more chunks than sentences");
+    let gap = (SynthOptions::default().gap as f64 * rate) as usize;
+    for (i, d) in deliveries.iter().enumerate() {
+        let zeros = longest_zero_run(&d.samples);
+        eprintln!(
+            "chunk {i}: {:.2} s, voiced rms {:.4}, longest zero run {zeros}",
+            d.samples.len() as f64 / rate,
+            voiced_rms(&d.samples)
+        );
+        assert!(zeros < gap, "chunk {i} carries a gap");
+    }
+    let all: Vec<f32> = deliveries.iter().flat_map(|d| d.samples.clone()).collect();
+    let mut steps: Vec<f32> = all.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+    steps.sort_by(f32::total_cmp);
+    let p99 = steps[steps.len() * 99 / 100];
+    let mut at = 0;
+    for pair in deliveries.windows(2) {
+        at += pair[0].samples.len();
+        let step = (all[at] - all[at - 1]).abs();
+        eprintln!(
+            "boundary at {:.2} s: step {step:.4} (p99 step {p99:.4})",
+            at as f64 / rate
+        );
+    }
+}
+
+#[test]
+fn pocket_refuses_an_unknown_voice() {
+    let Some(model) = pocket() else { return };
+    let sink: Sink = Box::new(|_| panic!("no audio for an unknown voice"));
+    let err = model
+        .synth("Hello.", VOICE, &SynthOptions::default(), sink)
         .unwrap_err();
     assert!(matches!(err, TtsError::UnknownVoice { .. }), "{err}");
 }

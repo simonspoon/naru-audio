@@ -1,11 +1,23 @@
-//! The `sherpa-onnx` [`TtsModel`]: Kokoro through `OfflineTts` (§5.1), as
-//! the task 9 spike ran it (examples/tts_spike.rs `whole`).
+//! The `sherpa-onnx` [`TtsModel`]: Kokoro or Kyutai Pocket TTS through
+//! `OfflineTts`, picked by `[backend.sherpa-onnx] family` (`kokoro` when
+//! absent). Kokoro runs as the task 9 spike ran it (§5.1,
+//! examples/tts_spike.rs `whole`).
 //!
-//! `max_num_sentences = 1`, so sherpa's `generate` callback fires once per
-//! sentence with that sentence's samples only. Each piece is levelled, gets
-//! the sentence gap in front of it (not the first), and goes to the sink
-//! from inside the callback, so a sentence reaches the sink before the next
-//! one is synthesised.
+//! Kokoro: `max_num_sentences = 1`, so sherpa's `generate` callback fires
+//! once per sentence with that sentence's samples only. Each piece is
+//! levelled, gets the sentence gap in front of it (not the first), and goes
+//! to the sink from inside the callback, so a sentence reaches the sink
+//! before the next one is synthesised.
+//!
+//! Pocket: one speaker, whose voice is cloned from each `[[voice]]`'s
+//! `reference` recording; `sid` and `speed` are ignored. It splits
+//! sentences itself and the callback fires once per decoder chunk (1.2 s),
+//! mid-sentence, so pieces go to the sink as they come: no gap, which would
+//! be a pause mid-word (Pocket leaves its own 0.1–0.3 s between sentences),
+//! and no leveller, which measured 2026-09-25 on three sentences swung
+//! between -3 and +3 dB from one chunk to the next. The chunks join without
+//! a step (the largest boundary step 0.01, against a p99 in-chunk step of
+//! 0.13).
 //!
 //! sherpa splits at a `.` before a space and a capital or a digit ("Dr.
 //! Brown", "Fig. 3"; not "Inc. hired"), so the abbreviations kokoro-rs
@@ -23,7 +35,7 @@ use std::rc::Rc;
 
 use sherpa_onnx::{
     GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig,
-    OfflineTtsModelConfig,
+    OfflineTtsModelConfig, OfflineTtsPocketModelConfig, Wave,
 };
 
 use super::level::Leveller;
@@ -51,10 +63,22 @@ const ABBREVIATIONS: &[&str] = &[
     "U.S", "U.K",
 ];
 
+/// Which sherpa model a `[backend.sherpa-onnx]` table configures: its
+/// `family` key, `kokoro` when absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Kokoro,
+    Pocket,
+}
+
 pub struct SherpaTts {
     tts: OfflineTts,
     name: String,
+    family: Family,
     voices: Vec<Voice>,
+    /// Pocket: each voice's reference samples and their rate, in `voices`
+    /// order, read once here rather than per request. Empty for Kokoro.
+    references: Vec<(Vec<f32>, i32)>,
 }
 
 impl SherpaTts {
@@ -80,9 +104,29 @@ impl SherpaTts {
             }
         };
 
-        let config = OfflineTtsConfig {
-            model: OfflineTtsModelConfig {
-                kokoro: OfflineTtsKokoroModelConfig {
+        let family = match table.and_then(|t| t.get("family")) {
+            None => Family::Kokoro,
+            Some(v) => match v.as_str() {
+                Some("kokoro") => Family::Kokoro,
+                Some("pocket") => Family::Pocket,
+                _ => {
+                    return Err(TtsError::UnknownFamily {
+                        model: name.clone(),
+                        family: v.to_string(),
+                    });
+                }
+            },
+        };
+        let mut model = OfflineTtsModelConfig {
+            // The spike measured with every core.
+            num_threads: std::thread::available_parallelism().map_or(4, |n| n.get() as i32),
+            provider: Some("cpu".to_string()),
+            ..Default::default()
+        };
+        let mut references = Vec::new();
+        match family {
+            Family::Kokoro => {
+                model.kokoro = OfflineTtsKokoroModelConfig {
                     model: Some(file("model")?),
                     voices: Some(file("voices")?),
                     tokens: Some(file("tokens")?),
@@ -91,12 +135,36 @@ impl SherpaTts {
                     // nor a lexicon it calls exit() (docs/tts-spike.md).
                     lang: Some(setting("lang")?.to_string()),
                     ..Default::default()
-                },
-                // The spike measured with every core.
-                num_threads: std::thread::available_parallelism().map_or(4, |n| n.get() as i32),
-                provider: Some("cpu".to_string()),
-                ..Default::default()
-            },
+                };
+            }
+            Family::Pocket => {
+                model.pocket = OfflineTtsPocketModelConfig {
+                    lm_flow: Some(file("lm_flow")?),
+                    lm_main: Some(file("lm_main")?),
+                    encoder: Some(file("encoder")?),
+                    decoder: Some(file("decoder")?),
+                    text_conditioner: Some(file("text_conditioner")?),
+                    vocab_json: Some(file("vocab_json")?),
+                    token_scores_json: Some(file("token_scores_json")?),
+                    // Upstream's example value; one embedding per voice.
+                    voice_embedding_cache_capacity: 50,
+                };
+                for v in &manifest.voices {
+                    let path = dir.join(v.reference.as_deref().ok_or_else(|| {
+                        TtsError::MissingConfig {
+                            model: name.clone(),
+                            key: format!("voice.{}.reference", v.id),
+                        }
+                    })?);
+                    let wave = Wave::read(&path.to_string_lossy())
+                        .ok_or(TtsError::MissingModelFile(path))?;
+                    references.push((wave.samples().to_vec(), wave.sample_rate()));
+                }
+            }
+        }
+        let config = OfflineTtsConfig {
+            model,
+            // Kokoro only; Pocket splits sentences itself.
             max_num_sentences: 1,
             ..Default::default()
         };
@@ -104,7 +172,9 @@ impl SherpaTts {
         Ok(SherpaTts {
             tts,
             name: name.clone(),
+            family,
             voices: manifest.voices.clone(),
+            references,
         })
     }
 }
@@ -126,21 +196,24 @@ impl TtsModel for SherpaTts {
         sink: Sink,
     ) -> Result<(), TtsError> {
         check(text, options)?;
-        let sid = self
+        let index = self
             .voices
             .iter()
-            .find(|v| v.id == voice)
+            .position(|v| v.id == voice)
             .ok_or_else(|| TtsError::UnknownVoice {
                 model: self.name.clone(),
                 voice: voice.to_string(),
-            })?
-            .sid;
-        let config = GenerationConfig {
-            sid,
+            })?;
+        let mut config = GenerationConfig {
+            sid: self.voices[index].sid,
             speed: options.speed,
             ..Default::default()
         };
-        let mut stream = Stream::new(options, self.sample_rate(), sink);
+        if let Some((samples, rate)) = self.references.get(index) {
+            config.reference_audio = Some(samples.clone());
+            config.reference_sample_rate = *rate;
+        }
+        let mut stream = Stream::new(options, self.family, self.sample_rate(), sink);
         let outcome = Rc::clone(&stream.outcome);
         let audio = self.tts.generate_with_config(
             &keep_abbreviations_whole(text),
@@ -233,17 +306,25 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(options: &SynthOptions, sample_rate: u32, sink: Sink) -> Self {
+    /// Pocket's pieces are decoder chunks, not sentences, so it gets
+    /// neither the sentence gap nor the leveller (module doc).
+    fn new(options: &SynthOptions, family: Family, sample_rate: u32, sink: Sink) -> Self {
+        let sentences = family == Family::Kokoro;
         Stream {
-            leveller: options.level.then(Leveller::new),
-            gap: (options.gap * sample_rate as f32) as usize,
+            leveller: (sentences && options.level).then(Leveller::new),
+            gap: if sentences {
+                (options.gap * sample_rate as f32) as usize
+            } else {
+                0
+            },
             started: false,
             sink,
             outcome: Rc::default(),
         }
     }
 
-    /// sherpa's callback: one sentence's samples. Returns whether to go on;
+    /// sherpa's callback: one sentence's samples (Kokoro) or one decoder
+    /// chunk's (Pocket). Returns whether to go on;
     /// never unwinds.
     fn piece(&mut self, samples: &[f32]) -> bool {
         if self.outcome.cancelled.get() {
@@ -330,6 +411,15 @@ mod tests {
         options: &SynthOptions,
         keep: usize,
     ) -> (Vec<Event>, Vec<Vec<f32>>, bool) {
+        run_as(Family::Kokoro, pieces, options, keep)
+    }
+
+    fn run_as(
+        family: Family,
+        pieces: &[Vec<f32>],
+        options: &SynthOptions,
+        keep: usize,
+    ) -> (Vec<Event>, Vec<Vec<f32>>, bool) {
         let log: Arc<Mutex<Vec<Event>>> = Arc::default();
         let chunks: Arc<Mutex<Vec<Vec<f32>>>> = Arc::default();
         let (sink_log, sink_chunks) = (Arc::clone(&log), Arc::clone(&chunks));
@@ -339,7 +429,7 @@ mod tests {
             chunks.push(chunk.to_vec());
             chunks.len() < keep
         });
-        let mut stream = Stream::new(options, RATE, sink);
+        let mut stream = Stream::new(options, family, RATE, sink);
         let outcome = Rc::clone(&stream.outcome);
         generate(pieces, &log, move |p| stream.piece(p));
         let log = std::mem::take(&mut *log.lock().unwrap());
@@ -443,6 +533,20 @@ mod tests {
         assert!(chunks[0][..1_500].iter().all(|&s| s == 0.0));
     }
 
+    /// Pocket's pieces are chunks of a sentence: with the default gap and
+    /// levelling they still reach the sink sample for sample.
+    #[test]
+    fn pocket_pieces_get_neither_a_gap_nor_levelling() {
+        let pieces = [piece(1_500, 5_000), piece(0, 28_800), piece(900, 5_000)];
+        let (_, chunks, _) = run_as(
+            Family::Pocket,
+            &pieces,
+            &SynthOptions::default(),
+            usize::MAX,
+        );
+        assert_eq!(chunks, pieces);
+    }
+
     #[test]
     fn a_sink_returning_false_stops_synthesis() {
         let pieces = [piece(0, 500), piece(0, 700), piece(0, 900)];
@@ -456,7 +560,7 @@ mod tests {
     #[test]
     fn a_panicking_sink_resurfaces_as_an_ordinary_panic_after_generate() {
         let sink: Sink = Box::new(|_| panic!("sink failed"));
-        let mut stream = Stream::new(&raw(0.12), RATE, sink);
+        let mut stream = Stream::new(&raw(0.12), Family::Kokoro, RATE, sink);
         let outcome = Rc::clone(&stream.outcome);
         let log: Arc<Mutex<Vec<Event>>> = Arc::default();
         generate(&[piece(0, 500), piece(0, 700)], &log, move |p| {
@@ -579,6 +683,74 @@ mod tests {
             .expect("an error");
         assert!(
             matches!(&err, TtsError::MissingModelFile(p) if p.ends_with("voices.bin")),
+            "{err}"
+        );
+    }
+
+    fn pocket() -> Manifest {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        cat.models["pocket-tts-int8"].clone()
+    }
+
+    /// An absent `family` and `family = "kokoro"` both load Kokoro (its
+    /// voices.bin is looked for); `"pocket"` loads Pocket (its lm_flow is).
+    #[test]
+    fn family_picks_the_model_config() {
+        let tmp = fake_model_dir();
+        std::fs::remove_file(tmp.path().join("voices.bin")).unwrap();
+        let mut explicit = kokoro();
+        let table = explicit.backend.get_mut("sherpa-onnx").unwrap();
+        table.insert("family".into(), "kokoro".into());
+        for m in [kokoro(), explicit] {
+            let err = SherpaTts::load(&m, tmp.path()).err().expect("an error");
+            assert!(
+                matches!(&err, TtsError::MissingModelFile(p) if p.ends_with("voices.bin")),
+                "{err}"
+            );
+        }
+        let err = SherpaTts::load(&pocket(), tmp.path())
+            .err()
+            .expect("an error");
+        assert!(
+            matches!(&err, TtsError::MissingModelFile(p) if p.ends_with("lm_flow.int8.onnx")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_family_is_an_error() {
+        let tmp = fake_model_dir();
+        for family in [toml::Value::from("vits"), toml::Value::from(1)] {
+            let mut m = kokoro();
+            let table = m.backend.get_mut("sherpa-onnx").unwrap();
+            table.insert("family".into(), family);
+            let err = SherpaTts::load(&m, tmp.path()).err().expect("an error");
+            assert!(matches!(&err, TtsError::UnknownFamily { .. }), "{err}");
+        }
+    }
+
+    /// Placeholder files where the pocket manifest looks for them, then the
+    /// references: a voice without one, or whose file is missing, fails
+    /// before sherpa.
+    #[test]
+    fn a_pocket_voice_needs_its_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = pocket();
+        for (key, value) in &m.backend["sherpa-onnx"] {
+            if key != "family" {
+                std::fs::write(tmp.path().join(value.as_str().unwrap()), b"").unwrap();
+            }
+        }
+        let err = SherpaTts::load(&m, tmp.path()).err().expect("an error");
+        assert!(
+            matches!(&err, TtsError::MissingModelFile(p) if p.ends_with("test_wavs/bria.wav")),
+            "{err}"
+        );
+        let mut m = pocket();
+        m.voices[0].reference = None;
+        let err = SherpaTts::load(&m, tmp.path()).err().expect("an error");
+        assert!(
+            matches!(&err, TtsError::MissingConfig { key, .. } if key == "voice.bria.reference"),
             "{err}"
         );
     }
