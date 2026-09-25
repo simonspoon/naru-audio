@@ -316,6 +316,7 @@ decode FIFO per loaded model. Health and listing never wait on it (§2.5).
 | `GET /health` | `200 {"status":"ok","version":"0.1.0","api":1,"pid":123,"uptime_s":4410,"stt":{"default":"parakeet-tdt-0.6b-v2-int8","ready":true,"problem":null},"tts":{"default":"kokoro-v1.0","ready":false,"problem":{"code":"model_not_pulled","message":"run `naru-audio pull kokoro-v1.0`"}},"backends":[{"name":"sherpa-onnx","available":true},{"name":"mlx","available":false,"reason":"requires Apple Silicon"}]}`. It is served from in-memory state and **never blocks behind a decode**, which fixes auris's `status` problem. `ready` means pulled and loadable, not necessarily loaded. |
 | `GET /v1/models` | OpenAI list: `{"object":"list","data":[{"id","object":"model","created","owned_by":"naru-audio","x_kind":"stt\|tts\|vad","x_backend","x_available","x_unavailable_reason","x_pulled","x_loaded","x_size_bytes","x_default"}]}`. It lists pulled models plus catalog models that can run on this machine. `?pulled=true` filters the list. |
 | `GET /v1/audio/voices?model=kokoro-v1.0` | `{"model":"kokoro-v1.0","voices":[{"id":"af_heart","accent":"us","gender":"f","default":true},…]}`. It is read **from the manifest** and never loads the model, which fixes the kokoro-rs `--list-voices` mistake. |
+| `POST /v1/audio/voices` | Adds a cloned voice (§5.3), the same code path as `naru-audio voice add`. `multipart/form-data` fields: `name` (the voice id: no path separators, no leading `.`), `file` (the clip, WAV or MP3 or anything else macOS `afconvert` reads; 3–30 s accepted, 5–15 s best) and `text` (exactly what the clip says). The clip is converted to 24 kHz mono and written to `$NARU_AUDIO_HOME/voices/<name>/` as `ref.wav` and `ref.txt`, all or nothing. Returns `201 {"id":"amy","accent":null,"gender":null,"default":false,"duration":6.2}`: the entry `GET /v1/audio/voices` lists for a cloning model, plus the clip's length in seconds. Errors: 400 `invalid_request` for a missing field, a bad `name`, an empty `text` or a clip outside 3–30 s (`param` is the field); 409 `voice_exists` if the name is taken (an existing voice is never replaced); 415 `unsupported_media_type` if `afconvert` cannot read the clip; 413 over the 256 MiB body cap. |
 | `POST /api/pull` | `{"model":"kokoro-v1.0"}` returns an NDJSON stream of `{"status":"downloading","file","completed","total"}` lines, then `{"status":"verifying"}`, then `{"status":"success"}`. It is idempotent. |
 | `DELETE /api/models/{name}` | 204. Returns 409 `model_in_use` while the model is loaded and busy; an idle loaded model is unloaded first. |
 | `GET /api/ps` | Loaded models: `[{"name","kind","backend","resident_bytes","expires_at","busy"}]`. |
@@ -336,8 +337,9 @@ Every non-2xx HTTP response uses OpenAI's envelope:
 | 404 | `model_not_found` | The name is in neither the catalog nor the user catalog. |
 | 409 | `model_not_pulled` | Known but not downloaded. The message gives the exact `naru-audio pull` command. The daemon **never auto-pulls** on an inference request. |
 | 409 | `model_in_use` | `rm` of a busy model. |
+| 409 | `voice_exists` | `POST /v1/audio/voices` with a name already taken. |
 | 413 | `payload_too_large` | Input over 256 MiB or 10 minutes, or text over 16 384 chars. |
-| 415 | `unsupported_media_type` | The audio is not WAV. |
+| 415 | `unsupported_media_type` | The audio is not WAV, or a voice clip `afconvert` cannot read. |
 | 503 | `backend_unavailable` | For example mlx on Intel, or a crashed sidecar. `message` gives the reason. |
 | 503 | `model_load_failed` | The files are present but the backend rejected them (bad sha after tampering, ORT error). |
 | 507 | `insufficient_memory` | The model cannot fit in the budget even after evicting idle models (§3.5). |
@@ -700,7 +702,7 @@ Sidecar design:
   manifest sets `[backend.mlx] clone = true`, and it speaks in the cloned
   voices under `$NARU_AUDIO_HOME/voices/<name>/` (`ref.wav`, 24 kHz mono,
   and `ref.txt`, its transcript), added with `naru-audio voice add <name>
-  <clip> --text <transcript>` and listed by `/v1/audio/voices` after the
+  <clip> --text <transcript>` or `POST /v1/audio/voices` (§2.5) and listed by `/v1/audio/voices` after the
   manifest's. Each goes to mlx-audio as `ref_audio` and `ref_text`. No gap or leveller: the chunks are cut mid-sentence, as
   with Pocket.
 - **Cost:** about 150–400 ms extra first-request latency for the process start

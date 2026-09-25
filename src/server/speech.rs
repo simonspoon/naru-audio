@@ -1,4 +1,4 @@
-//! §2.3 `POST /v1/audio/speech` and §2.5 `GET /v1/audio/voices`.
+//! §2.3 `POST /v1/audio/speech` and §2.5 `GET`/`POST /v1/audio/voices`.
 //!
 //! Speech checks run cheapest first: the JSON fields, then the model
 //! (404/409/400) and the voice against its manifest, and only then the load.
@@ -12,19 +12,20 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::body::{Body, Bytes};
-use axum::extract::{Extension, Query, State};
+use axum::extract::multipart::MultipartRejection;
+use axum::extract::{Extension, Multipart, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{AppendHeaders, IntoResponse, Response};
 use serde_json::{Value, json};
 
-use super::transcriptions::{bad_request, internal, kind_manifest, not_kind};
+use super::transcriptions::{bad_request, internal, kind_manifest, multipart_error, not_kind};
 use super::{AppState, RequestId, manager_error};
 use crate::error::ApiError;
 use crate::manager::{Guard, KeepAlive};
 use crate::registry::manifest::{Kind, Manifest, Voice};
 use crate::tts::{SynthOptions, TtsError};
-use crate::voices;
+use crate::voices::{self, AddError};
 
 /// OpenAI model names that stand for `default`, so stock clients work.
 const DEFAULT_ALIASES: [&str; 4] = ["default", "tts-1", "tts-1-hd", "gpt-4o-mini-tts"];
@@ -451,4 +452,87 @@ pub(super) async fn voices(
     Ok(Json(
         json!({"model": manifest.model.name, "voices": voices}),
     ))
+}
+
+/// §2.5 `POST /v1/audio/voices`: the multipart fields `name`, `file` (the
+/// clip) and `text` (what it says) add a cloned voice through
+/// [`voices::add`], as `naru-audio voice add` does. The upload lands in
+/// `tmp/` and is removed after. 201 with the voice as the listing shows
+/// it, plus the clip's `duration` in seconds.
+pub(super) async fn add_voice(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> Result<Response, ApiError> {
+    let mut multipart = multipart.map_err(|e| {
+        bad_request(
+            "file",
+            "invalid_request",
+            format!("the body must be multipart/form-data: {}", e.body_text()),
+        )
+    })?;
+    let (mut name, mut file, mut text) = (None, None, None);
+    while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
+        match field.name().unwrap_or_default().to_owned().as_str() {
+            "file" => file = Some(field.bytes().await.map_err(multipart_error)?),
+            "name" => name = Some(field.text().await.map_err(multipart_error)?),
+            "text" => text = Some(field.text().await.map_err(multipart_error)?),
+            _ => {}
+        }
+    }
+    let required = |param: &'static str| {
+        bad_request(
+            param,
+            "invalid_request",
+            format!("the \"{param}\" field is required"),
+        )
+    };
+    let name = name.ok_or_else(|| required("name"))?;
+    let file = file.ok_or_else(|| required("file"))?;
+    let text = text.ok_or_else(|| required("text"))?;
+
+    let result = {
+        let (home, name) = (st.registry.home().to_path_buf(), name.clone());
+        tokio::task::spawn_blocking(move || {
+            let upload = voices::scratch(&home, "upload");
+            let result = std::fs::create_dir_all(home.join("tmp"))
+                .and_then(|()| std::fs::write(&upload, &file))
+                .map_err(|e| AddError::Io(format!("write {}: {e}", upload.display())))
+                .and_then(|()| voices::add(&home, &name, &upload, &text));
+            // Also after a write that failed partway.
+            let _ = std::fs::remove_file(&upload);
+            result
+        })
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+    let secs = result.map_err(|e| match e {
+        AddError::Name(m) => bad_request("name", "invalid_request", m),
+        AddError::Exists(m) => ApiError {
+            param: Some("name"),
+            ..ApiError::new(StatusCode::CONFLICT, "voice_exists", m)
+        },
+        AddError::Text => bad_request("text", "invalid_request", e.to_string()),
+        AddError::Clip(_) => ApiError {
+            param: Some("file"),
+            ..ApiError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+                "the clip is not audio afconvert can read, such as WAV or MP3",
+            )
+        },
+        AddError::Length(_) => bad_request("file", "invalid_request", e.to_string()),
+        AddError::Io(m) => internal(&st, &req_id, m),
+    })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": name,
+            "accent": null,
+            "gender": null,
+            "default": false,
+            "duration": secs,
+        })),
+    )
+        .into_response())
 }

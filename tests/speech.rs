@@ -212,19 +212,35 @@ impl Server {
     }
 
     fn request(&self, method: &str, path: &str, body: &str) -> Reply {
-        let mut s = self.send(method, path, body);
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 16 * 1024];
-        loop {
-            match s.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => raw.extend_from_slice(&buf[..n]),
-                // An aborted body may end in a reset.
-                Err(e) if e.kind() == ErrorKind::ConnectionReset => break,
-                Err(e) => panic!("{e}"),
-            }
+        receive(self.send(method, path, body))
+    }
+
+    /// A `multipart/form-data` POST of `fields`, each a name and its bytes.
+    fn form(&self, path: &str, fields: &[(&str, &[u8])]) -> Reply {
+        let mut body = Vec::new();
+        for (name, value) in fields {
+            write!(
+                body,
+                "--XBOUNDARY\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+            )
+            .unwrap();
+            body.extend_from_slice(value);
+            body.extend_from_slice(b"\r\n");
         }
-        Reply::parse(&raw)
+        body.extend_from_slice(b"--XBOUNDARY--\r\n");
+        let mut s = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        write!(
+            s,
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\
+             Content-Type: multipart/form-data; boundary=XBOUNDARY\r\n\
+             Content-Length: {}\r\n\r\n",
+            self.port,
+            body.len()
+        )
+        .unwrap();
+        s.write_all(&body).unwrap();
+        receive(s)
     }
 
     fn speech(&self, request: Value) -> Reply {
@@ -243,6 +259,22 @@ impl Drop for Server {
             rt.shutdown_background();
         }
     }
+}
+
+/// Reads the reply to the end.
+fn receive(mut s: TcpStream) -> Reply {
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            // An aborted body may end in a reset.
+            Err(e) if e.kind() == ErrorKind::ConnectionReset => break,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    Reply::parse(&raw)
 }
 
 struct Reply {
@@ -729,6 +761,200 @@ fn a_cloning_model_without_voices_says_how_to_add_one() {
         "the model \"fake-clone\" has no cloned voices; add one with naru-audio voice add"
     );
     assert_eq!(server.record.loads.load(Ordering::SeqCst), 0);
+}
+
+/// `secs` seconds of a 440 Hz tone as a 16 kHz mono WAV.
+#[cfg(target_os = "macos")]
+fn tone(secs: f64) -> Vec<u8> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut w = hound::WavWriter::new(&mut out, spec).unwrap();
+    for i in 0..(secs * 16_000.0) as u32 {
+        let s = (f64::from(i) * 440.0 * std::f64::consts::TAU / 16_000.0).sin();
+        w.write_sample((s * 8000.0) as i16).unwrap();
+    }
+    w.finalize().unwrap();
+    out.into_inner()
+}
+
+/// `POST /v1/audio/voices` adds a cloned voice the way `voice add` does:
+/// listed and spoken at once. Each refusal is a 4xx that leaves nothing
+/// behind in `voices/` or `tmp/`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_posted_clip_becomes_a_cloned_voice() {
+    let home = fake_home();
+    let dir = home.path().join("models").join("fake-clone");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-clone", "kind": "tts", "backend": "sherpa-onnx"},
+        "backend": {"sherpa-onnx": {"clone": true}},
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+    let home_dir = home.path().to_path_buf();
+    let record = Arc::new(Record::default());
+    let server = Server::start(
+        home,
+        "fake-tts",
+        Arc::new(FakeLoader(record.clone())),
+        record,
+    );
+    let ok = tone(6.0);
+    let post = |fields: &[(&str, &[u8])]| server.form("/v1/audio/voices", fields);
+
+    let reply = post(&[
+        ("name", b"amy"),
+        ("text", b"  Hello there.\n"),
+        ("file", &ok),
+    ]);
+    assert_eq!(
+        reply.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    let body = reply.json();
+    assert!((body["duration"].as_f64().unwrap() - 6.0).abs() < 0.05);
+    assert_eq!(
+        body,
+        json!({"id": "amy", "accent": null, "gender": null, "default": false,
+               "duration": body["duration"]})
+    );
+    let voice = home_dir.join("voices").join("amy");
+    assert_eq!(
+        std::fs::read_to_string(voice.join("ref.txt")).unwrap(),
+        "Hello there.\n"
+    );
+    let spec = hound::WavReader::open(voice.join("ref.wav"))
+        .unwrap()
+        .spec();
+    assert_eq!((spec.channels, spec.sample_rate), (1, 24_000));
+    let reply = server.request("GET", "/v1/audio/voices?model=fake-clone", "");
+    assert_eq!(reply.json()["voices"][0]["id"], "amy");
+    let reply = server.speech(json!({"model": "fake-clone", "input": "Hi.", "voice": "amy"}));
+    assert_eq!(reply.status, 200);
+    assert_eq!(server.record.last.lock().unwrap().clone().unwrap().0, "amy");
+
+    let (short, long) = (tone(2.0), tone(31.0));
+    type Fields<'a> = &'a [(&'a str, &'a [u8])];
+    let cases: [(Fields, u16, &str, &str, &str); 11] = [
+        (
+            &[("text", b"Hi."), ("file", &ok)],
+            400,
+            "invalid_request",
+            "name",
+            "\"name\" field is required",
+        ),
+        (
+            &[("name", b"b"), ("text", b"Hi.")],
+            400,
+            "invalid_request",
+            "file",
+            "\"file\" field is required",
+        ),
+        (
+            &[("name", b"b"), ("file", &ok)],
+            400,
+            "invalid_request",
+            "text",
+            "\"text\" field is required",
+        ),
+        (
+            &[("name", b"b"), ("text", b" \n"), ("file", &ok)],
+            400,
+            "invalid_request",
+            "text",
+            "the transcript is empty",
+        ),
+        (
+            &[("name", b"../x"), ("text", b"Hi."), ("file", &ok)],
+            400,
+            "invalid_request",
+            "name",
+            "must be a plain name",
+        ),
+        (
+            &[("name", b".x"), ("text", b"Hi."), ("file", &ok)],
+            400,
+            "invalid_request",
+            "name",
+            "must be a plain name",
+        ),
+        (
+            &[("name", &[b'a'; 65]), ("text", b"Hi."), ("file", &ok)],
+            400,
+            "invalid_request",
+            "name",
+            "voice name is 65 bytes; the cap is 64",
+        ),
+        (
+            &[("name", b"amy"), ("text", b"Hi."), ("file", &ok)],
+            409,
+            "voice_exists",
+            "name",
+            "already exists",
+        ),
+        (
+            &[
+                ("name", b"b"),
+                ("text", b"Hi."),
+                ("file", b"not audio at all"),
+            ],
+            415,
+            "unsupported_media_type",
+            "file",
+            "WAV or MP3",
+        ),
+        (
+            &[("name", b"b"), ("text", b"Hi."), ("file", &short)],
+            400,
+            "invalid_request",
+            "file",
+            "the clip is 2.0 s; it must be 3–30 s",
+        ),
+        (
+            &[("name", b"b"), ("text", b"Hi."), ("file", &long)],
+            400,
+            "invalid_request",
+            "file",
+            "the clip is 31.0 s; it must be 3–30 s",
+        ),
+    ];
+    for (fields, status, code, param, message) in cases {
+        let reply = post(fields);
+        let error = &reply.json()["error"];
+        assert_eq!(reply.status, status, "{error}");
+        assert_eq!(
+            (error["code"].as_str(), error["param"].as_str()),
+            (Some(code), Some(param)),
+            "{error}"
+        );
+        assert!(
+            error["message"].as_str().unwrap().contains(message),
+            "{error}"
+        );
+    }
+    let reply = server.request("POST", "/v1/audio/voices", "{}");
+    assert_eq!(reply.status, 400);
+
+    // Nothing half-made is left behind, and the uploads are gone.
+    let names = |d: &Path| -> Vec<String> {
+        std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect()
+    };
+    assert_eq!(names(&home_dir.join("voices")), ["amy"]);
+    assert!(
+        names(&home_dir.join("tmp")).is_empty(),
+        "{:?}",
+        names(&home_dir.join("tmp"))
+    );
 }
 
 fn say(url: &str, args: &[&str], stdin: Option<&[u8]>) -> Output {

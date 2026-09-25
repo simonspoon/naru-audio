@@ -563,7 +563,7 @@ fn parse_f32(param: &'static str, value: Option<&str>) -> Result<Option<f32>, Ap
 }
 
 /// The body cap trips as 413; any other framing error is 400.
-fn multipart_error(e: MultipartError) -> ApiError {
+pub(super) fn multipart_error(e: MultipartError) -> ApiError {
     if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
         return ApiError {
             param: Some("file"),

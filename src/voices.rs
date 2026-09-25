@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::registry::manifest::{Manifest, Voice};
 
@@ -35,9 +36,20 @@ pub fn dir(home: &Path) -> PathBuf {
     home.join("voices")
 }
 
+/// The longest voice name, in bytes: well inside a file name's 255 once
+/// `add`'s scratch directory wraps it.
+pub const MAX_NAME_BYTES: usize = 64;
+
 /// A voice name is one plain path component: not empty, no `/` or `\`,
-/// and no leading `.` (so neither `.` nor `..`).
+/// no leading `.` (so neither `.` nor `..`), and at most
+/// [`MAX_NAME_BYTES`] long.
 pub fn check_name(name: &str) -> Result<(), String> {
+    if name.len() > MAX_NAME_BYTES {
+        return Err(format!(
+            "voice name is {} bytes; the cap is {MAX_NAME_BYTES}",
+            name.len()
+        ));
+    }
     if name.is_empty()
         || name.starts_with('.')
         || name.contains(['/', '\\', '\0'])
@@ -106,39 +118,89 @@ pub fn say_model<'a>(home: Option<&Path>, model: Option<&'a str>, voice: Option<
     }
 }
 
+/// Why [`add`] refused a voice; its `Display` is the message.
+#[derive(Debug)]
+pub enum AddError {
+    /// Not a plain name ([`check_name`]).
+    Name(String),
+    /// A voice of that name already exists.
+    Exists(String),
+    /// The transcript is empty.
+    Text,
+    /// `afconvert` cannot read the clip.
+    Clip(String),
+    /// The clip's length, outside `MIN_SECS..=MAX_SECS`.
+    Length(f64),
+    /// Anything else: the home's files, or no `afconvert`.
+    Io(String),
+}
+
+impl std::fmt::Display for AddError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AddError::Name(m) | AddError::Exists(m) | AddError::Clip(m) | AddError::Io(m) => {
+                f.write_str(m)
+            }
+            AddError::Text => f.write_str("the transcript is empty"),
+            AddError::Length(secs) => write!(
+                f,
+                "the clip is {secs:.1} s; it must be {MIN_SECS}–{MAX_SECS} s (5–15 s is best)"
+            ),
+        }
+    }
+}
+
+/// A fresh path in `home`'s `tmp/`, unique within and across processes.
+pub fn scratch(home: &Path, stem: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    home.join("tmp").join(format!(
+        "{stem}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 /// Adds the voice `name` from `clip` (anything `afconvert` reads, such as
 /// WAV or MP3), converted to 24 kHz mono 16-bit WAV, with `text` as its
 /// transcript. Returns the clip's length in seconds, which must be within
-/// `MIN_SECS..=MAX_SECS`. An existing voice is not replaced.
-pub fn add(home: &Path, name: &str, clip: &Path, text: &str) -> Result<f64, String> {
-    check_name(name)?;
+/// `MIN_SECS..=MAX_SECS`. An existing voice is not replaced. Both `voice
+/// add` and `POST /v1/audio/voices` come here.
+pub fn add(home: &Path, name: &str, clip: &Path, text: &str) -> Result<f64, AddError> {
+    check_name(name).map_err(AddError::Name)?;
     let text = text.trim();
     if text.is_empty() {
-        return Err("the transcript is empty".to_string());
+        return Err(AddError::Text);
     }
     let voice = dir(home).join(name);
-    if voice.exists() {
-        return Err(format!(
+    let exists = || {
+        AddError::Exists(format!(
             "voice `{name}` already exists; remove {} first",
             voice.display()
-        ));
+        ))
+    };
+    if voice.exists() {
+        return Err(exists());
     }
     // Built in tmp/ and renamed into place, so a voice is never half there.
-    let tmp = home
-        .join("tmp")
-        .join(format!("voice-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    let tmp = scratch(home, &format!("voice-{name}"));
+    std::fs::create_dir_all(&tmp)
+        .map_err(|e| AddError::Io(format!("create {}: {e}", tmp.display())))?;
     let result = convert(clip, &tmp.join(REF_WAV)).and_then(|secs| {
         if !(MIN_SECS..=MAX_SECS).contains(&secs) {
-            return Err(format!(
-                "the clip is {secs:.1} s; it must be {MIN_SECS}–{MAX_SECS} s (5–15 s is best)"
-            ));
+            return Err(AddError::Length(secs));
         }
         std::fs::write(tmp.join(REF_TXT), format!("{text}\n"))
-            .map_err(|e| format!("write {REF_TXT}: {e}"))?;
-        std::fs::create_dir_all(dir(home)).map_err(|e| format!("create voices/: {e}"))?;
-        std::fs::rename(&tmp, &voice).map_err(|e| format!("move into {}: {e}", voice.display()))?;
+            .map_err(|e| AddError::Io(format!("write {REF_TXT}: {e}")))?;
+        std::fs::create_dir_all(dir(home))
+            .map_err(|e| AddError::Io(format!("create voices/: {e}")))?;
+        // A concurrent add of the same name may have won the rename.
+        std::fs::rename(&tmp, &voice).map_err(|e| {
+            if voice.exists() {
+                exists()
+            } else {
+                AddError::Io(format!("move into {}: {e}", voice.display()))
+            }
+        })?;
         Ok(secs)
     });
     if result.is_err() {
@@ -148,7 +210,7 @@ pub fn add(home: &Path, name: &str, clip: &Path, text: &str) -> Result<f64, Stri
 }
 
 /// `afconvert`s `clip` to `wav` and returns its length in seconds.
-fn convert(clip: &Path, wav: &Path) -> Result<f64, String> {
+fn convert(clip: &Path, wav: &Path) -> Result<f64, AddError> {
     let out = Command::new("afconvert")
         .args([
             "-f",
@@ -161,16 +223,16 @@ fn convert(clip: &Path, wav: &Path) -> Result<f64, String> {
         .arg(clip)
         .arg(wav)
         .output()
-        .map_err(|e| format!("cannot run afconvert (macOS only): {e}"))?;
+        .map_err(|e| AddError::Io(format!("cannot run afconvert (macOS only): {e}")))?;
     if !out.status.success() {
-        return Err(format!(
+        return Err(AddError::Clip(format!(
             "afconvert cannot read {}: {}",
             clip.display(),
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        )));
     }
-    let reader =
-        hound::WavReader::open(wav).map_err(|e| format!("read the converted clip: {e}"))?;
+    let reader = hound::WavReader::open(wav)
+        .map_err(|e| AddError::Io(format!("read the converted clip: {e}")))?;
     Ok(f64::from(reader.duration()) / f64::from(reader.spec().sample_rate))
 }
 
@@ -183,6 +245,8 @@ mod tests {
         for ok in ["narrator", "Simon-2", "a b", "voix_é"] {
             assert!(check_name(ok).is_ok(), "{ok}");
         }
+        assert!(check_name(&"a".repeat(MAX_NAME_BYTES)).is_ok());
+        assert!(check_name(&"a".repeat(MAX_NAME_BYTES + 1)).is_err());
         for bad in [
             "", ".", "..", ".hidden", "a/b", "../x", "a\\b", "a\0b", "a\nb",
         ] {
@@ -309,13 +373,19 @@ mod tests {
         let spec = hound::WavReader::open(&found.wav).unwrap().spec();
         assert_eq!((spec.channels, spec.sample_rate), (1, SAMPLE_RATE));
 
-        let err = add(home.path(), "amy", &ok, "again").unwrap_err();
+        let err = add(home.path(), "amy", &ok, "again")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("already exists"), "{err}");
         for (name, path) in [("short", &short), ("long", &long)] {
-            let err = add(home.path(), name, path, "text").unwrap_err();
+            let err = add(home.path(), name, path, "text")
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("it must be 3–30 s"), "{err}");
         }
-        let err = add(home.path(), "junk", &src.path().join("nope.wav"), "t").unwrap_err();
+        let err = add(home.path(), "junk", &src.path().join("nope.wav"), "t")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("afconvert cannot read"), "{err}");
         assert!(add(home.path(), "../x", &ok, "t").is_err());
         assert!(add(home.path(), "blank", &ok, " \n").is_err());

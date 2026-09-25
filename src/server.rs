@@ -69,7 +69,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/audio/transcriptions/stream", get(stream::stream))
         .route("/v1/audio/speech", post(speech::speech))
-        .route("/v1/audio/voices", get(speech::voices))
+        .route(
+            "/v1/audio/voices",
+            get(speech::voices)
+                .post(speech::add_voice)
+                .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
+        )
         .route("/api/pull", post(pull))
         .route("/api/models/{name}", delete(remove))
         .route("/api/ps", get(ps))
