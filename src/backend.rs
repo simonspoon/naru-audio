@@ -1,10 +1,12 @@
 //! §3.6 backends: `available()`, used by `pull` and `/v1/models`, and
-//! loading. `sherpa-onnx` and `mlx` (§5.3) STT load so far.
+//! loading. `sherpa-onnx` and `mlx` (§5.3) STT and `sherpa-onnx` TTS load
+//! so far.
 
 use std::path::Path;
 
 use crate::registry::manifest::{Kind, Manifest};
 use crate::stt::{SttError, SttModel, sherpa::SherpaStt};
+use crate::tts::{TtsError, TtsModel, sherpa::SherpaTts};
 
 /// Whether `backend` can run on this machine, or why not.
 pub fn available(backend: &str) -> Result<(), String> {
@@ -48,6 +50,25 @@ pub fn load_stt(manifest: &Manifest, dir: &Path) -> Result<Box<dyn SttModel>, St
     }
 }
 
+/// Loads the TTS model described by `manifest` from its pulled `dir`.
+pub fn load_tts(manifest: &Manifest, dir: &Path) -> Result<Box<dyn TtsModel>, TtsError> {
+    let backend = &manifest.model.backend;
+    let unavailable = |reason: String| TtsError::BackendUnavailable {
+        backend: backend.clone(),
+        reason,
+    };
+    available(backend).map_err(unavailable)?;
+    if manifest.model.kind != Kind::Tts {
+        return Err(TtsError::NotTts(manifest.model.name.clone()));
+    }
+    match backend.as_str() {
+        "sherpa-onnx" => Ok(Box::new(SherpaTts::load(manifest, dir)?)),
+        _ => Err(unavailable(
+            "cannot load text-to-speech models yet".to_string(),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +89,13 @@ mod tests {
         assert!(mlx.runs_on("macos", "aarch64"));
         assert_eq!(available_on(&mlx.model.backend, true), Ok(()));
         assert!(!mlx.runs_on("linux", "x86_64"));
+    }
+
+    #[test]
+    fn load_tts_refuses_an_stt_model() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let stt = &cat.models["parakeet-tdt-0.6b-v2-int8"];
+        let err = load_tts(stt, Path::new("/nonexistent")).err().unwrap();
+        assert!(matches!(err, TtsError::NotTts(_)), "{err}");
     }
 }

@@ -10,3 +10,4 @@ pub mod profile;
 pub mod registry;
 pub mod server;
 pub mod stt;
+pub mod tts;

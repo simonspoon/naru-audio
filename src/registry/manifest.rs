@@ -82,6 +82,18 @@ pub struct ArchiveEntry {
     pub strip: usize,
 }
 
+/// A TTS `[[voice]]`: the API's name for a speaker and the `sid` sherpa
+/// addresses it by (§5.1).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Voice {
+    pub id: String,
+    pub sid: i32,
+    pub accent: Option<String>,
+    pub gender: Option<String>,
+    #[serde(default)]
+    pub default: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub model: Model,
@@ -91,6 +103,8 @@ pub struct Manifest {
     pub files: Vec<FileEntry>,
     #[serde(default, rename = "archive")]
     pub archives: Vec<ArchiveEntry>,
+    #[serde(default, rename = "voice")]
+    pub voices: Vec<Voice>,
     /// The whole document, `[[voice]]` and all; written out as `manifest.json`.
     #[serde(skip)]
     pub raw: toml::Table,
@@ -387,5 +401,9 @@ mod tests {
         };
         assert_eq!(sid("af_heart"), Some(3));
         assert_eq!(sid("em_santa"), Some(53));
+        // The typed table agrees with the raw one.
+        assert_eq!(m.voices.len(), 54);
+        let heart = m.voices.iter().find(|v| v.id == "af_heart").unwrap();
+        assert_eq!((heart.sid, heart.default), (3, true));
     }
 }
