@@ -14,8 +14,9 @@ Requests, one at a time, each answered before the next is sent:
     {"op": "load", "model": NAME, "kind": "stt"|"tts", "dir": PATH}
     {"op": "unload", "model": NAME}
     {"op": "transcribe", "model": NAME, "samples": S} + S samples at 16 kHz
-    {"op": "synth", "model": NAME, "text": TEXT, "voice": ID, "speed": X,
-     "reference": PATH (optional)}
+    {"op": "synth", "model": NAME, "text": TEXT, "voice": ID (optional),
+     "speed": X, "reference": PATH (optional), "reference_text": TEXT
+     (optional, the reference's transcript)}
     {"op": "stats"}
 
 Answers are {"ok": true, ...} or {"ok": false, "error": MESSAGE}. A `load`

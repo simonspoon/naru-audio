@@ -696,7 +696,12 @@ Sidecar design:
   new mlx-audio model is a catalog entry (`backend = "mlx"`, `kind =
   "tts"`, its `[[voice]]` ids passed as mlx-audio's `voice`, or a
   `reference` recording as `ref_audio`). Qwen3-TTS 0.6B CustomVoice 8-bit
-  is the first. No gap or leveller: the chunks are cut mid-sentence, as
+  is the first. Qwen3-TTS 0.6B Base 8-bit has no preset voices; its
+  manifest sets `[backend.mlx] clone = true`, and it speaks in the cloned
+  voices under `$NARU_AUDIO_HOME/voices/<name>/` (`ref.wav`, 24 kHz mono,
+  and `ref.txt`, its transcript), added with `naru-audio voice add <name>
+  <clip> --text <transcript>` and listed by `/v1/audio/voices` after the
+  manifest's. Each goes to mlx-audio as `ref_audio` and `ref_text`. No gap or leveller: the chunks are cut mid-sentence, as
   with Pocket.
 - **Cost:** about 150–400 ms extra first-request latency for the process start
   **[assumption]**, then a per-request IPC overhead that is negligible

@@ -22,8 +22,9 @@ use super::transcriptions::{bad_request, internal, kind_manifest, not_kind};
 use super::{AppState, RequestId, manager_error};
 use crate::error::ApiError;
 use crate::manager::{Guard, KeepAlive};
-use crate::registry::manifest::{Kind, Manifest};
+use crate::registry::manifest::{Kind, Manifest, Voice};
 use crate::tts::{SynthOptions, TtsError};
+use crate::voices;
 
 /// OpenAI model names that stand for `default`, so stock clients work.
 const DEFAULT_ALIASES: [&str; 4] = ["default", "tts-1", "tts-1-hd", "gpt-4o-mini-tts"];
@@ -60,13 +61,17 @@ pub(super) async fn speech(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let job = validate(&body, &st.models.settings().tts_default)?;
-    let manifest = {
+    let (manifest, voices) = {
         let (st, name) = (st.clone(), job.model.clone());
-        tokio::task::spawn_blocking(move || kind_manifest(&st, &name, Kind::Tts))
+        tokio::task::spawn_blocking(move || {
+            let manifest = kind_manifest(&st, &name, Kind::Tts)?;
+            let voices = voices::of(&manifest, st.registry.home());
+            Ok::<_, ApiError>((manifest, voices))
+        })
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
-    let voice = voice(&manifest, job.voice.as_deref())?;
+    let voice = voice(&manifest, &voices, job.voice.as_deref())?;
     let model = st
         .models
         .acquire(manifest, job.keep_alive)
@@ -375,10 +380,21 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
     })
 }
 
-/// `voice` if the manifest lists it, else 400 `unknown_voice` with the
-/// valid ids; no voice is the manifest's default one.
-fn voice(manifest: &Manifest, voice: Option<&str>) -> Result<String, ApiError> {
-    let voices = &manifest.voices;
+/// `voice` if it is one of `voices` (the manifest's, and any cloned ones),
+/// else 400 `unknown_voice` with the valid ids; no voice is the default
+/// one, else the first. A cloning model with no cloned voices and no
+/// voice asked for is a 400 that says how to add one.
+fn voice(manifest: &Manifest, voices: &[Voice], voice: Option<&str>) -> Result<String, ApiError> {
+    if voice.is_none() && voices.is_empty() && manifest.clones() {
+        return Err(bad_request(
+            "voice",
+            "unknown_voice",
+            format!(
+                "the model \"{}\" has no cloned voices; add one with naru-audio voice add",
+                manifest.model.name
+            ),
+        ));
+    }
     let found = match voice {
         Some(id) => voices.iter().find(|v| v.id == id),
         None => voices.iter().find(|v| v.default).or(voices.first()),
@@ -400,7 +416,8 @@ fn voice(manifest: &Manifest, voice: Option<&str>) -> Result<String, ApiError> {
 }
 
 /// §2.5 `GET /v1/audio/voices?model=`: read from the manifest (the pulled
-/// one, else the catalog's), never by loading the model.
+/// one, else the catalog's), and the cloned voices if the model clones;
+/// never by loading the model.
 pub(super) async fn voices(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
@@ -411,20 +428,23 @@ pub(super) async fn voices(
         Some(m) if DEFAULT_ALIASES.contains(&m) => st.models.settings().tts_default.clone(),
         Some(m) => m.to_string(),
     };
-    let manifest = {
+    let (manifest, voices) = {
         let st = st.clone();
-        tokio::task::spawn_blocking(move || match st.registry.catalog().models.get(&name) {
-            Some(m) if !st.registry.is_installed(&name) => match m.model.kind {
-                Kind::Tts => Ok(m.clone()),
-                _ => Err(not_kind(&name, Kind::Tts)),
-            },
-            _ => kind_manifest(&st, &name, Kind::Tts),
+        tokio::task::spawn_blocking(move || {
+            let manifest = match st.registry.catalog().models.get(&name) {
+                Some(m) if !st.registry.is_installed(&name) => match m.model.kind {
+                    Kind::Tts => Ok(m.clone()),
+                    _ => Err(not_kind(&name, Kind::Tts)),
+                },
+                _ => kind_manifest(&st, &name, Kind::Tts),
+            }?;
+            let voices = voices::of(&manifest, st.registry.home());
+            Ok::<_, ApiError>((manifest, voices))
         })
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
-    let voices: Vec<Value> = manifest
-        .voices
+    let voices: Vec<Value> = voices
         .iter()
         .map(|v| json!({"id": v.id, "accent": v.accent, "gender": v.gender, "default": v.default}))
         .collect();

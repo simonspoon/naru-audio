@@ -3,7 +3,9 @@
 //! The model is whatever mlx-audio's `load_model` makes of the pulled
 //! directory; a voice is its `[[voice]]` id, handed to mlx-audio's
 //! `generate` as `voice`, and its `reference` recording, if any, as
-//! `ref_audio`. `sid` is not used. `speed` is passed on as mlx-audio's
+//! `ref_audio`. A model that clones (`crate::voices`) also takes a cloned
+//! voice's name: its clip goes as `ref_audio` and its transcript as
+//! `ref_text`, with no `voice`. `sid` is not used. `speed` is passed on as mlx-audio's
 //! `speed`, which Qwen3-TTS ignores.
 //!
 //! The sidecar is held for a whole synthesis, so `synth` never lets the
@@ -27,6 +29,7 @@ use super::{Sink, SynthOptions, TtsError, TtsModel};
 use crate::mlx::sidecar::{self, Sidecar};
 use crate::registry::manifest::{Kind, Manifest, Voice};
 use crate::stt::SttError;
+use crate::voices;
 
 pub struct MlxTts {
     sidecar: Arc<Sidecar>,
@@ -35,6 +38,8 @@ pub struct MlxTts {
     instance: u64,
     dir: PathBuf,
     voices: Vec<Voice>,
+    /// The home whose cloned voices the model speaks in, if it clones.
+    cloned: Option<PathBuf>,
     /// What the sidecar's `load` reported.
     sample_rate: u32,
     /// What the load added to the sidecar's MLX active memory.
@@ -55,6 +60,7 @@ impl MlxTts {
             instance,
             dir: dir.to_path_buf(),
             voices: manifest.voices.clone(),
+            cloned: manifest.clones().then(|| home.to_path_buf()),
             sample_rate: 0,
             resident_bytes,
         };
@@ -85,17 +91,24 @@ impl TtsModel for MlxTts {
         mut sink: Sink,
     ) -> Result<(), TtsError> {
         check(text, options)?;
-        let voice =
-            self.voices
-                .iter()
-                .find(|v| v.id == voice)
-                .ok_or_else(|| TtsError::UnknownVoice {
-                    model: self.name.clone(),
-                    voice: voice.to_string(),
-                })?;
-        let mut request = json!({"text": text, "voice": voice.id, "speed": options.speed});
-        if let Some(reference) = &voice.reference {
-            request["reference"] = json!(self.dir.join(reference));
+        let mut request = json!({"text": text, "speed": options.speed});
+        if let Some(v) = self.voices.iter().find(|v| v.id == voice) {
+            request["voice"] = json!(v.id);
+            if let Some(reference) = &v.reference {
+                request["reference"] = json!(self.dir.join(reference));
+            }
+        } else if let Some(c) = self
+            .cloned
+            .as_deref()
+            .and_then(|home| voices::find(home, voice))
+        {
+            request["reference"] = json!(c.wav);
+            request["reference_text"] = json!(c.text);
+        } else {
+            return Err(TtsError::UnknownVoice {
+                model: self.name.clone(),
+                voice: voice.to_string(),
+            });
         }
         let (tx, rx) = mpsc::channel::<Vec<f32>>();
         std::thread::scope(|scope| {

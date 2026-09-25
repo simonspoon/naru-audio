@@ -1,0 +1,97 @@
+# Qwen3-TTS 0.6B Base, mlx-community's 8-bit conversion, served by
+# mlx-audio in the MLX sidecar (§5.3). Base, not CustomVoice
+# (qwen3-tts-0.6b-mlx): it has no preset speakers and clones a reference
+# recording instead, so its voices are the cloned ones under
+# $NARU_AUDIO_HOME/voices/ (`naru-audio voice add`), each passed to
+# mlx-audio as `ref_audio` with its transcript as `ref_text`. 8-bit, as
+# for CustomVoice. Every [[file]] of the repo at the pinned commit but
+# README.md and .gitattributes; sizes and LFS hashes from the HF API, the
+# other hashes computed 2026-09-25 from the files at the pinned commit.
+
+[model]
+name        = "qwen3-tts-0.6b-base-mlx"
+kind        = "tts"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["en", "zh", "de", "it", "pt", "es", "ja", "ko", "fr", "ru"]
+license     = "Apache-2.0"
+# MLX peak while generating in a cloned voice, 2026-09-25. What a load
+# measures replaces it: the load's delta in `stats`, 2.05 GB.
+resident_bytes = 2_700_000_000
+
+[backend.mlx]
+# Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
+clone = true
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/config.json"
+sha256 = "b404fb6f99dac6f7a81f3a03af5675b131ecf9936ac75a7c9d75e54044600044"
+size   = 5_522
+
+[[file]]
+path   = "generation_config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/generation_config.json"
+sha256 = "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa"
+size   = 245
+
+[[file]]
+path   = "merges.txt"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/merges.txt"
+sha256 = "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+size   = 1_671_839
+
+[[file]]
+path   = "model.safetensors"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/model.safetensors"
+sha256 = "9488e7005cc0cf44f8804eb543668d0763bb1c649ce6f1eddc663519524b3182"
+size   = 1_304_461_214
+
+[[file]]
+path   = "model.safetensors.index.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/model.safetensors.index.json"
+sha256 = "7829f1cc24f5cbd7d7a3ba888bb08c7cf52d82ba79a4f0f3756d41f8bf5e52b4"
+size   = 77_731
+
+[[file]]
+path   = "preprocessor_config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/preprocessor_config.json"
+sha256 = "efdde1022ea9d76928bf7a9cd53139138f5ba2e466e837f08f6105ab1af1c119"
+size   = 127
+
+[[file]]
+path   = "speech_tokenizer/config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/speech_tokenizer/config.json"
+sha256 = "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167"
+size   = 2_336
+
+[[file]]
+path   = "speech_tokenizer/configuration.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/speech_tokenizer/configuration.json"
+sha256 = "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd"
+size   = 76
+
+[[file]]
+path   = "speech_tokenizer/model.safetensors"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/speech_tokenizer/model.safetensors"
+sha256 = "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+size   = 682_293_092
+
+[[file]]
+path   = "speech_tokenizer/preprocessor_config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/speech_tokenizer/preprocessor_config.json"
+sha256 = "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb"
+size   = 234
+
+[[file]]
+path   = "tokenizer_config.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/tokenizer_config.json"
+sha256 = "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670"
+size   = 7_344
+
+[[file]]
+path   = "vocab.json"
+url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/vocab.json"
+sha256 = "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+size   = 2_776_833

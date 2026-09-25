@@ -634,6 +634,103 @@ fn voices_answer_without_loading_the_model() {
     assert_eq!(server.ps(), Vec::<Value>::new());
 }
 
+/// A cloning model lists and speaks the cloned voices in the home's
+/// `voices/`, the first as its default; a model that does not clone
+/// refuses them. A voice added while the daemon runs is usable at once.
+#[test]
+fn a_cloning_model_speaks_the_cloned_voices() {
+    let home = fake_home();
+    let dir = home.path().join("models").join("fake-clone");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-clone", "kind": "tts", "backend": "sherpa-onnx"},
+        "backend": {"sherpa-onnx": {"clone": true}},
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+    let add = |home: &Path, name: &str| {
+        let voice = home.join("voices").join(name);
+        std::fs::create_dir_all(&voice).unwrap();
+        std::fs::write(voice.join("ref.wav"), b"").unwrap();
+        std::fs::write(voice.join("ref.txt"), "Hello.").unwrap();
+    };
+    add(home.path(), "zed");
+    let voices_dir = home.path().to_path_buf();
+    let record = Arc::new(Record::default());
+    let server = Server::start(
+        home,
+        "fake-tts",
+        Arc::new(FakeLoader(record.clone())),
+        record,
+    );
+    let last = || server.record.last.lock().unwrap().clone().unwrap().0;
+
+    let reply = server.request("GET", "/v1/audio/voices?model=fake-clone", "");
+    assert_eq!(
+        reply.json(),
+        json!({"model": "fake-clone", "voices": [
+            {"id": "zed", "accent": null, "gender": null, "default": false},
+        ]})
+    );
+    // Kokoro-like models are untouched.
+    let reply = server.request("GET", "/v1/audio/voices?model=fake-tts", "");
+    assert_eq!(reply.json()["voices"].as_array().unwrap().len(), 2);
+
+    add(&voices_dir, "amy");
+    let reply = server.speech(json!({"model": "fake-clone", "input": "Hi.", "voice": "amy"}));
+    assert_eq!(reply.status, 200);
+    assert_eq!(last(), "amy");
+    let reply = server.speech(json!({"model": "fake-clone", "input": "Hi."}));
+    assert_eq!(reply.status, 200);
+    assert_eq!(last(), "amy");
+
+    for (model, voice) in [
+        ("fake-clone", "nope"),
+        ("fake-clone", "../voices/amy"),
+        ("fake-tts", "amy"),
+    ] {
+        let reply = server.speech(json!({"model": model, "input": "Hi.", "voice": voice}));
+        assert_eq!(reply.status, 400, "{model} {voice}");
+        assert_eq!(reply.json()["error"]["code"], "unknown_voice");
+    }
+    let reply = server.speech(json!({"model": "fake-clone", "input": "Hi.", "voice": "nope"}));
+    let message = reply.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(message.ends_with("use one of: amy, zed"), "{message}");
+}
+
+/// A cloning model with no cloned voices and no voice asked for says
+/// how to add one, before a load.
+#[test]
+fn a_cloning_model_without_voices_says_how_to_add_one() {
+    let home = fake_home();
+    let dir = home.path().join("models").join("fake-clone");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-clone", "kind": "tts", "backend": "sherpa-onnx"},
+        "backend": {"sherpa-onnx": {"clone": true}},
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+    let record = Arc::new(Record::default());
+    let server = Server::start(
+        home,
+        "fake-tts",
+        Arc::new(FakeLoader(record.clone())),
+        record,
+    );
+
+    let reply = server.speech(json!({"model": "fake-clone", "input": "Hi."}));
+    assert_eq!(reply.status, 400);
+    let error = &reply.json()["error"];
+    assert_eq!(error["code"], "unknown_voice");
+    assert_eq!(
+        error["message"],
+        "the model \"fake-clone\" has no cloned voices; add one with naru-audio voice add"
+    );
+    assert_eq!(server.record.loads.load(Ordering::SeqCst), 0);
+}
+
 fn say(url: &str, args: &[&str], stdin: Option<&[u8]>) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_naru-audio"))
         .arg("say")

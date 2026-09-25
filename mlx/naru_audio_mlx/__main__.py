@@ -81,6 +81,10 @@ def synth(model, header):
     kwargs = {}
     if header.get("reference"):
         kwargs["ref_audio"] = header["reference"]
+    # A cloned voice's transcript: with `ref_audio`, Qwen3-TTS Base clones
+    # the voice in context.
+    if header.get("reference_text"):
+        kwargs["ref_text"] = header["reference_text"]
     for result in model.generate(
         text=header["text"],
         voice=header.get("voice"),

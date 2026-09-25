@@ -1,0 +1,301 @@
+//! Cloned voices: `$NARU_AUDIO_HOME/voices/<name>/` holds `ref.wav`, a
+//! short clip of the voice, and `ref.txt`, what it says. A model whose
+//! manifest sets `[backend.<backend>] clone = true` (Qwen3-TTS Base) speaks
+//! in each of them as voice `<name>`, after its own `[[voice]]`s. They are
+//! read from disk on each request, so a voice added while the daemon runs
+//! is usable at once.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::registry::manifest::{Manifest, Voice};
+
+pub const REF_WAV: &str = "ref.wav";
+pub const REF_TXT: &str = "ref.txt";
+
+/// Clip lengths `add` accepts, in seconds; 5–15 s is the target.
+pub const MIN_SECS: f64 = 3.0;
+pub const MAX_SECS: f64 = 30.0;
+
+/// `ref.wav`'s rate: Qwen3-TTS's (mlx-audio resamples to the model's
+/// rate anyway).
+const SAMPLE_RATE: u32 = 24_000;
+
+/// A cloned voice's clip and transcript.
+#[derive(Debug, PartialEq)]
+pub struct Cloned {
+    pub wav: PathBuf,
+    pub text: String,
+}
+
+pub fn dir(home: &Path) -> PathBuf {
+    home.join("voices")
+}
+
+/// A voice name is one plain path component: not empty, no `/` or `\`,
+/// and no leading `.` (so neither `.` nor `..`).
+pub fn check_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.starts_with('.')
+        || name.contains(['/', '\\', '\0'])
+        || name.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "voice name {name:?} must be a plain name: no path separators and no leading `.`"
+        ));
+    }
+    Ok(())
+}
+
+/// The names of the complete cloned voices in `home`, sorted.
+pub fn list(home: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir(home)) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| find(home, n).is_some())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The voice `name` in `home`, if it is a valid name with both files.
+pub fn find(home: &Path, name: &str) -> Option<Cloned> {
+    check_name(name).ok()?;
+    let voice = dir(home).join(name);
+    let wav = voice.join(REF_WAV);
+    let text = std::fs::read_to_string(voice.join(REF_TXT)).ok()?;
+    wav.is_file().then(|| Cloned {
+        wav,
+        text: text.trim().to_string(),
+    })
+}
+
+/// `manifest`'s voices, then, if it clones, the cloned voices in `home`
+/// that no `[[voice]]` shadows.
+pub fn of(manifest: &Manifest, home: &Path) -> Vec<Voice> {
+    let mut voices = manifest.voices.clone();
+    if manifest.clones() {
+        for id in list(home) {
+            if !voices.iter().any(|v| v.id == id) {
+                voices.push(Voice {
+                    id,
+                    sid: 0,
+                    reference: None,
+                    accent: None,
+                    gender: None,
+                    default: false,
+                });
+            }
+        }
+    }
+    voices
+}
+
+/// Adds the voice `name` from `clip` (anything `afconvert` reads, such as
+/// WAV or MP3), converted to 24 kHz mono 16-bit WAV, with `text` as its
+/// transcript. Returns the clip's length in seconds, which must be within
+/// `MIN_SECS..=MAX_SECS`. An existing voice is not replaced.
+pub fn add(home: &Path, name: &str, clip: &Path, text: &str) -> Result<f64, String> {
+    check_name(name)?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("the transcript is empty".to_string());
+    }
+    let voice = dir(home).join(name);
+    if voice.exists() {
+        return Err(format!(
+            "voice `{name}` already exists; remove {} first",
+            voice.display()
+        ));
+    }
+    // Built in tmp/ and renamed into place, so a voice is never half there.
+    let tmp = home
+        .join("tmp")
+        .join(format!("voice-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    let result = convert(clip, &tmp.join(REF_WAV)).and_then(|secs| {
+        if !(MIN_SECS..=MAX_SECS).contains(&secs) {
+            return Err(format!(
+                "the clip is {secs:.1} s; it must be {MIN_SECS}–{MAX_SECS} s (5–15 s is best)"
+            ));
+        }
+        std::fs::write(tmp.join(REF_TXT), format!("{text}\n"))
+            .map_err(|e| format!("write {REF_TXT}: {e}"))?;
+        std::fs::create_dir_all(dir(home)).map_err(|e| format!("create voices/: {e}"))?;
+        std::fs::rename(&tmp, &voice).map_err(|e| format!("move into {}: {e}", voice.display()))?;
+        Ok(secs)
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    result
+}
+
+/// `afconvert`s `clip` to `wav` and returns its length in seconds.
+fn convert(clip: &Path, wav: &Path) -> Result<f64, String> {
+    let out = Command::new("afconvert")
+        .args([
+            "-f",
+            "WAVE",
+            "-d",
+            &format!("LEI16@{SAMPLE_RATE}"),
+            "-c",
+            "1",
+        ])
+        .arg(clip)
+        .arg(wav)
+        .output()
+        .map_err(|e| format!("cannot run afconvert (macOS only): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "afconvert cannot read {}: {}",
+            clip.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let reader =
+        hound::WavReader::open(wav).map_err(|e| format!("read the converted clip: {e}"))?;
+    Ok(f64::from(reader.duration()) / f64::from(reader.spec().sample_rate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_is_one_plain_component() {
+        for ok in ["narrator", "Simon-2", "a b", "voix_é"] {
+            assert!(check_name(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", ".", "..", ".hidden", "a/b", "../x", "a\\b", "a\0b", "a\nb",
+        ] {
+            assert!(check_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    fn voice(home: &Path, name: &str, files: &[&str]) {
+        let d = dir(home).join(name);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in files {
+            std::fs::write(d.join(f), " hello there \n").unwrap();
+        }
+    }
+
+    #[test]
+    fn only_complete_voices_are_listed_and_found() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(list(home.path()).is_empty());
+        voice(home.path(), "zed", &[REF_WAV, REF_TXT]);
+        voice(home.path(), "amy", &[REF_WAV, REF_TXT]);
+        voice(home.path(), "no-text", &[REF_WAV]);
+        voice(home.path(), "no-wav", &[REF_TXT]);
+        voice(home.path(), ".tmp", &[REF_WAV, REF_TXT]);
+        assert_eq!(list(home.path()), ["amy", "zed"]);
+
+        assert_eq!(
+            find(home.path(), "amy"),
+            Some(Cloned {
+                wav: dir(home.path()).join("amy").join(REF_WAV),
+                text: "hello there".to_string(),
+            })
+        );
+        // Outside voices/, even where both files exist.
+        voice(&home.path().join("models"), "x", &[REF_WAV, REF_TXT]);
+        for name in ["no-text", "no-wav", "nope", "../models/voices/x", ".tmp"] {
+            assert_eq!(find(home.path(), name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn only_a_cloning_manifest_gets_the_cloned_voices() {
+        let home = tempfile::tempdir().unwrap();
+        voice(home.path(), "amy", &[REF_WAV, REF_TXT]);
+        voice(home.path(), "ryan", &[REF_WAV, REF_TXT]);
+        let manifest = |clone: bool| {
+            Manifest::parse(
+                &format!(
+                    "[model]\nname = \"m\"\nkind = \"tts\"\nbackend = \"mlx\"\n\
+                     [backend.mlx]\nclone = {clone}\n\
+                     [[voice]]\nid = \"ryan\"\nsid = 0\ngender = \"m\"\ndefault = true\n"
+                ),
+                "test",
+            )
+            .unwrap()
+        };
+        let ids = |m: &Manifest| -> Vec<(String, Option<String>, bool)> {
+            of(m, home.path())
+                .into_iter()
+                .map(|v| (v.id, v.gender, v.default))
+                .collect()
+        };
+        let ryan = ("ryan".to_string(), Some("m".to_string()), true);
+        assert_eq!(ids(&manifest(false)), std::slice::from_ref(&ryan));
+        // The manifest's `ryan` shadows the cloned one.
+        assert_eq!(
+            ids(&manifest(true)),
+            [ryan, ("amy".to_string(), None, false)]
+        );
+    }
+
+    /// A clip of `secs` seconds of a 440 Hz tone at 44.1 kHz stereo.
+    #[cfg(target_os = "macos")]
+    fn clip(path: &Path, secs: f64) {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for i in 0..(secs * 44_100.0) as u32 {
+            let s = (f64::from(i) * 440.0 * std::f64::consts::TAU / 44_100.0).sin();
+            let s = (s * 8000.0) as i16;
+            w.write_sample(s).unwrap();
+            w.write_sample(s).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn add_converts_to_24k_mono_and_checks_the_length() {
+        let home = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (short, ok, long) = (
+            src.path().join("short.wav"),
+            src.path().join("ok.wav"),
+            src.path().join("long.wav"),
+        );
+        clip(&short, 2.0);
+        clip(&ok, 6.0);
+        clip(&long, 31.0);
+
+        let secs = add(home.path(), "amy", &ok, "  Hello there.\n").unwrap();
+        assert!((secs - 6.0).abs() < 0.05, "{secs}");
+        let found = find(home.path(), "amy").unwrap();
+        assert_eq!(found.text, "Hello there.");
+        let spec = hound::WavReader::open(&found.wav).unwrap().spec();
+        assert_eq!((spec.channels, spec.sample_rate), (1, SAMPLE_RATE));
+
+        let err = add(home.path(), "amy", &ok, "again").unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        for (name, path) in [("short", &short), ("long", &long)] {
+            let err = add(home.path(), name, path, "text").unwrap_err();
+            assert!(err.contains("it must be 3–30 s"), "{err}");
+        }
+        let err = add(home.path(), "junk", &src.path().join("nope.wav"), "t").unwrap_err();
+        assert!(err.contains("afconvert cannot read"), "{err}");
+        assert!(add(home.path(), "../x", &ok, "t").is_err());
+        assert!(add(home.path(), "blank", &ok, " \n").is_err());
+        // Nothing half-made is left behind.
+        assert_eq!(list(home.path()), ["amy"]);
+        assert_eq!(
+            std::fs::read_dir(home.path().join("tmp")).unwrap().count(),
+            0
+        );
+    }
+}

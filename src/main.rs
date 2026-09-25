@@ -13,6 +13,7 @@ use naru_audio::profile::Profile;
 use naru_audio::registry::{self, Progress, Pulled, Registry};
 use naru_audio::server::{self, AppState};
 use naru_audio::stt::audio;
+use naru_audio::voices;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -117,6 +118,26 @@ enum Command {
         #[command(subcommand)]
         action: MlxAction,
     },
+    /// Cloned voices in $NARU_AUDIO_HOME/voices, spoken by a cloning model
+    /// (qwen3-tts-0.6b-base-mlx).
+    Voice {
+        #[command(subcommand)]
+        action: VoiceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum VoiceAction {
+    /// Add a voice from a 5–15 s clip of one speaker (WAV or MP3; 3–30 s
+    /// accepted), converted with macOS afconvert.
+    Add {
+        /// The voice id: no path separators.
+        name: String,
+        clip: PathBuf,
+        /// Exactly what the clip says.
+        #[arg(long)]
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -175,6 +196,7 @@ async fn main() -> ExitCode {
             .await;
         }
         Command::Mlx { action } => return mlx_command(action),
+        Command::Voice { action } => return voice_command(action),
         // §3.7: these work without a daemon, directly on $NARU_AUDIO_HOME.
         command => return registry_command(command),
     };
@@ -297,6 +319,28 @@ fn mlx_command(_: MlxAction) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// `voice add`, on $NARU_AUDIO_HOME; exits 1 on failure.
+fn voice_command(action: VoiceAction) -> ExitCode {
+    let Some(home) = registry::default_home() else {
+        eprintln!("naru-audio: set NARU_AUDIO_HOME or HOME");
+        return ExitCode::FAILURE;
+    };
+    let VoiceAction::Add { name, clip, text } = action;
+    match voices::add(&home, &name, &clip, &text) {
+        Ok(secs) => {
+            if !(5.0..=15.0).contains(&secs) {
+                eprintln!("naru-audio: warning: the clip is {secs:.1} s; 5–15 s clones best");
+            }
+            println!("added voice {name} ({secs:.1} s)");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("naru-audio: voice add: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// `pull`, `list`, `rm` and `verify`. Every named model is attempted; the
 /// exit code is 1 if any failed.
 fn registry_command(command: Command) -> ExitCode {
@@ -316,7 +360,8 @@ fn registry_command(command: Command) -> ExitCode {
         | Command::Transcribe { .. }
         | Command::Say { .. }
         | Command::Stream { .. }
-        | Command::Mlx { .. } => {
+        | Command::Mlx { .. }
+        | Command::Voice { .. } => {
             unreachable!("handled by main")
         }
         Command::Pull { names, force } => {

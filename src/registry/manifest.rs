@@ -27,6 +27,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/pocket-tts-int8.toml"),
     ),
     (
+        "qwen3-tts-0.6b-base-mlx.toml",
+        include_str!("../../catalog/qwen3-tts-0.6b-base-mlx.toml"),
+    ),
+    (
         "qwen3-tts-0.6b-mlx.toml",
         include_str!("../../catalog/qwen3-tts-0.6b-mlx.toml"),
     ),
@@ -172,6 +176,16 @@ impl Manifest {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// `backend.<model.backend>.clone`: the model speaks in the cloned
+    /// voices under `$NARU_AUDIO_HOME/voices/` (`crate::voices`).
+    pub fn clones(&self) -> bool {
+        self.backend
+            .get(&self.model.backend)
+            .and_then(|t| t.get("clone"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 
     fn validate(&mut self) -> Result<(), String> {
@@ -344,6 +358,7 @@ mod tests {
                 "parakeet-tdt-0.6b-v2-int8",
                 "parakeet-tdt-0.6b-v2-mlx",
                 "pocket-tts-int8",
+                "qwen3-tts-0.6b-base-mlx",
                 "qwen3-tts-0.6b-mlx",
                 "silero-vad"
             ]
@@ -491,6 +506,30 @@ mod tests {
             .map(|v| v.id.as_str())
             .collect();
         assert_eq!(defaults, ["ryan"]);
+    }
+
+    #[test]
+    fn builtin_qwen3_tts_base_clones_and_has_no_preset_voices() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["qwen3-tts-0.6b-base-mlx"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(m.model.backend, "mlx");
+        assert!(m.clones());
+        assert!(m.voices.is_empty());
+        // The same files as CustomVoice's, from the Base repo.
+        let custom = &cat.models["qwen3-tts-0.6b-mlx"];
+        assert!(!custom.clones());
+        let paths = |m: &Manifest| m.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+        assert_eq!(paths(m), paths(custom));
+        for f in &m.files {
+            let url = f.url.as_deref().unwrap();
+            assert!(
+                url.starts_with(
+                    "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/"
+                ) && url.ends_with(&format!("/{}", f.path)),
+                "{url}"
+            );
+        }
     }
 
     #[test]

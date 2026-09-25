@@ -23,7 +23,11 @@ use tower::ServiceExt;
 
 const HOSTPORT: &str = "127.0.0.1:7870";
 /// Built in, and listed on macOS only.
-const MLX: &[&str] = &["parakeet-tdt-0.6b-v2-mlx", "qwen3-tts-0.6b-mlx"];
+const MLX: &[&str] = &[
+    "parakeet-tdt-0.6b-v2-mlx",
+    "qwen3-tts-0.6b-base-mlx",
+    "qwen3-tts-0.6b-mlx",
+];
 
 fn app(home: &Path) -> Router {
     let log = Arc::new(Logger::stderr());

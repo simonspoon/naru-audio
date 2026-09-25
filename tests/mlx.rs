@@ -30,7 +30,7 @@ const FAKE_BYTES: u64 = 123_456_789;
 /// `synth` of "N" streams N chunks of 3 samples, chunk i all i; "N!" fails
 /// after them. Each synth appends the chunks it yielded to `synth.log`.
 const FAKE_MAIN: &str = r#"
-import argparse, os, struct
+import argparse, json, os, struct
 from .protocol import serve
 
 loaded = set()
@@ -58,6 +58,8 @@ def handle(header, samples):
         return {"sample_rate": 24000} if kind == "tts" else {}
     if op == "synth":
         int(header["text"].rstrip("!"))
+        with open("synth.json", "w") as f:
+            json.dump(header, f)
         return chunks(header["text"])
     if op == "unload":
         loaded.discard(header["model"])
@@ -99,6 +101,7 @@ fn home() -> tempfile::TempDir {
     }
     let tts = json!({
         "model": {"name": "fake-tts", "kind": "tts", "backend": "mlx", "languages": ["en"]},
+        "backend": {"mlx": {"clone": true}},
         "voice": [{"id": "fake", "sid": 0, "default": true}],
     });
     std::fs::create_dir_all(models.join("fake-tts")).unwrap();
@@ -471,4 +474,56 @@ fn a_blocked_sink_does_not_hold_the_sidecar() {
         result.unwrap();
         assert_eq!(pieces, five);
     });
+}
+
+/// A cloning model's preset voice goes to the sidecar as `voice`; a cloned
+/// voice as `reference` (its clip) and `reference_text` (its transcript),
+/// with no `voice`. A name outside `voices/` is an unknown voice.
+#[test]
+fn a_cloned_voice_is_sent_as_its_reference_and_transcript() {
+    let runs = std::process::Command::new(PYTHON)
+        .args(["-c", ""])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !runs {
+        eprintln!("skipped: {PYTHON} does not run");
+        return;
+    }
+    let home = home();
+    let amy = home.path().join("voices").join("amy");
+    std::fs::create_dir_all(&amy).unwrap();
+    std::fs::write(amy.join("ref.wav"), b"").unwrap();
+    std::fs::write(amy.join("ref.txt"), "Hello there.\n").unwrap();
+    let registry = Registry::open(home.path()).unwrap();
+    let manifest = registry.pulled_manifest("fake-tts").unwrap();
+    let tts = load_tts(&manifest, &registry.model_dir("fake-tts")).unwrap();
+    let sent = |voice: &str| {
+        let result = tts.synth("1", voice, &SynthOptions::default(), Box::new(|_| true));
+        result.map(|()| {
+            let json = std::fs::read(home.path().join("mlx").join("synth.json")).unwrap();
+            let header: Value = serde_json::from_slice(&json).unwrap();
+            (
+                header["voice"].clone(),
+                header["reference"].clone(),
+                header["reference_text"].clone(),
+            )
+        })
+    };
+
+    assert_eq!(
+        sent("fake").unwrap(),
+        (json!("fake"), Value::Null, Value::Null)
+    );
+    assert_eq!(
+        sent("amy").unwrap(),
+        (
+            Value::Null,
+            json!(amy.join("ref.wav")),
+            json!("Hello there.")
+        )
+    );
+    for voice in ["nope", "../voices/amy"] {
+        let err = sent(voice).unwrap_err();
+        assert!(matches!(err, TtsError::UnknownVoice { .. }), "{err}");
+    }
 }
