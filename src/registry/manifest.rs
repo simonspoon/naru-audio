@@ -35,6 +35,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/qwen3-tts-0.6b-mlx.toml"),
     ),
     (
+        "qwen3-tts-1.7b-base-mlx.toml",
+        include_str!("../../catalog/qwen3-tts-1.7b-base-mlx.toml"),
+    ),
+    (
         "qwen3-tts-1.7b-voicedesign-mlx.toml",
         include_str!("../../catalog/qwen3-tts-1.7b-voicedesign-mlx.toml"),
     ),
@@ -374,6 +378,7 @@ mod tests {
                 "pocket-tts-int8",
                 "qwen3-tts-0.6b-base-mlx",
                 "qwen3-tts-0.6b-mlx",
+                "qwen3-tts-1.7b-base-mlx",
                 "qwen3-tts-1.7b-voicedesign-mlx",
                 "silero-vad"
             ]
@@ -548,6 +553,29 @@ mod tests {
     }
 
     #[test]
+    fn builtin_qwen3_tts_1_7b_base_clones_and_has_no_preset_voices() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["qwen3-tts-1.7b-base-mlx"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(m.model.backend, "mlx");
+        assert!(m.clones());
+        assert!(!m.instructs());
+        assert!(m.voices.is_empty());
+        // The same files as the 0.6B Base's, from the 1.7B Base repo.
+        let paths = |m: &Manifest| m.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+        assert_eq!(paths(m), paths(&cat.models["qwen3-tts-0.6b-base-mlx"]));
+        for f in &m.files {
+            let url = f.url.as_deref().unwrap();
+            assert!(
+                url.starts_with(
+                    "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit/resolve/"
+                ) && url.ends_with(&format!("/{}", f.path)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
     fn builtin_qwen3_tts_voicedesign_instructs_and_has_no_voices() {
         let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
         let m = &cat.models["qwen3-tts-1.7b-voicedesign-mlx"];
@@ -560,6 +588,7 @@ mod tests {
         for other in [
             "qwen3-tts-0.6b-mlx",
             "qwen3-tts-0.6b-base-mlx",
+            "qwen3-tts-1.7b-base-mlx",
             "kokoro-v1.0",
         ] {
             assert!(!cat.models[other].instructs(), "{other}");

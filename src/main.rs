@@ -122,8 +122,8 @@ enum Command {
         #[command(subcommand)]
         action: MlxAction,
     },
-    /// Cloned voices in $NARU_AUDIO_HOME/voices, spoken by a cloning model
-    /// (qwen3-tts-0.6b-base-mlx).
+    /// Cloned voices in $NARU_AUDIO_HOME/voices, spoken by any cloning model
+    /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx).
     Voice {
         #[command(subcommand)]
         action: VoiceAction,

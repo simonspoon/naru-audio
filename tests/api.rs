@@ -27,6 +27,7 @@ const MLX: &[&str] = &[
     "parakeet-tdt-0.6b-v2-mlx",
     "qwen3-tts-0.6b-base-mlx",
     "qwen3-tts-0.6b-mlx",
+    "qwen3-tts-1.7b-base-mlx",
     "qwen3-tts-1.7b-voicedesign-mlx",
 ];
 
