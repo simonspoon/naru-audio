@@ -326,6 +326,12 @@ fn validate(form: Form, default_model: &str) -> Result<Job, ApiError> {
 /// The pulled manifest of the STT model `name`: 404 unknown, 409 not
 /// pulled, 400 not STT. Blocking.
 pub(super) fn stt_manifest(st: &AppState, name: &str) -> Result<Manifest, ApiError> {
+    kind_manifest(st, name, Kind::Stt)
+}
+
+/// The pulled manifest of the `kind` model `name`: 404 unknown, 409 not
+/// pulled, 400 another kind. Blocking.
+pub(super) fn kind_manifest(st: &AppState, name: &str, kind: Kind) -> Result<Manifest, ApiError> {
     // Only a catalog name or a pulled one reaches the filesystem, so a name
     // like `../x` or `/tmp/x` is 404, as in `Registry::lock_pulled`.
     let known = st.registry.catalog().models.contains_key(name)
@@ -342,14 +348,24 @@ pub(super) fn stt_manifest(st: &AppState, name: &str) -> Result<Manifest, ApiErr
     }
     // Never auto-pulls (§2.6 `model_not_pulled`).
     let manifest = st.registry.pulled_manifest(name).map_err(registry_error)?;
-    if manifest.model.kind != Kind::Stt {
-        return Err(bad_request(
-            "model",
-            "invalid_request",
-            format!("the model \"{name}\" is not a speech-to-text model"),
-        ));
+    if manifest.model.kind != kind {
+        return Err(not_kind(name, kind));
     }
     Ok(manifest)
+}
+
+/// 400: the model `name` is not a `kind` model.
+pub(super) fn not_kind(name: &str, kind: Kind) -> ApiError {
+    let what = match kind {
+        Kind::Stt => "speech-to-text",
+        Kind::Tts => "text-to-speech",
+        Kind::Vad => "voice activity detection",
+    };
+    bad_request(
+        "model",
+        "invalid_request",
+        format!("the model \"{name}\" is not a {what} model"),
+    )
 }
 
 /// The model's manifest (404/409), `language` (400), then the audio
@@ -478,7 +494,11 @@ pub(super) fn join(segments: &[Segment]) -> String {
         .join(" ")
 }
 
-fn bad_request(param: &'static str, code: &'static str, message: impl Into<String>) -> ApiError {
+pub(super) fn bad_request(
+    param: &'static str,
+    code: &'static str,
+    message: impl Into<String>,
+) -> ApiError {
     ApiError {
         param: Some(param),
         ..ApiError::new(StatusCode::BAD_REQUEST, code, message)

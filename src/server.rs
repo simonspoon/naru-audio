@@ -1,7 +1,8 @@
-//! HTTP surface: §2.1 guards, §2.2 transcriptions, §2.4 streaming
-//! transcriptions, §2.5 `/health` and registry routes, §2.6 errors,
-//! `X-Request-Id`.
+//! HTTP surface: §2.1 guards, §2.2 transcriptions, §2.3 speech, §2.4
+//! streaming transcriptions, §2.5 `/health`, voices and registry routes,
+//! §2.6 errors, `X-Request-Id`.
 
+mod speech;
 mod stream;
 mod transcriptions;
 
@@ -66,6 +67,8 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
         )
         .route("/v1/audio/transcriptions/stream", get(stream::stream))
+        .route("/v1/audio/speech", post(speech::speech))
+        .route("/v1/audio/voices", get(speech::voices))
         .route("/api/pull", post(pull))
         .route("/api/models/{name}", delete(remove))
         .route("/api/ps", get(ps))
@@ -420,9 +423,10 @@ fn manager_error(st: &AppState, req_id: &str, e: ManagerError) -> ApiError {
             )
         },
         ManagerError::Load(e) => {
-            let code = match e {
-                crate::stt::SttError::BackendUnavailable { .. } => "backend_unavailable",
-                _ => "model_load_failed",
+            let code = if e.is_backend_unavailable() {
+                "backend_unavailable"
+            } else {
+                "model_load_failed"
             };
             ApiError::new(StatusCode::SERVICE_UNAVAILABLE, code, e.to_string())
         }

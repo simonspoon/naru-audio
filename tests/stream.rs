@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use naru_audio::log::Logger;
 use naru_audio::manager::{
-    BackendLoader, KeepAlive, LoadedModel, Loader, ModelManager, Resident, Settings,
+    BackendLoader, KeepAlive, LoadError, LoadedModel, Loader, ModelManager, Resident, Settings,
 };
 use naru_audio::profile::Profile;
 use naru_audio::registry::manifest::Manifest;
@@ -525,9 +525,11 @@ struct CountingLoader {
 }
 
 impl Loader for CountingLoader {
-    fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, SttError> {
+    fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, LoadError> {
         let loaded = BackendLoader.load(manifest, dir)?;
-        let Resident::Stt(inner) = loaded.model;
+        let Resident::Stt(inner) = loaded.model else {
+            unreachable!("an STT manifest loads an STT model")
+        };
         Ok(LoadedModel {
             model: Resident::Stt(Arc::new(CountingModel {
                 inner,

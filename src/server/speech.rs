@@ -1,0 +1,401 @@
+//! §2.3 `POST /v1/audio/speech` and §2.5 `GET /v1/audio/voices`.
+//!
+//! Speech checks run cheapest first: the JSON fields, then the model
+//! (404/409/400) and the voice against its manifest, and only then the load.
+//! The response starts once the first sentence is synthesised, so a failure
+//! before that still gets its status code; one after it aborts the chunked
+//! body (§2.3).
+
+use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+
+use axum::Json;
+use axum::body::{Body, Bytes};
+use axum::extract::{Extension, Query, State};
+use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
+use axum::response::{AppendHeaders, IntoResponse, Response};
+use serde_json::{Value, json};
+
+use super::transcriptions::{bad_request, internal, kind_manifest, not_kind};
+use super::{AppState, RequestId, manager_error};
+use crate::error::ApiError;
+use crate::manager::{Guard, KeepAlive};
+use crate::registry::manifest::{Kind, Manifest};
+use crate::tts::SynthOptions;
+
+/// OpenAI model names that stand for `default`, so stock clients work.
+const DEFAULT_ALIASES: [&str; 4] = ["default", "tts-1", "tts-1-hd", "gpt-4o-mini-tts"];
+
+/// §2.3 `input` cap, in characters.
+pub(super) const MAX_INPUT_CHARS: usize = 16_384;
+
+/// §2.3 streaming `wav`: the length is unknown when the header goes out.
+const STREAM_DATA_SIZE: u32 = 0x7FFF_0000;
+
+/// Sentences of audio buffered for a slow client before synthesis waits.
+const QUEUED_PIECES: usize = 4;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Format {
+    Wav,
+    Pcm,
+}
+
+/// A validated request.
+struct Job {
+    model: String,
+    input: String,
+    voice: Option<String>,
+    format: Format,
+    stream: bool,
+    options: SynthOptions,
+    keep_alive: Option<KeepAlive>,
+}
+
+pub(super) async fn speech(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let job = validate(&body, &st.models.settings().tts_default)?;
+    let manifest = {
+        let (st, name) = (st.clone(), job.model.clone());
+        tokio::task::spawn_blocking(move || kind_manifest(&st, &name, Kind::Tts))
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    let voice = voice(&manifest, job.voice.as_deref())?;
+    let model = st
+        .models
+        .acquire(manifest, job.keep_alive)
+        .await
+        .map_err(|e| manager_error(&st, &req_id, e))?;
+    let sample_rate = model.tts().sample_rate();
+
+    let mut rx = synthesise(model, job.input, voice, job.options);
+    if !job.stream {
+        let mut pcm = Vec::new();
+        while let Some(piece) = rx.recv().await {
+            pcm.extend_from_slice(&piece.map_err(|e| internal(&st, &req_id, e))?);
+        }
+        let body = match job.format {
+            Format::Wav => {
+                let mut wav = wav_header(sample_rate, pcm.len() as u32).to_vec();
+                wav.extend_from_slice(&pcm);
+                wav
+            }
+            Format::Pcm => pcm,
+        };
+        // A full body: axum sets `Content-Length`.
+        return Ok((AppendHeaders(headers(job.format, sample_rate)), body).into_response());
+    }
+
+    // Held back until the first sentence is out of the model, so a failure
+    // before any audio is still a status code.
+    let first = match rx.recv().await {
+        Some(Ok(piece)) => Some(piece),
+        Some(Err(e)) => return Err(internal(&st, &req_id, e)),
+        None => None,
+    };
+    let head = match job.format {
+        Format::Wav => Bytes::copy_from_slice(&wav_header(sample_rate, STREAM_DATA_SIZE)),
+        Format::Pcm => Bytes::new(),
+    };
+    let first = [head]
+        .into_iter()
+        .chain(first)
+        .filter(|b| !b.is_empty())
+        .map(Ok::<_, std::io::Error>);
+    let rest = futures_util::stream::unfold((rx, st, req_id), |(mut rx, st, req_id)| async move {
+        match rx.recv().await? {
+            Ok(piece) => Some((Ok(piece), (rx, st, req_id))),
+            Err(e) => {
+                // Pending once first, so hyper flushes the audio already
+                // written: an error in the same write loop drops it unsent.
+                tokio::task::yield_now().await;
+                // An `Err` makes hyper drop the connection without the
+                // terminating zero-length chunk.
+                st.log
+                    .line("error", Some(&req_id), &format!("tts_stream_aborted {e}"));
+                Some((Err(std::io::Error::other(e)), (rx, st, req_id)))
+            }
+        }
+    });
+    let chunks = futures_util::stream::StreamExt::chain(futures_util::stream::iter(first), rest);
+    Ok((
+        AppendHeaders(headers(job.format, sample_rate)),
+        Body::from_stream(chunks),
+    )
+        .into_response())
+}
+
+/// Synthesises on the blocking pool, sending each sentence as s16le bytes,
+/// or the failure's text last. When the receiver is dropped (the client went
+/// away and hyper dropped the body) the next send fails and the sink cancels
+/// the rest; the model is released when synthesis returns.
+fn synthesise(
+    model: Guard,
+    input: String,
+    voice: String,
+    options: SynthOptions,
+) -> tokio::sync::mpsc::Receiver<Result<Bytes, String>> {
+    let (tx, rx) = tokio::sync::mpsc::channel(QUEUED_PIECES);
+    tokio::task::spawn_blocking(move || {
+        let sink_tx = tx.clone();
+        let sink = Box::new(move |samples: &[f32]| {
+            let bytes: Vec<u8> = samples
+                .iter()
+                .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes())
+                .collect();
+            sink_tx.blocking_send(Ok(Bytes::from(bytes))).is_ok()
+        });
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            model
+                .tts()
+                .synth(&input, &voice, &options, sink)
+                .map_err(|e| e.to_string())
+        }))
+        .unwrap_or_else(|_| Err("the synthesis panicked".to_string()));
+        if let Err(e) = result {
+            let _ = tx.blocking_send(Err(e));
+        }
+    });
+    rx
+}
+
+fn headers(format: Format, sample_rate: u32) -> Vec<(&'static str, String)> {
+    match format {
+        Format::Wav => vec![(CONTENT_TYPE.as_str(), "audio/wav".to_string())],
+        Format::Pcm => vec![
+            (CONTENT_TYPE.as_str(), "audio/pcm".to_string()),
+            ("x-audio-sample-rate", sample_rate.to_string()),
+            ("x-audio-channels", "1".to_string()),
+            ("x-audio-encoding", "s16le".to_string()),
+        ],
+    }
+}
+
+/// A 44-byte header for 16-bit mono PCM with `data_size` bytes of samples.
+fn wav_header(sample_rate: u32, data_size: u32) -> [u8; 44] {
+    let mut h = [0u8; 44];
+    let fields: [(usize, &[u8]); 13] = [
+        (0, b"RIFF"),
+        (4, &data_size.wrapping_add(36).to_le_bytes()),
+        (8, b"WAVE"),
+        (12, b"fmt "),
+        (16, &16u32.to_le_bytes()),
+        (20, &1u16.to_le_bytes()), // PCM
+        (22, &1u16.to_le_bytes()), // mono
+        (24, &sample_rate.to_le_bytes()),
+        (28, &(sample_rate * 2).to_le_bytes()),
+        (32, &2u16.to_le_bytes()),
+        (34, &16u16.to_le_bytes()),
+        (36, b"data"),
+        (40, &data_size.to_le_bytes()),
+    ];
+    for (at, bytes) in fields {
+        h[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+    h
+}
+
+/// `default_model` is what `default` and its aliases resolve to (§3.3).
+fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
+    let body: serde_json::Map<String, Value> = serde_json::from_slice(body).map_err(|e| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            format!("the body must be a JSON object: {e}"),
+        )
+    })?;
+    let field = |name: &str| body.get(name).filter(|v| !v.is_null());
+    let string = |name: &'static str| -> Result<Option<&str>, ApiError> {
+        field(name)
+            .map(|v| {
+                v.as_str().ok_or_else(|| {
+                    bad_request(name, "invalid_request", format!("{name} must be a string"))
+                })
+            })
+            .transpose()
+    };
+    let number = |name: &'static str| -> Result<Option<f64>, ApiError> {
+        field(name)
+            .map(|v| {
+                v.as_f64().ok_or_else(|| {
+                    bad_request(name, "invalid_request", format!("{name} must be a number"))
+                })
+            })
+            .transpose()
+    };
+    let boolean = |name: &'static str, default: bool| -> Result<bool, ApiError> {
+        field(name).map_or(Ok(default), |v| {
+            v.as_bool().ok_or_else(|| {
+                bad_request(
+                    name,
+                    "invalid_request",
+                    format!("{name} must be true or false"),
+                )
+            })
+        })
+    };
+
+    let input = string("input")?.unwrap_or_default();
+    if input.is_empty() {
+        return Err(bad_request(
+            "input",
+            "invalid_request",
+            "\"input\" must be a non-empty string",
+        ));
+    }
+    let chars = input.chars().count();
+    if chars > MAX_INPUT_CHARS {
+        return Err(ApiError {
+            param: Some("input"),
+            ..ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                format!("input is {chars} characters; the cap is {MAX_INPUT_CHARS}"),
+            )
+        });
+    }
+    if input.contains('\0') {
+        return Err(bad_request(
+            "input",
+            "invalid_request",
+            "input must not contain a NUL character",
+        ));
+    }
+
+    let format = match string("response_format")? {
+        None | Some("wav") => Format::Wav,
+        Some("pcm") => Format::Pcm,
+        Some(other) => {
+            return Err(bad_request(
+                "response_format",
+                "unsupported_value",
+                format!("response_format {other:?} is not supported; use wav or pcm"),
+            ));
+        }
+    };
+    match string("stream_format")? {
+        None | Some("audio") => {}
+        Some(other) => {
+            return Err(bad_request(
+                "stream_format",
+                "unsupported_value",
+                format!("stream_format {other:?} is not supported; use audio"),
+            ));
+        }
+    }
+
+    let mut options = SynthOptions::default();
+    if let Some(speed) = number("speed")? {
+        if !(0.5..=2.0).contains(&speed) {
+            return Err(bad_request(
+                "speed",
+                "invalid_request",
+                format!("speed must be between 0.5 and 2.0, got {speed}"),
+            ));
+        }
+        options.speed = speed as f32;
+    }
+    if let Some(gap) = number("gap")? {
+        if !(0.0..=5.0).contains(&gap) {
+            return Err(bad_request(
+                "gap",
+                "invalid_request",
+                format!("gap must be between 0 and 5 seconds, got {gap}"),
+            ));
+        }
+        options.gap = gap as f32;
+    }
+    options.level = boolean("level", true)?;
+    let stream = boolean("stream", true)?;
+
+    let keep_alive = match field("keep_alive") {
+        None => None,
+        Some(Value::String(s)) => Some(KeepAlive::parse(s)),
+        Some(Value::Number(n)) => Some(KeepAlive::from_secs(n.as_f64().unwrap_or(f64::NAN))),
+        Some(_) => Some(Err(
+            "keep_alive must be a duration string or a number of seconds".to_string(),
+        )),
+    }
+    .transpose()
+    .map_err(|e| bad_request("keep_alive", "invalid_request", e))?;
+
+    let model = match string("model")? {
+        None => default_model,
+        Some(m) if DEFAULT_ALIASES.contains(&m) => default_model,
+        Some(m) => m,
+    };
+    // `instructions` is ignored (§2.3), as is anything unknown.
+    Ok(Job {
+        model: model.to_string(),
+        input: input.to_string(),
+        voice: string("voice")?.map(str::to_string),
+        format,
+        stream,
+        options,
+        keep_alive,
+    })
+}
+
+/// `voice` if the manifest lists it, else 400 `unknown_voice` with the
+/// valid ids; no voice is the manifest's default one.
+fn voice(manifest: &Manifest, voice: Option<&str>) -> Result<String, ApiError> {
+    let voices = &manifest.voices;
+    let found = match voice {
+        Some(id) => voices.iter().find(|v| v.id == id),
+        None => voices.iter().find(|v| v.default).or(voices.first()),
+    };
+    if let Some(v) = found {
+        return Ok(v.id.clone());
+    }
+    let ids: Vec<&str> = voices.iter().map(|v| v.id.as_str()).collect();
+    Err(bad_request(
+        "voice",
+        "unknown_voice",
+        format!(
+            "the model \"{}\" has no voice {:?}; use one of: {}",
+            manifest.model.name,
+            voice.unwrap_or_default(),
+            ids.join(", ")
+        ),
+    ))
+}
+
+/// §2.5 `GET /v1/audio/voices?model=`: read from the manifest (the pulled
+/// one, else the catalog's), never by loading the model.
+pub(super) async fn voices(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let name = match query.get("model").map(String::as_str) {
+        None => st.models.settings().tts_default.clone(),
+        Some(m) if DEFAULT_ALIASES.contains(&m) => st.models.settings().tts_default.clone(),
+        Some(m) => m.to_string(),
+    };
+    let manifest = {
+        let st = st.clone();
+        tokio::task::spawn_blocking(move || match st.registry.catalog().models.get(&name) {
+            Some(m) if !st.registry.is_installed(&name) => match m.model.kind {
+                Kind::Tts => Ok(m.clone()),
+                _ => Err(not_kind(&name, Kind::Tts)),
+            },
+            _ => kind_manifest(&st, &name, Kind::Tts),
+        })
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    let voices: Vec<Value> = manifest
+        .voices
+        .iter()
+        .map(|v| json!({"id": v.id, "accent": v.accent, "gender": v.gender, "default": v.default}))
+        .collect();
+    Ok(Json(
+        json!({"model": manifest.model.name, "voices": voices}),
+    ))
+}

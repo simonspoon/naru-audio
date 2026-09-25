@@ -20,6 +20,7 @@ use crate::profile::Profile;
 use crate::registry::Registry;
 use crate::registry::manifest::{Kind, Manifest};
 use crate::stt::{SttError, SttModel};
+use crate::tts::{TtsError, TtsModel};
 
 /// §3.4 default when neither the request nor `NARU_AUDIO_KEEP_ALIVE` sets one.
 const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(5 * 60);
@@ -102,10 +103,11 @@ impl Settings {
     }
 }
 
-/// A loaded model. TTS joins as a second variant.
+/// A loaded model.
 #[derive(Clone)]
 pub enum Resident {
     Stt(Arc<dyn SttModel>),
+    Tts(Arc<dyn TtsModel>),
 }
 
 pub struct LoadedModel {
@@ -114,33 +116,82 @@ pub struct LoadedModel {
     pub measured_bytes: Option<u64>,
 }
 
-/// Loads a pulled model from its directory. Tests inject a fake.
-pub trait Loader: Send + Sync {
-    fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, SttError>;
+/// Why a model did not load, by its kind.
+#[derive(Debug)]
+pub enum LoadError {
+    Stt(SttError),
+    Tts(TtsError),
 }
 
-/// The real loader: `backend::load_stt`, measured by the RSS delta or by
-/// what the model reports ([`SttModel::resident_bytes`]).
+impl LoadError {
+    /// §3.6: the backend cannot run here (§2.6 `backend_unavailable`).
+    pub fn is_backend_unavailable(&self) -> bool {
+        matches!(
+            self,
+            LoadError::Stt(SttError::BackendUnavailable { .. })
+                | LoadError::Tts(TtsError::BackendUnavailable { .. })
+        )
+    }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadError::Stt(e) => e.fmt(f),
+            LoadError::Tts(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for LoadError {}
+
+impl From<SttError> for LoadError {
+    fn from(e: SttError) -> Self {
+        LoadError::Stt(e)
+    }
+}
+
+impl From<TtsError> for LoadError {
+    fn from(e: TtsError) -> Self {
+        LoadError::Tts(e)
+    }
+}
+
+/// Loads a pulled model from its directory. Tests inject a fake.
+pub trait Loader: Send + Sync {
+    fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, LoadError>;
+}
+
+/// The real loader: `backend::load_stt` or `backend::load_tts` by the
+/// manifest's kind, measured by the RSS delta or by what the model reports
+/// ([`SttModel::resident_bytes`]).
 pub struct BackendLoader;
 
 /// One load at a time, so no other load's allocations land in a delta.
 static LOADS: Mutex<()> = Mutex::new(());
 
 impl Loader for BackendLoader {
-    fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, SttError> {
+    fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, LoadError> {
         let _one_at_a_time = LOADS.lock().unwrap_or_else(|e| e.into_inner());
         let before = crate::profile::rss();
-        let model = crate::backend::load_stt(manifest, dir)?;
+        let (model, reported) = if manifest.model.kind == Kind::Tts {
+            let model = crate::backend::load_tts(manifest, dir)?;
+            (Resident::Tts(Arc::from(model)), None)
+        } else {
+            let model = crate::backend::load_stt(manifest, dir)?;
+            // An MLX model's bytes are in the sidecar, not in this delta.
+            let reported = model.resident_bytes();
+            (Resident::Stt(Arc::from(model)), reported)
+        };
         let after = crate::profile::rss();
-        // An MLX model's bytes are in the sidecar, not in this delta.
-        let measured_bytes = model.resident_bytes().or_else(|| {
+        let measured_bytes = reported.or_else(|| {
             before
                 .zip(after)
                 .map(|(b, a)| a.saturating_sub(b))
                 .filter(|&d| d > 0)
         });
         Ok(LoadedModel {
-            model: Resident::Stt(Arc::from(model)),
+            model,
             measured_bytes,
         })
     }
@@ -150,7 +201,7 @@ impl Loader for BackendLoader {
 pub enum ManagerError {
     /// §3.5: the model does not fit even after evicting every idle model.
     InsufficientMemory(String),
-    Load(SttError),
+    Load(LoadError),
     /// The load panicked.
     Internal(String),
 }
@@ -240,9 +291,20 @@ pub struct Guard {
 }
 
 impl Guard {
+    /// Panics on a TTS model: callers acquire with an STT manifest.
     pub fn stt(&self) -> &Arc<dyn SttModel> {
-        let Resident::Stt(model) = &self.model;
-        model
+        match &self.model {
+            Resident::Stt(model) => model,
+            Resident::Tts(_) => panic!("\"{}\" is not a speech-to-text model", self.name),
+        }
+    }
+
+    /// Panics on an STT model: callers acquire with a TTS manifest.
+    pub fn tts(&self) -> &Arc<dyn TtsModel> {
+        match &self.model {
+            Resident::Tts(model) => model,
+            Resident::Stt(_) => panic!("\"{}\" is not a text-to-speech model", self.name),
+        }
     }
 }
 
@@ -422,7 +484,7 @@ impl ModelManager {
         need: u64,
         unloads: Option<u64>,
         started: Instant,
-        result: Result<Result<LoadedModel, SttError>, tokio::task::JoinError>,
+        result: Result<Result<LoadedModel, LoadError>, tokio::task::JoinError>,
     ) -> Result<Guard, ManagerError> {
         let loaded = match result {
             Ok(Ok(loaded)) => loaded,

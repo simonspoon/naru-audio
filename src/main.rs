@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -78,6 +78,21 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
+    /// Speak text through the daemon as 16-bit WAV.
+    Say {
+        /// Text, or `-` for stdin.
+        text: String,
+        /// Voice id; the model's default voice if not given.
+        #[arg(short, long)]
+        voice: Option<String>,
+        /// Speed, 0.5 to 2.0.
+        #[arg(short, long)]
+        speed: Option<f64>,
+        /// WAV file, written with exact sizes once synthesis ends; or `-`
+        /// for stdout, streamed as each sentence is synthesised.
+        #[arg(short, long)]
+        output: String,
+    },
     /// Stream a WAV file through the daemon's WebSocket at the pace of real
     /// time, printing its events as JSON Lines. Each `final` gains
     /// `latency_ms`: from sending its last speech sample to its arrival.
@@ -136,6 +151,12 @@ async fn main() -> ExitCode {
             model,
             format,
         } => return transcribe(&daemon_url(), &file, model.as_deref(), format),
+        Command::Say {
+            text,
+            voice,
+            speed,
+            output,
+        } => return say(&daemon_url(), &text, voice.as_deref(), speed, &output),
         Command::Stream {
             file,
             model,
@@ -293,6 +314,7 @@ fn registry_command(command: Command) -> ExitCode {
         | Command::Health
         | Command::Ps
         | Command::Transcribe { .. }
+        | Command::Say { .. }
         | Command::Stream { .. }
         | Command::Mlx { .. } => {
             unreachable!("handled by main")
@@ -649,6 +671,94 @@ fn transcribe(url: &str, file: &str, model: Option<&str>, format: Format) -> Exi
         }
     }
     ExitCode::SUCCESS
+}
+
+/// `POST /v1/audio/speech` as `wav`, to `output`. `-` asks for the chunked
+/// stream and copies each piece to stdout as it arrives, so a player can
+/// start at once; a file asks for `stream=false`, whose header has the exact
+/// sizes. A stream the daemon aborts (§2.3) is exit 1.
+fn say(url: &str, text: &str, voice: Option<&str>, speed: Option<f64>, output: &str) -> ExitCode {
+    // As `transcribe`: a stopped daemon is exit 3, before stdin is read.
+    if let Err(code) = read(
+        url,
+        agent(Some(PROBE_TIMEOUT))
+            .get(format!("{url}/health"))
+            .call(),
+    ) {
+        return code;
+    }
+    let text = if text == "-" {
+        let mut buf = String::new();
+        match std::io::stdin().read_to_string(&mut buf) {
+            Ok(_) => buf,
+            Err(e) => {
+                eprintln!("naru-audio: stdin: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        text.to_string()
+    };
+    let stream = output == "-";
+    let mut request = serde_json::json!({
+        "model": "default", "input": text, "response_format": "wav", "stream": stream,
+    });
+    if let Some(voice) = voice {
+        request["voice"] = voice.into();
+    }
+    if let Some(speed) = speed {
+        request["speed"] = speed.into();
+    }
+
+    let response = agent(None)
+        .post(format!("{url}/v1/audio/speech"))
+        .content_type("application/json")
+        .send(request.to_string());
+    let mut response = match response {
+        Ok(r) if r.status() == 200 => r,
+        // Reports the error, and exits 3 for a daemon that went away.
+        result => {
+            return match read(url, result) {
+                Ok((status, body)) => {
+                    eprintln!("naru-audio: {}", error_message(status, &body));
+                    ExitCode::FAILURE
+                }
+                Err(code) => code,
+            };
+        }
+    };
+    let mut body = response.body_mut().as_reader();
+    let copied = if stream {
+        let mut out = std::io::stdout().lock();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match body.read(&mut buf) {
+                Ok(0) => break Ok(()),
+                Ok(n) => {
+                    if let Err(e) = out.write_all(&buf[..n]).and_then(|()| out.flush()) {
+                        break Err(format!("stdout: {e}"));
+                    }
+                }
+                Err(e) => break Err(format!("{url}: {e}")),
+            }
+        }
+    } else {
+        std::fs::File::create(output)
+            .and_then(|mut file| std::io::copy(&mut body, &mut file))
+            .map(|_| ())
+            .map_err(|e| {
+                // No half-written file is left behind.
+                let _ = std::fs::remove_file(output);
+                format!("{output}: {e}")
+            })
+    };
+    match copied {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("naru-audio: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// §2.4 over `ws://`: `start`, the file's samples as s16le frames paced at

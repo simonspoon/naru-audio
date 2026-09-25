@@ -10,7 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use naru_audio::log::Logger;
-use naru_audio::manager::{KeepAlive, LoadedModel, Loader, ModelManager, Resident, Settings};
+use naru_audio::manager::{
+    KeepAlive, LoadError, LoadedModel, Loader, ModelManager, Resident, Settings,
+};
 use naru_audio::profile::Profile;
 use naru_audio::registry::Registry;
 use naru_audio::registry::manifest::Manifest;
@@ -112,7 +114,7 @@ impl FakeLoader {
 }
 
 impl Loader for FakeLoader {
-    fn load(&self, manifest: &Manifest, _dir: &Path) -> Result<LoadedModel, SttError> {
+    fn load(&self, manifest: &Manifest, _dir: &Path) -> Result<LoadedModel, LoadError> {
         self.loads.fetch_add(1, Ordering::SeqCst);
         self.load.pass();
         Ok(LoadedModel {

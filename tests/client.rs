@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use common::Stub;
 use naru_audio::log::Logger;
-use naru_audio::manager::{KeepAlive, LoadedModel, Loader, ModelManager, Resident, Settings};
+use naru_audio::manager::{
+    KeepAlive, LoadError, LoadedModel, Loader, ModelManager, Resident, Settings,
+};
 use naru_audio::profile::Profile;
 use naru_audio::registry::Registry;
 use naru_audio::registry::manifest::Manifest;
@@ -47,7 +49,7 @@ impl SttModel for FakeModel {
 struct FakeLoader;
 
 impl Loader for FakeLoader {
-    fn load(&self, _manifest: &Manifest, _dir: &Path) -> Result<LoadedModel, SttError> {
+    fn load(&self, _manifest: &Manifest, _dir: &Path) -> Result<LoadedModel, LoadError> {
         Ok(LoadedModel {
             model: Resident::Stt(Arc::new(FakeModel)),
             measured_bytes: None,
