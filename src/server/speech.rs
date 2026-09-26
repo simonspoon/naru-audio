@@ -1,4 +1,5 @@
-//! §2.3 `POST /v1/audio/speech` and §2.5 `GET`/`POST /v1/audio/voices`.
+//! §2.3 `POST /v1/audio/speech`, §2.5 `GET`/`POST /v1/audio/voices` and
+//! `GET /v1/audio/voices/{name}`.
 //!
 //! Speech checks run cheapest first: the JSON fields, then the model
 //! (404/409/400) and the voice against its manifest, and only then the load.
@@ -13,10 +14,12 @@ use std::sync::Arc;
 use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::multipart::MultipartRejection;
-use axum::extract::{Extension, Multipart, Query, State};
+use axum::extract::{Extension, Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
 use axum::response::{AppendHeaders, IntoResponse, Response};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
 use super::transcriptions::{bad_request, internal, kind_manifest, multipart_error, not_kind};
@@ -455,7 +458,7 @@ fn voice(
 
 /// §2.5 `GET /v1/audio/voices?model=`: read from the manifest (the pulled
 /// one, else the catalog's), and the cloned voices if the model clones;
-/// never by loading the model.
+/// never by loading the model. `cloned` marks the ones from `voices/`.
 pub(super) async fn voices(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
@@ -484,10 +487,51 @@ pub(super) async fn voices(
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
     let voices: Vec<Value> = voices
         .iter()
-        .map(|v| json!({"id": v.id, "accent": v.accent, "gender": v.gender, "default": v.default}))
+        .map(|v| {
+            // `voices::of` appends the cloned voices no `[[voice]]` shadows.
+            let cloned = !manifest.voices.iter().any(|m| m.id == v.id);
+            json!({"id": v.id, "accent": v.accent, "gender": v.gender, "default": v.default,
+                   "cloned": cloned})
+        })
         .collect();
     Ok(Json(
         json!({"model": manifest.model.name, "voices": voices}),
+    ))
+}
+
+/// §2.5 `GET /v1/audio/voices/{name}`: a cloned voice's transcript and
+/// its `ref.wav`, base64, byte for byte, so it can be added elsewhere. A
+/// bad name is a 400, as `POST` has it; no such cloned voice a 404.
+pub(super) async fn voice_export(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    voices::check_name(&name).map_err(|m| bad_request("name", "invalid_request", m))?;
+    let found = {
+        let (home, name) = (st.registry.home().to_path_buf(), name.clone());
+        tokio::task::spawn_blocking(move || {
+            let Some(voice) = voices::find(&home, &name) else {
+                return Ok(None);
+            };
+            let wav = std::fs::read(&voice.wav)
+                .map_err(|e| format!("read {}: {e}", voice.wav.display()))?;
+            Ok::<_, String>(Some((voice.text, wav)))
+        })
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?
+    .map_err(|m| internal(&st, &req_id, m))?;
+    let (text, wav) = found.ok_or_else(|| ApiError {
+        param: Some("name"),
+        ..ApiError::new(
+            StatusCode::NOT_FOUND,
+            "voice_not_found",
+            format!("there is no cloned voice {name:?}"),
+        )
+    })?;
+    Ok(Json(
+        json!({"name": name, "text": text, "wav_base64": STANDARD.encode(wav)}),
     ))
 }
 
@@ -568,6 +612,7 @@ pub(super) async fn add_voice(
             "accent": null,
             "gender": null,
             "default": false,
+            "cloned": true,
             "duration": secs,
         })),
     )

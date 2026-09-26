@@ -690,8 +690,8 @@ fn voices_answer_without_loading_the_model() {
         assert_eq!(
             reply.json(),
             json!({"model": "fake-tts", "voices": [
-                {"id": "af_heart", "accent": "us", "gender": "f", "default": true},
-                {"id": "bm_george", "accent": "gb", "gender": "m", "default": false},
+                {"id": "af_heart", "accent": "us", "gender": "f", "default": true, "cloned": false},
+                {"id": "bm_george", "accent": "gb", "gender": "m", "default": false, "cloned": false},
             ]}),
             "{path}"
         );
@@ -755,7 +755,7 @@ fn a_cloning_model_speaks_the_cloned_voices() {
     assert_eq!(
         reply.json(),
         json!({"model": "fake-clone", "voices": [
-            {"id": "zed", "accent": null, "gender": null, "default": false},
+            {"id": "zed", "accent": null, "gender": null, "default": false, "cloned": true},
         ]})
     );
     // Kokoro-like models are untouched.
@@ -878,7 +878,7 @@ fn a_posted_clip_becomes_a_cloned_voice() {
     assert_eq!(
         body,
         json!({"id": "amy", "accent": null, "gender": null, "default": false,
-               "duration": body["duration"]})
+               "cloned": true, "duration": body["duration"]})
     );
     let voice = home_dir.join("voices").join("amy");
     assert_eq!(

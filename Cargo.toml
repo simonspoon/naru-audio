@@ -7,6 +7,7 @@ description = "Local speech-to-text and text-to-speech daemon for Naru"
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart", "ws"] }
+base64 = "0.22"
 bzip2 = "0.6"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }

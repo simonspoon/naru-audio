@@ -1,5 +1,6 @@
 //! §2.5 registry routes: `GET /v1/models`, `POST /api/pull`,
-//! `DELETE /api/models/{name}`.
+//! `DELETE /api/models/{name}`, and the cloned-voice export
+//! `GET /v1/audio/voices/{name}`.
 
 mod common;
 
@@ -11,6 +12,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::header::{CONTENT_TYPE, HOST};
 use axum::http::{Request, StatusCode};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use common::{Stub, file_entry, home, model_header};
 use http_body_util::BodyExt;
 use naru_audio::log::Logger;
@@ -352,4 +355,93 @@ async fn unreadable_manifest_json_is_skipped() {
 
     // The unreadable stt no longer blocks removing what it requires.
     assert_eq!(delete(dir.path(), "vad").await.0, StatusCode::NO_CONTENT);
+}
+
+/// A cloned voice `name` in `home`, as `voice add` leaves it.
+fn add_voice(home: &Path, name: &str, wav: &[u8], text: &str) {
+    let voice = home.join("voices").join(name);
+    std::fs::create_dir_all(&voice).unwrap();
+    std::fs::write(voice.join("ref.wav"), wav).unwrap();
+    std::fs::write(voice.join("ref.txt"), text).unwrap();
+}
+
+#[tokio::test]
+async fn a_cloned_voice_exports_its_clip_byte_for_byte() {
+    let dir = home(&[]);
+    // Every byte value, so a lossy encoding would show.
+    let wav: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+    add_voice(dir.path(), "amy", &wav, "Hello there.\n");
+
+    let (status, body) = get_json(dir.path(), "/v1/audio/voices/amy").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "amy");
+    assert_eq!(body["text"], "Hello there.");
+    let decoded = STANDARD
+        .decode(body["wav_base64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        decoded,
+        std::fs::read(dir.path().join("voices/amy/ref.wav")).unwrap()
+    );
+    assert_eq!(body.as_object().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn an_unknown_or_built_in_voice_is_a_404() {
+    let dir = home(&[]);
+    // No `ref.txt`: not a complete cloned voice.
+    std::fs::create_dir_all(dir.path().join("voices/half")).unwrap();
+    std::fs::write(dir.path().join("voices/half/ref.wav"), b"RIFF").unwrap();
+    for name in ["nope", "af_heart", "half"] {
+        let (status, body) = get_json(dir.path(), &format!("/v1/audio/voices/{name}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{name}");
+        assert_eq!(body["error"]["code"], "voice_not_found", "{name}");
+    }
+}
+
+#[tokio::test]
+async fn a_path_traversal_name_is_refused() {
+    let dir = home(&[]);
+    // A voice `..%2Fetc` could reach, were the name not checked.
+    add_voice(dir.path(), "etc", b"RIFF", "Hi.");
+    std::fs::create_dir_all(dir.path().join("voices/x")).unwrap();
+    for uri in [
+        "/v1/audio/voices/..%2Fvoices%2Fetc",
+        "/v1/audio/voices/..%2Fetc",
+        "/v1/audio/voices/.hidden",
+        "/v1/audio/voices/a%5Cb",
+    ] {
+        let (status, body) = get_json(dir.path(), uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(body["error"]["code"], "invalid_request", "{uri}");
+        assert_eq!(body["error"]["param"], "name", "{uri}");
+    }
+    // Unencoded, `../x` is two segments: no route.
+    let (status, body) = get_json(dir.path(), "/v1/audio/voices/../x").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn the_voice_listing_marks_cloned_voices() {
+    let dir = home(&[]);
+    let model = dir.path().join("models/fake-clone");
+    std::fs::create_dir_all(&model).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-clone", "kind": "tts", "backend": "sherpa-onnx"},
+        "backend": {"sherpa-onnx": {"clone": true}},
+        "voice": [{"id": "af_heart", "sid": 0, "default": true}],
+    });
+    std::fs::write(model.join("manifest.json"), manifest.to_string()).unwrap();
+    add_voice(dir.path(), "amy", b"RIFF", "Hi.");
+
+    let (status, body) = get_json(dir.path(), "/v1/audio/voices?model=fake-clone").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({"model": "fake-clone", "voices": [
+            {"id": "af_heart", "accent": null, "gender": null, "default": true, "cloned": false},
+            {"id": "amy", "accent": null, "gender": null, "default": false, "cloned": true},
+        ]})
+    );
 }
