@@ -83,7 +83,8 @@ enum Command {
     Say {
         /// Text, or `-` for stdin.
         text: String,
-        /// Voice id; the model's default voice if not given.
+        /// Voice id; the model's default voice if not given. VoiceDesign
+        /// models have no voices and ignore it: use --instructions.
         #[arg(short, long)]
         voice: Option<String>,
         /// Model name; if not given, qwen3-tts-0.6b-base-mlx for a cloned
@@ -93,6 +94,10 @@ enum Command {
         /// Speed, 0.5 to 2.0.
         #[arg(short, long)]
         speed: Option<f64>,
+        /// Voice description, which a VoiceDesign model needs; other models
+        /// ignore it.
+        #[arg(long)]
+        instructions: Option<String>,
         /// WAV file, written with exact sizes once synthesis ends; or `-`
         /// for stdout, streamed as each sentence is synthesised.
         #[arg(short, long)]
@@ -181,6 +186,7 @@ async fn main() -> ExitCode {
             voice,
             model,
             speed,
+            instructions,
             output,
         } => {
             return say(
@@ -189,6 +195,7 @@ async fn main() -> ExitCode {
                 voice.as_deref(),
                 model.as_deref(),
                 speed,
+                instructions.as_deref(),
                 &output,
             );
         }
@@ -763,6 +770,30 @@ fn transcribe(url: &str, file: &str, model: Option<&str>, format: Format) -> Exi
     ExitCode::SUCCESS
 }
 
+/// The `/v1/audio/speech` body for `say`: optional fields only when given.
+fn speech_request(
+    model: &str,
+    text: &str,
+    voice: Option<&str>,
+    speed: Option<f64>,
+    instructions: Option<&str>,
+    stream: bool,
+) -> serde_json::Value {
+    let mut request = serde_json::json!({
+        "model": model, "input": text, "response_format": "wav", "stream": stream,
+    });
+    if let Some(voice) = voice {
+        request["voice"] = voice.into();
+    }
+    if let Some(speed) = speed {
+        request["speed"] = speed.into();
+    }
+    if let Some(instructions) = instructions {
+        request["instructions"] = instructions.into();
+    }
+    request
+}
+
 /// `POST /v1/audio/speech` as `wav`, to `output`. `-` asks for the chunked
 /// stream and copies each piece to stdout as it arrives, so a player can
 /// start at once; a file asks for `stream=false`, whose header has the exact
@@ -773,6 +804,7 @@ fn say(
     voice: Option<&str>,
     model: Option<&str>,
     speed: Option<f64>,
+    instructions: Option<&str>,
     output: &str,
 ) -> ExitCode {
     // As `transcribe`: a stopped daemon is exit 3, before stdin is read.
@@ -798,15 +830,7 @@ fn say(
     };
     let stream = output == "-";
     let model = voices::say_model(registry::default_home().as_deref(), model, voice);
-    let mut request = serde_json::json!({
-        "model": model, "input": text, "response_format": "wav", "stream": stream,
-    });
-    if let Some(voice) = voice {
-        request["voice"] = voice.into();
-    }
-    if let Some(speed) = speed {
-        request["speed"] = speed.into();
-    }
+    let request = speech_request(model, &text, voice, speed, instructions, stream);
 
     let response = agent(None)
         .post(format!("{url}/v1/audio/speech"))
@@ -994,7 +1018,7 @@ async fn stream(
 
 #[cfg(test)]
 mod tests {
-    use super::expand_pull_names;
+    use super::{expand_pull_names, speech_request};
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -1026,5 +1050,29 @@ mod tests {
             expand_pull_names(&names(&["kokoro-v1.0", "silero-vad"]), "stt-a", "tts-b"),
             names(&["kokoro-v1.0", "silero-vad"])
         );
+    }
+
+    #[test]
+    fn say_request_carries_instructions_when_given() {
+        let request = speech_request(
+            "qwen3-tts-1.7b-voicedesign-mlx",
+            "hello",
+            None,
+            None,
+            Some("A warm calm man"),
+            false,
+        );
+        assert_eq!(request["instructions"], "A warm calm man");
+        assert_eq!(request["model"], "qwen3-tts-1.7b-voicedesign-mlx");
+        assert_eq!(request["input"], "hello");
+    }
+
+    #[test]
+    fn say_request_omits_instructions_when_not_given() {
+        let request = speech_request("default", "hello", Some("af_heart"), Some(1.5), None, true);
+        assert!(request.get("instructions").is_none());
+        assert_eq!(request["voice"], "af_heart");
+        assert_eq!(request["speed"], 1.5);
+        assert_eq!(request["stream"], true);
     }
 }

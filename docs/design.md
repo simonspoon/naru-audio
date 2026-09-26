@@ -506,7 +506,7 @@ naru-audio list [--names]        # --names: bare names one per line, pulled only
 naru-audio ps                    naru-audio verify [NAME…]
 naru-audio health                # GET /health, exit 0 ready / 3 daemon down / 4 default model not ready
 naru-audio transcribe FILE|- [-m M] [--format text|json]   # thin HTTP client
-naru-audio say TEXT|- [-v V] [-s S] [-o FILE|-]             # thin HTTP client
+naru-audio say TEXT|- [-v V] [-s S] [--instructions I] [-o FILE|-]   # thin HTTP client
 naru-audio mlx setup|status      # arm64 only
 ```
 
@@ -514,6 +514,9 @@ naru-audio mlx setup|status      # arm64 only
 `$NARU_AUDIO_HOME` under the same `.lock`, so a fresh install can pull before
 the service starts. `transcribe` and `say` need the daemon and never start
 one; if it is down they exit 3 with the §4.4 message.
+`say --instructions` sends the request's `instructions`: the voice description
+a VoiceDesign model needs (it has no voices and ignores `-v`); other models
+ignore it.
 
 ## 4. Service lifecycle on macOS
 
