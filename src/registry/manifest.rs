@@ -23,6 +23,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/kokoro-v1.0.toml"),
     ),
     (
+        "omnivoice-bf16-mlx.toml",
+        include_str!("../../catalog/omnivoice-bf16-mlx.toml"),
+    ),
+    (
         "parakeet-tdt-0.6b-v2-int8.toml",
         include_str!("../../catalog/parakeet-tdt-0.6b-v2-int8.toml"),
     ),
@@ -411,6 +415,7 @@ mod tests {
                 "chatterbox-tts-8bit-mlx",
                 "indextts-1.5-mlx",
                 "kokoro-v1.0",
+                "omnivoice-bf16-mlx",
                 "parakeet-tdt-0.6b-v2-int8",
                 "parakeet-tdt-0.6b-v2-mlx",
                 "pocket-tts-int8",
@@ -717,6 +722,33 @@ mod tests {
             let url = f.url.as_deref().unwrap();
             assert!(
                 url.starts_with("https://huggingface.co/mlx-community/VoxCPM2-8bit/resolve/")
+                    && url.ends_with(&format!("/{}", f.path)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_omnivoice_clones_and_instructs_and_is_non_commercial() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["omnivoice-bf16-mlx"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(m.model.backend, "mlx");
+        assert_eq!(m.model.license.as_deref(), Some("CC-BY-NC-4.0"));
+        assert_eq!(
+            m.model.license_url.as_deref(),
+            Some("https://creativecommons.org/licenses/by-nc/4.0/")
+        );
+        // Naru 1445: k2-fsa/OmniVoice's pre-trained weights are CC-BY-NC.
+        assert!(m.model.non_commercial);
+        assert!(m.clones());
+        assert!(m.instructs());
+        assert!(!m.exaggerates());
+        assert!(m.voices.is_empty());
+        for f in &m.files {
+            let url = f.url.as_deref().unwrap();
+            assert!(
+                url.starts_with("https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/")
                     && url.ends_with(&format!("/{}", f.path)),
                 "{url}"
             );

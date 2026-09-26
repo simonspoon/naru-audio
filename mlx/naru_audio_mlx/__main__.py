@@ -98,16 +98,18 @@ def synth(model, header):
     time as `serve` asks for them."""
     # Chatterbox does not support `speed` at all (mlx-audio's own
     # docstring: "Ignored (Chatterbox doesn't support speed adjustment)");
-    # VoxCPM2's and IndexTTS's `generate` have no `speed` parameter either,
-    # so it would otherwise be swallowed silently by their own `**kwargs`.
-    # Either way, a caller who asks for anything else gets a clear error
-    # instead of normal-speed audio it never asked for.
+    # VoxCPM2's, IndexTTS's and OmniVoice's `generate` have no `speed`
+    # parameter either, so it would otherwise be swallowed silently by
+    # their own `**kwargs`. Either way, a caller who asks for anything
+    # else gets a clear error instead of normal-speed audio it never
+    # asked for.
     speed = header.get("speed", 1.0)
     model_name = header.get("model", "")
     if (
         model_name.startswith("chatterbox")
         or model_name.startswith("voxcpm2")
         or model_name.startswith("indextts")
+        or model_name.startswith("omnivoice")
     ) and speed != 1.0:
         raise ValueError(
             f"{model_name} does not support speed (got {speed}); "

@@ -199,6 +199,46 @@ class IndexTTSSynth(unittest.TestCase):
         self.assertEqual(audio(model, header), [4.0])
 
 
+class OmniVoice:
+    """mlx-audio's OmniVoice in outline: no `speech_tokenizer`, clones with
+    `ref_audio` and designs with `instruct`, has no `speed` parameter at
+    all (swallowed by `**kwargs` if sent), yields once, non-streaming."""
+
+    def generate(self, text, ref_audio=None, instruct=None, **kwargs):
+        self.seen_ref_audio = ref_audio
+        self.seen_instruct = instruct
+        yield type("Result", (), {"audio": mx.full((1,), 5.0)})
+
+
+class OmniVoiceSynth(unittest.TestCase):
+    def test_reference_clones_without_priming(self):
+        model = OmniVoice()
+        header = {
+            "model": "omnivoice-bf16-mlx",
+            "reference": "ref.wav",
+            "reference_text": "Hello there.",
+        }
+        self.assertEqual(audio(model, header), [5.0])
+        self.assertEqual(model.seen_ref_audio, "ref.wav")
+
+    def test_instruct_is_passed_through_for_voice_design(self):
+        model = OmniVoice()
+        header = {"model": "omnivoice-bf16-mlx", "instruct": "A calm narrator."}
+        audio(model, header)
+        self.assertEqual(model.seen_instruct, "A calm narrator.")
+
+    def test_non_default_speed_raises(self):
+        model = OmniVoice()
+        header = {"model": "omnivoice-bf16-mlx", "speed": 1.5}
+        with self.assertRaises(ValueError):
+            audio(model, header)
+
+    def test_default_speed_is_accepted(self):
+        model = OmniVoice()
+        header = {"model": "omnivoice-bf16-mlx", "speed": 1.0}
+        self.assertEqual(audio(model, header), [5.0])
+
+
 class IndexTTSLoadDir(unittest.TestCase):
     """`_indextts_load_dir` must never touch the pulled model directory:
     its `config.json` is one of the manifest's hash-pinned `[[file]]`s,

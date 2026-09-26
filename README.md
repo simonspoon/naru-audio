@@ -123,12 +123,13 @@ used.
 | `chatterbox-tts-8bit-mlx` | TTS, speaks cloned voices | mlx | 1.3 GB |
 | `indextts-1.5-mlx` | TTS, speaks cloned voices, does not stream | mlx | 1.4 GB |
 | `voxcpm2-8bit-mlx` | TTS, clones or designs a voice, 48 kHz | mlx | 3.2 GB |
+| `omnivoice-bf16-mlx` | TTS, clones or designs a voice, 646 languages, does not stream, **non-commercial** | mlx | 1.6 GB |
 
 Each model's license is in its catalog file (`license = …`); check it before
 you use a model's output. `naru-audio list` and `GET /v1/models` show it
 (`x_license`, `x_license_url`), and pulling a non-commercial model
-(`pocket-tts-int8`, per its README) prints a warning; `x_non_commercial`
-marks it in the API.
+(`pocket-tts-int8`, per its README; `omnivoice-bf16-mlx`, CC-BY-NC-4.0)
+prints a warning; `x_non_commercial` marks it in the API.
 
 ```sh
 naru-audio pull pocket-tts-int8       # pull by name; `default` means the configured STT and TTS models
@@ -171,8 +172,8 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   restarting the daemon.
 - `say` with a cloned voice and no `-m` uses `qwen3-tts-0.6b-base-mlx`;
   `-m qwen3-tts-1.7b-base-mlx`, `-m chatterbox-tts-8bit-mlx`,
-  `-m indextts-1.5-mlx` or `-m voxcpm2-8bit-mlx` uses another cloning
-  model.
+  `-m indextts-1.5-mlx`, `-m voxcpm2-8bit-mlx` or `-m omnivoice-bf16-mlx`
+  uses another cloning model.
 - Voices can also be added with `POST /v1/audio/voices` and exported with
   `GET /v1/audio/voices/{name}` ([docs/design.md §2.5](docs/design.md)).
 - `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
@@ -192,6 +193,14 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   stream: mlx-audio generates the whole utterance before yielding
   anything, so `-o -` still works but all the audio arrives in one piece
   at the end rather than as it is produced.
+- `omnivoice-bf16-mlx` (**CC-BY-NC-4.0, non-commercial only** — k2-fsa's
+  README: "The pre-trained model is licensed under the CC-BY-NC due to
+  constraints from its training data") clones or designs a voice like
+  VoxCPM2, speaks 646 languages, and does not support `speed` either. Like
+  IndexTTS, it does not stream — one chunk at the end, so `-o -` still
+  works but nothing plays until synthesis finishes. Its cloned voice's
+  transcript (`--text`) is not ignored: mlx-audio prepends it to the
+  spoken text, so it should still be the clip's exact words.
 
 **Voice design**: `qwen3-tts-1.7b-voicedesign-mlx` has no voices; it makes
 one up from `--instructions`, which it requires:
@@ -202,11 +211,11 @@ naru-audio say "Good evening." -m qwen3-tts-1.7b-voicedesign-mlx \
   --instructions "A warm, husky woman in her thirties. Speak slowly." -o designed.wav
 ```
 
-`voxcpm2-8bit-mlx` does both: `say -v myvoice -m voxcpm2-8bit-mlx` clones a
-voice added the same way as above, and `say -m voxcpm2-8bit-mlx
---instructions "..."` designs one instead, with no voice named — the two
-are mutually exclusive per request, and a named cloned voice always wins if
-both are given.
+`voxcpm2-8bit-mlx` and `omnivoice-bf16-mlx` do both: `say -v myvoice -m
+voxcpm2-8bit-mlx` (or `-m omnivoice-bf16-mlx`) clones a voice added the
+same way as above, and `say -m voxcpm2-8bit-mlx --instructions "..."`
+designs one instead, with no voice named — the two are mutually exclusive
+per request, and a named cloned voice always wins if both are given.
 
 ## Configuration
 

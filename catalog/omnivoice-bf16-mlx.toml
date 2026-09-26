@@ -1,0 +1,166 @@
+# OmniVoice (k2-fsa), mlx-community's bf16 conversion, served by mlx-audio
+# in the MLX sidecar (§5.3). A fifth cloning model, and the second (after
+# VoxCPM2) that also designs a voice from a description: it clones a
+# reference recording the same way as the Qwen3-TTS Base pair, Chatterbox
+# and VoxCPM2 (no preset speakers, so its voices are the cloned ones under
+# $NARU_AUDIO_HOME/voices/, each passed to mlx-audio as `ref_audio`), and
+# separately takes the request's `instructions` as mlx-audio's `instruct`
+# to make a voice up from a description. Unlike VoxCPM2, OmniVoice's
+# `ref_text` is not ignored: mlx-audio prepends it to the spoken text
+# before tokenizing, so a cloned voice's transcript is sent as usual and
+# actually used. `speed` is not supported at all — mlx-audio's `generate`
+# has no `speed` parameter for it, so it would otherwise be swallowed
+# silently by `**kwargs`; the sidecar shim errors on a non-1.0 speed
+# instead (`naru_audio_mlx/__main__.py`), as for Chatterbox and VoxCPM2.
+# 24 kHz output (`model.sample_rate`). Does not stream: mlx-audio's
+# `generate` yields exactly one chunk, after the whole utterance has
+# decoded, same as IndexTTS; `say -o -` still works, but all the audio
+# arrives at once at the end.
+#
+# 646 languages per the base model's card (k2-fsa/OmniVoice's `language`
+# frontmatter, copied verbatim below as ISO 639 codes).
+#
+# bf16, not mlx-community's 8-bit conversion: mlx-audio's OmniVoice
+# `sanitize()` splits the checkpoint's single `audio_embeddings.weight` /
+# `audio_heads.weight` tensors into 8 per-codebook tensors by exact key
+# match, but does not do the same for their quantized `.scales` /
+# `.biases` siblings, so loading mlx-community/OmniVoice-8bit fails with
+# "parameters not in model" (confirmed 2026-09-26 against mlx-audio as
+# installed in mlx/pyproject.toml — a bug in mlx-audio's own conversion,
+# not something to route around here). bf16 has no `quantization` key in
+# its config.json, so `apply_quantization` is a no-op and this problem
+# does not arise; it loads and speaks correctly.
+#
+# Licence: k2-fsa/OmniVoice's own README says "Our code is released under
+# the Apache 2.0 License. The pre-trained model is licensed under the
+# CC-BY-NC due to constraints from its training data (e.g., Emilia)." —
+# these are the pre-trained weights, so `non_commercial` is set below,
+# same as pocket-tts-int8's README caveat (§1441). mlx-community's own
+# `apache-2.0` tag on the conversion describes only their conversion code.
+#
+# Every [[file]] of the repo at the pinned commit but README.md and
+# .gitattributes; sizes and LFS hash from the HF API, the small files'
+# hashes computed 2026-09-26 from the files at the pinned commit.
+
+[model]
+name        = "omnivoice-bf16-mlx"
+kind        = "tts"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = [
+    "aae", "aal", "aao", "ab", "abb", "abn", "abr", "abs", "abv", "acm", "acw", "acx",
+    "adf", "adx", "ady", "aeb", "aec", "af", "afb", "afo", "ahl", "ahs", "ajg", "aju",
+    "ala", "aln", "alo", "am", "amu", "an", "anc", "ank", "anp", "anw", "aom", "apc",
+    "apd", "arb", "arq", "ars", "ary", "arz", "as", "ast", "avl", "awo", "ayl", "ayp",
+    "az", "ba", "bag", "bas", "bax", "bba", "bbj", "bbl", "bbu", "bce", "bci", "bcs",
+    "bcy", "bda", "bde", "bdm", "be", "beb", "bew", "bfd", "bft", "bg", "bgp", "bhb",
+    "bhh", "bho", "bhp", "bhr", "bjj", "bjk", "bjn", "bjt", "bkh", "bkm", "bky", "bmm",
+    "bmq", "bn", "bnm", "bnn", "bns", "bo", "bou", "bqg", "br", "bra", "brh", "bri",
+    "brx", "bs", "bsh", "bsj", "bsk", "btm", "btv", "bug", "bum", "buo", "bux", "bwr",
+    "bxf", "byc", "bys", "byv", "byx", "bzc", "bzw", "ca", "ccg", "ceb", "cen", "cfa",
+    "cgg", "chq", "cjk", "ckb", "ckl", "ckr", "cky", "cnh", "cpy", "cs", "cte", "ctl",
+    "cut", "cux", "cv", "cy", "da", "dag", "dar", "dav", "dbd", "dcc", "de", "deg",
+    "dgh", "dgo", "dje", "dmk", "dml", "dru", "dty", "dua", "dv", "dyu", "dzg", "ebr",
+    "ebu", "ego", "eiv", "eko", "ekr", "el", "elm", "en", "eo", "es", "esu", "et",
+    "eto", "ets", "etu", "eu", "ewo", "ext", "eyo", "fa", "fan", "fat", "ff", "ffm",
+    "fi", "fia", "fil", "fip", "fkk", "fmp", "fr", "fub", "fuc", "fue", "fuf", "fuh",
+    "fui", "fuq", "fuv", "fy", "ga", "gbm", "gbr", "gby", "gcc", "gdf", "gej", "ges",
+    "ggg", "gid", "gig", "giz", "gjk", "gju", "gl", "glw", "gn", "gol", "gom", "gsl",
+    "gu", "gui", "gur", "guz", "gv", "gwc", "gwe", "gwt", "gya", "gyz", "ha", "hah",
+    "hao", "haw", "haz", "hbb", "he", "hem", "hi", "hia", "hkk", "hla", "hno", "hoj",
+    "hr", "hsb", "ht", "hu", "hue", "hul", "hux", "hwo", "hy", "hz", "ia", "ibb",
+    "id", "ida", "idu", "ig", "ijc", "ijn", "ik", "ikw", "is", "ish", "iso", "it",
+    "its", "itw", "itz", "ja", "jal", "jax", "jgo", "jmx", "jns", "jqr", "juk", "juo",
+    "jv", "ka", "kab", "kai", "kaj", "kam", "kbd", "kbl", "kbt", "kcq", "kdh", "kea",
+    "keu", "kfe", "kfk", "kfp", "khg", "khw", "kj", "kjc", "kjk", "kk", "kln", "kls",
+    "km", "kmr", "kmy", "kn", "kna", "knn", "ko", "kol", "koo", "kpo", "kqo", "ks",
+    "ksd", "ksf", "kto", "kuh", "kvx", "kw", "kwm", "kxp", "ky", "kyx", "lag", "lb",
+    "lcm", "ldb", "lg", "lij", "lir", "lkb", "lla", "ln", "lnu", "lo", "loa", "lrk",
+    "lss", "lt", "ltg", "lto", "lua", "luo", "lus", "lv", "lwg", "mab", "maf", "mai",
+    "mau", "max", "mbo", "mcf", "mcn", "mcx", "mdd", "mde", "mdf", "mek", "mer", "meu",
+    "mfm", "mfn", "mfo", "mfv", "mgg", "mgi", "mhk", "mhr", "mi", "mig", "miu", "mk",
+    "mkf", "mki", "ml", "mlq", "mn", "mne", "mni", "mqy", "mr", "mrj", "mrr", "mrt",
+    "ms", "mse", "msh", "msw", "mt", "mtr", "mtu", "mtx", "mua", "mug", "mui", "mve",
+    "mvy", "mxs", "mxu", "mxy", "my", "myv", "mzl", "nal", "nan", "nap", "nb", "nbh",
+    "ncf", "nco", "ncx", "ndi", "ng", "ngi", "nhg", "nhi", "nhn", "nhq", "nja", "nl",
+    "nla", "nlv", "nmg", "nmz", "nn", "nnh", "no", "noe", "npi", "nso", "ny", "nyu",
+    "oc", "odk", "odu", "ogo", "om", "orc", "oru", "ory", "os", "pa", "pbs", "pbt",
+    "pbu", "pcm", "pex", "phl", "phr", "pip", "piy", "pko", "pl", "plk", "plt", "pmq",
+    "pms", "pmy", "pnb", "poc", "poe", "pow", "prq", "ps", "pst", "pt", "pua", "pwn",
+    "qug", "qum", "qup", "qur", "qus", "quv", "qux", "quy", "qva", "qvi", "qvj", "qvl",
+    "qwa", "qws", "qxa", "qxp", "qxt", "qxu", "qxw", "rag", "rm", "ro", "rob", "rof",
+    "roo", "rth", "ru", "rup", "rw", "sa", "sah", "sat", "sau", "say", "sbn", "sc",
+    "scl", "scn", "sd", "sei", "shu", "si", "sip", "siw", "sjr", "sk", "skg", "skr",
+    "sl", "sn", "snc", "snk", "so", "sol", "sps", "sq", "sr", "src", "sro", "ssi",
+    "ste", "sua", "sv", "sva", "sw", "szy", "ta", "tan", "tar", "tay", "tbf", "tcf",
+    "tcy", "tdn", "tdx", "te", "tg", "tgc", "th", "the", "thq", "thr", "thv", "ti",
+    "tig", "tio", "tk", "tkg", "tkt", "tli", "tlp", "tn", "tok", "tpl", "tpz", "tqp",
+    "tr", "trp", "trq", "trv", "trw", "tt", "ttj", "ttr", "ttu", "tui", "tul", "tuq",
+    "tuv", "tuy", "tvo", "tvu", "tw", "twu", "txs", "txy", "udl", "ug", "uk", "uki",
+    "umb", "ur", "ush", "uz", "uzn", "vai", "var", "ver", "vi", "vmc", "vmj", "vmm",
+    "vmp", "vmz", "vot", "vro", "wbl", "wci", "weo", "wes", "wja", "wji", "wo", "wof",
+    "xh", "xhe", "xka", "xmf", "xmv", "xmw", "xpe", "xti", "xtu", "yaq", "yav", "yay",
+    "ydd", "ydg", "yer", "yes", "yi", "yo", "yue", "zga", "zgh", "zh", "zoc", "zoh",
+    "zor", "zpv", "zpy", "ztg", "ztn", "ztp", "zts", "ztu", "zu", "zza"
+]
+license        = "CC-BY-NC-4.0"
+license_url    = "https://creativecommons.org/licenses/by-nc/4.0/"
+non_commercial = true                    # see the README caveat above
+# MLX active memory after a load, 2026-09-26 (`stats` delta).
+resident_bytes = 1_592_781_530
+
+[backend.mlx]
+# Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
+clone = true
+# Takes the request's `instructions` as mlx-audio's `instruct`, to make a
+# voice up from a description instead of cloning one.
+instruct = true
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/8fb0b754cad788aaefec690cd55c207e8a628f85/config.json"
+sha256 = "e2e13755cca29061b09d0c0c4b945e1a65179de8ec522de18e86794425f86c9f"
+size   = 2_238
+
+[[file]]
+path   = "model.safetensors"
+url    = "https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/8fb0b754cad788aaefec690cd55c207e8a628f85/model.safetensors"
+sha256 = "5768f3f1d11ee8b3ec31fe906e5d6f5934fdc397e3e5b818de85b70b0e1a2e7e"
+size   = 1_225_192_351
+
+[[file]]
+path   = "tokenizer.json"
+url    = "https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/8fb0b754cad788aaefec690cd55c207e8a628f85/tokenizer.json"
+sha256 = "408f669b7e2b045fdf54201d815bd364e6667dbd845115da81239c40bc6dcfd1"
+size   = 11_423_986
+
+[[file]]
+path   = "tokenizer_config.json"
+url    = "https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/8fb0b754cad788aaefec690cd55c207e8a628f85/tokenizer_config.json"
+sha256 = "49f78845596a82bf15c83673794bdf9f76f812b11f60ab6a2239d9be65b00676"
+size   = 533
+
+[[file]]
+path   = "chat_template.jinja"
+url    = "https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/8fb0b754cad788aaefec690cd55c207e8a628f85/chat_template.jinja"
+sha256 = "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
+size   = 4_168
+
+[[file]]
+path   = "audio_tokenizer/config.json"
+url    = "https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/8fb0b754cad788aaefec690cd55c207e8a628f85/audio_tokenizer/config.json"
+sha256 = "eefb20806f7104e77c9a5277c9df0f9bb8826b08eb1d4e8ab2b9829b6ef9fac1"
+size   = 2_531
+
+[[file]]
+path   = "audio_tokenizer/model.safetensors"
+url    = "https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/8fb0b754cad788aaefec690cd55c207e8a628f85/audio_tokenizer/model.safetensors"
+sha256 = "8ef745bfbabeb3bd9ebbdc69e7b6a05e43e191d0208dabfcf7adc42ca89c6580"
+size   = 402_864_930
+
+[[file]]
+path   = "audio_tokenizer/preprocessor_config.json"
+url    = "https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/8fb0b754cad788aaefec690cd55c207e8a628f85/audio_tokenizer/preprocessor_config.json"
+sha256 = "ae61eea88558608ee2fa86d2aec9fce8d99a5ff75d09cb7651ccce21ae1d9084"
+size   = 206
