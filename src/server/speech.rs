@@ -417,17 +417,26 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
 /// else 400 `unknown_voice` with the valid ids; no voice is the default
 /// one, else the first. A cloning model with no cloned voices and no
 /// voice asked for is a 400 that says how to add one. A model that
-/// instructs and has no voices (VoiceDesign) makes its voice up from
-/// `instructions`: any `voice` is taken and ignored, and no `instructions`
-/// is a 400.
+/// instructs (VoiceDesign, and VoxCPM2 alongside cloning) makes its voice
+/// up from `instructions` whenever a named voice was not asked for or does
+/// not match one of `voices`: any `voice` is taken and ignored, and, if
+/// `voices` is empty too (nothing else it could speak in), no
+/// `instructions` is a 400. A named voice that does match — VoxCPM2
+/// cloning a voice under $NARU_AUDIO_HOME/voices/ — wins over
+/// `instructions` even though the model also instructs.
 fn voice(
     manifest: &Manifest,
     voices: &[Voice],
     voice: Option<&str>,
     instructions: Option<&str>,
 ) -> Result<String, ApiError> {
-    if manifest.instructs() && voices.is_empty() {
-        if instructions.is_none() {
+    let named_match = voice.is_some_and(|id| voices.iter().any(|v| v.id == id));
+    if manifest.instructs() && !named_match {
+        if instructions.is_some() {
+            // No voice is "", which `synth` ignores as it does any other.
+            return Ok(voice.unwrap_or_default().to_string());
+        }
+        if voices.is_empty() {
             return Err(bad_request(
                 "instructions",
                 "invalid_request",
@@ -437,8 +446,6 @@ fn voice(
                 ),
             ));
         }
-        // No voice is "", which `synth` ignores as it does any other.
-        return Ok(voice.unwrap_or_default().to_string());
     }
     if voice.is_none() && voices.is_empty() && manifest.clones() {
         return Err(bad_request(

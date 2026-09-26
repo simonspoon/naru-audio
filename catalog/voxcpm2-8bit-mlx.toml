@@ -1,0 +1,71 @@
+# VoxCPM2 (OpenBMB), mlx-community's 8-bit conversion, served by mlx-audio
+# in the MLX sidecar (§5.3). A fourth cloning model, but the first that
+# also designs a voice from a description: it clones a reference
+# recording the same way as the Qwen3-TTS Base pair and Chatterbox (no
+# preset speakers, so its voices are the cloned ones under
+# $NARU_AUDIO_HOME/voices/, each passed to mlx-audio as `ref_audio`; no
+# transcript needed, so the cloned voice's `ref_text` is passed but
+# ignored, as for Chatterbox), and separately takes the request's
+# `instructions` as mlx-audio's `instruct` to make a voice up from a
+# description, as Qwen3-TTS VoiceDesign does. `speed` is not supported at
+# all — mlx-audio's `generate` has no `speed` parameter for it, so it
+# would otherwise be swallowed silently by `**kwargs`; the sidecar shim
+# errors on a non-1.0 speed instead (`naru_audio_mlx/__main__.py`), as for
+# Chatterbox. 48 kHz output (`model.sample_rate`, read at load and used
+# throughout: WAV header, `x-audio-sample-rate`, `/v1/models`), the first
+# model in the catalog above 24 kHz.
+#
+# 8-bit, the best speed/quality tradeoff mlx-community publishes (bf16 and
+# 4-bit also exist). Every [[file]] of the repo at the pinned commit but
+# README.md, .gitattributes and the two test_*.wav samples; sizes and LFS
+# hash from the HF API, the small files' hashes computed 2026-09-26 from
+# the files at the pinned commit.
+
+[model]
+name        = "voxcpm2-8bit-mlx"
+kind        = "tts"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["zh", "en", "ar", "my", "da", "nl", "fi", "fr", "de", "el", "he", "hi", "id", "it", "ja", "km", "ko", "lo", "ms", "no", "pl", "pt", "ru", "es", "sw", "sv", "tl", "th", "tr", "vi"]
+license     = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0"
+# MLX active memory after a load, 2026-09-26 (`stats` delta).
+resident_bytes = 3_221_641_356
+
+[backend.mlx]
+# Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
+clone = true
+# Takes the request's `instructions` as mlx-audio's `instruct`, to make a
+# voice up from a description instead of cloning one.
+instruct = true
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/VoxCPM2-8bit/resolve/d52725898a0675703f7f9ddc5a4d1a3cdbb99032/config.json"
+sha256 = "005406ee534a26bc1821055f8c38ffa46fa6c3d3362bd04af5673a44689d92b8"
+size   = 5_332
+
+[[file]]
+path   = "model.safetensors"
+url    = "https://huggingface.co/mlx-community/VoxCPM2-8bit/resolve/d52725898a0675703f7f9ddc5a4d1a3cdbb99032/model.safetensors"
+sha256 = "c07c59aca742fe8f53384a3da4d8a3b3fd98ddc77066dd4bd35b51e08c34a72f"
+size   = 3_221_772_935
+
+[[file]]
+path   = "special_tokens_map.json"
+url    = "https://huggingface.co/mlx-community/VoxCPM2-8bit/resolve/d52725898a0675703f7f9ddc5a4d1a3cdbb99032/special_tokens_map.json"
+sha256 = "068594063e37662c02b21acf42ebb334ef6a74fb810e68a2368f88f08351de76"
+size   = 1_632
+
+[[file]]
+path   = "tokenizer.json"
+url    = "https://huggingface.co/mlx-community/VoxCPM2-8bit/resolve/d52725898a0675703f7f9ddc5a4d1a3cdbb99032/tokenizer.json"
+sha256 = "f8984687e4a92a3503d521396d454b7d68e9fdaab2a0288eb3536c7c1aa4bc20"
+size   = 3_676_772
+
+[[file]]
+path   = "tokenizer_config.json"
+url    = "https://huggingface.co/mlx-community/VoxCPM2-8bit/resolve/d52725898a0675703f7f9ddc5a4d1a3cdbb99032/tokenizer_config.json"
+sha256 = "466575c55f0cf49530666c2e46ed14f26237dbd227ba7f4bb3bbec93df90edfc"
+size   = 4_952

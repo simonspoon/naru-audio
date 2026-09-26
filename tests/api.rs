@@ -33,6 +33,7 @@ const MLX: &[&str] = &[
     "qwen3-tts-0.6b-mlx",
     "qwen3-tts-1.7b-base-mlx",
     "qwen3-tts-1.7b-voicedesign-mlx",
+    "voxcpm2-8bit-mlx",
 ];
 
 fn app(home: &Path) -> Router {

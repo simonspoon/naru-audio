@@ -50,6 +50,10 @@ const BUILTIN: &[(&str, &str)] = &[
         "silero-vad.toml",
         include_str!("../../catalog/silero-vad.toml"),
     ),
+    (
+        "voxcpm2-8bit-mlx.toml",
+        include_str!("../../catalog/voxcpm2-8bit-mlx.toml"),
+    ),
 ];
 
 /// Derived files the registry knows how to generate (§3.2 `derive`).
@@ -409,7 +413,8 @@ mod tests {
                 "qwen3-tts-0.6b-mlx",
                 "qwen3-tts-1.7b-base-mlx",
                 "qwen3-tts-1.7b-voicedesign-mlx",
-                "silero-vad"
+                "silero-vad",
+                "voxcpm2-8bit-mlx"
             ]
         );
         for m in cat.models.values() {
@@ -663,6 +668,29 @@ mod tests {
                 url.starts_with(
                     "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit/resolve/"
                 ) && url.ends_with(&format!("/{}", f.path)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_voxcpm2_clones_and_instructs() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["voxcpm2-8bit-mlx"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(m.model.backend, "mlx");
+        assert_eq!(m.model.license.as_deref(), Some("Apache-2.0"));
+        assert!(!m.model.non_commercial);
+        // The first model that both clones and designs a voice.
+        assert!(m.clones());
+        assert!(m.instructs());
+        assert!(!m.exaggerates());
+        assert!(m.voices.is_empty());
+        for f in &m.files {
+            let url = f.url.as_deref().unwrap();
+            assert!(
+                url.starts_with("https://huggingface.co/mlx-community/VoxCPM2-8bit/resolve/")
+                    && url.ends_with(&format!("/{}", f.path)),
                 "{url}"
             );
         }

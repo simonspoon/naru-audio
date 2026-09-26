@@ -93,12 +93,17 @@ def synth(model, header):
     time as `serve` asks for them."""
     # Chatterbox does not support `speed` at all (mlx-audio's own
     # docstring: "Ignored (Chatterbox doesn't support speed adjustment)");
-    # a caller who asks for anything else gets a clear error instead of
+    # VoxCPM2's `generate` has no `speed` parameter either, so it would
+    # otherwise be swallowed silently by its own `**kwargs`. Either way, a
+    # caller who asks for anything else gets a clear error instead of
     # normal-speed audio it never asked for.
     speed = header.get("speed", 1.0)
-    if header.get("model", "").startswith("chatterbox") and speed != 1.0:
+    model_name = header.get("model", "")
+    if (
+        model_name.startswith("chatterbox") or model_name.startswith("voxcpm2")
+    ) and speed != 1.0:
         raise ValueError(
-            f"chatterbox-tts-8bit-mlx does not support speed (got {speed}); "
+            f"{model_name} does not support speed (got {speed}); "
             "only the default, 1.0, is accepted"
         )
     kwargs = {}

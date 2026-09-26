@@ -8,9 +8,12 @@
 //! `ref_text`, with no `voice`. A model that instructs
 //! (`Manifest::instructs`) is sent the request's `instructions` as
 //! mlx-audio's `instruct`; if it has no voices (VoiceDesign), that is its
-//! voice, and the voice asked for is ignored. `sid` is not used. `speed`
-//! is passed on as mlx-audio's `speed`, which Qwen3-TTS ignores; Chatterbox
-//! ignores it too, but the sidecar shim rejects a non-1.0 `speed` for it
+//! voice, and the voice asked for is ignored. VoxCPM2 both clones and
+//! instructs: a named cloned voice wins (`crate::server::speech::voice`),
+//! else `instructions` designs one. `sid` is not used. `speed` is passed
+//! on as mlx-audio's `speed`, which Qwen3-TTS ignores; Chatterbox and
+//! VoxCPM2 ignore it too (VoxCPM2's `generate` has no `speed` parameter at
+//! all), but the sidecar shim rejects a non-1.0 `speed` for either
 //! outright, so a caller gets a clear error instead of normal-speed audio
 //! (`naru_audio_mlx/__main__.py`). A model that exaggerates
 //! (`Manifest::exaggerates`, Chatterbox) is sent the request's

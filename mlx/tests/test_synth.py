@@ -123,5 +123,45 @@ class ChatterboxSynth(unittest.TestCase):
         self.assertEqual(audio(model, header), [2.0])
 
 
+class VoxCPM2:
+    """mlx-audio's VoxCPM2 in outline: no `speech_tokenizer`, clones with
+    `ref_audio` and designs with `instruct`, has no `speed` parameter at
+    all (swallowed by `**kwargs` if sent), yields once, non-streaming."""
+
+    def generate(self, text, ref_audio=None, instruct=None, **kwargs):
+        self.seen_ref_audio = ref_audio
+        self.seen_instruct = instruct
+        yield type("Result", (), {"audio": mx.full((1,), 3.0)})
+
+
+class VoxCPM2Synth(unittest.TestCase):
+    def test_reference_clones_without_priming(self):
+        model = VoxCPM2()
+        header = {
+            "model": "voxcpm2-8bit-mlx",
+            "reference": "ref.wav",
+            "reference_text": "Hello there.",
+        }
+        self.assertEqual(audio(model, header), [3.0])
+        self.assertEqual(model.seen_ref_audio, "ref.wav")
+
+    def test_instruct_is_passed_through_for_voice_design(self):
+        model = VoxCPM2()
+        header = {"model": "voxcpm2-8bit-mlx", "instruct": "A calm narrator."}
+        audio(model, header)
+        self.assertEqual(model.seen_instruct, "A calm narrator.")
+
+    def test_non_default_speed_raises(self):
+        model = VoxCPM2()
+        header = {"model": "voxcpm2-8bit-mlx", "speed": 1.5}
+        with self.assertRaises(ValueError):
+            audio(model, header)
+
+    def test_default_speed_is_accepted(self):
+        model = VoxCPM2()
+        header = {"model": "voxcpm2-8bit-mlx", "speed": 1.0}
+        self.assertEqual(audio(model, header), [3.0])
+
+
 if __name__ == "__main__":
     unittest.main()

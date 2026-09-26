@@ -819,6 +819,53 @@ fn a_cloning_model_without_voices_says_how_to_add_one() {
     assert_eq!(server.record.loads.load(Ordering::SeqCst), 0);
 }
 
+/// A model that both clones and instructs (VoxCPM2): a named cloned voice
+/// wins even with `instructions` given, but `instructions` alone still
+/// designs a voice even once a cloned voice exists — the design branch is
+/// not shadowed by `voices` no longer being empty.
+#[test]
+fn a_model_that_both_clones_and_instructs_prefers_a_named_voice() {
+    let home = fake_home();
+    let dir = home.path().join("models").join("fake-both");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-both", "kind": "tts", "backend": "sherpa-onnx"},
+        "backend": {"sherpa-onnx": {"clone": true, "instruct": true}},
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+    let voice = home.path().join("voices").join("zed");
+    std::fs::create_dir_all(&voice).unwrap();
+    std::fs::write(voice.join("ref.wav"), b"").unwrap();
+    std::fs::write(voice.join("ref.txt"), "Hello.").unwrap();
+    let record = Arc::new(Record::default());
+    let server = Server::start(
+        home,
+        "fake-tts",
+        Arc::new(FakeLoader(record.clone())),
+        record,
+    );
+    let last = || server.record.last.lock().unwrap().clone().unwrap();
+
+    // A named, existing cloned voice wins, even with `instructions` given.
+    let reply = server.speech(json!({
+        "model": "fake-both", "input": "Hi.", "voice": "zed", "instructions": "cheerful",
+    }));
+    assert_eq!(reply.status, 200);
+    assert_eq!(last().0, "zed");
+
+    // `instructions` alone still designs a voice, though `voices` is no
+    // longer empty (the cloned voice above): the model is not forced into
+    // cloning "zed" by default just because instructions did not name it.
+    let instructions = "A warm, husky woman. Speak slowly.";
+    let reply = server.speech(json!({
+        "model": "fake-both", "input": "Hi.", "instructions": instructions,
+    }));
+    assert_eq!(reply.status, 200);
+    let (voice, options) = last();
+    assert_eq!(voice, "");
+    assert_eq!(options.instructions.as_deref(), Some(instructions));
+}
+
 /// `secs` seconds of a 440 Hz tone as a 16 kHz mono WAV.
 #[cfg(target_os = "macos")]
 fn tone(secs: f64) -> Vec<u8> {
