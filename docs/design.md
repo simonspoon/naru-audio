@@ -210,7 +210,10 @@ trimmed before it is sent.
   the length is unknown at header time, so the daemon writes
   `data` size = `0x7FFF0000` and RIFF size = `0x7FFF0000 + 36`. These are the
   same values Naru's `fix_wav_sizes` writes today (speech.rs:162, :464), and
-  Safari and Chrome accept them; players stop at the real end of the stream.
+  browsers accept them when the stream is read with `fetch()` and played
+  through Web Audio, which stops at the real end of the stream. `<audio src>`
+  on the live chunked stream does not work in Safari (it sends Range requests
+  and seeks to the declared end), so `<audio>` playback must use `stream=false`.
   `0xFFFFFFFF` is never emitted.
   - When `stream=false` is passed (an extension), the daemon buffers everything
     and writes exact sizes plus `Content-Length`. Use this for file export.
@@ -862,7 +865,8 @@ Each task names its phase and what it depends on ("Deps").
     Implement §2.3: chunked `wav` (`0x7FFF0000` sizes), `pcm`, `stream=false`,
     mid-stream abort, and voices from the manifest only. Add the `say` CLI client.
     *Acceptance:* the WAV header bytes are `0x7FFF0024`/`0x7FFF0000`. Voices
-    answer with the model unloaded. Safari plays the stream. `say -o - | afplay -` works.
+    answer with the model unloaded. Safari plays the stream via `fetch()` + Web
+    Audio. `say -o f.wav && afplay f.wav` works.
 13. **Streaming STT over WebSocket, finals only.** (P3; Deps: 6, 7)
     Implement §2.4: the handshake, s16le/f32le frames, server Silero
     segmentation with 300 ms padding, `speech`/`final`/`error`/`done`,
