@@ -180,6 +180,21 @@ pub fn default_home() -> Option<PathBuf> {
     }
 }
 
+/// `<home>/config.toml` (§3.1).
+pub fn config_path(home: &Path) -> PathBuf {
+    home.join("config.toml")
+}
+
+/// `<home>/config.toml`, empty when there is none.
+pub fn read_config(home: &Path) -> Result<toml::Table, String> {
+    let path = config_path(home);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
+        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
+    }
+}
+
 pub struct Registry {
     home: PathBuf,
     catalog: Catalog,

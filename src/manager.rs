@@ -84,23 +84,132 @@ pub struct Settings {
 
 impl Settings {
     /// `NARU_AUDIO_STT_MODEL`, `NARU_AUDIO_TTS_MODEL` and
-    /// `NARU_AUDIO_KEEP_ALIVE` over the profile's defaults.
+    /// `NARU_AUDIO_KEEP_ALIVE` over the profile's defaults, ignoring
+    /// `config.toml`.
     pub fn from_env(profile: Profile) -> Result<Self, String> {
-        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        Self::resolve(profile, env_var, &Config::default())
+    }
+
+    /// [`Settings::from_env`] with `home`'s `config.toml` between the
+    /// environment and the profile (§3.3–3.5). A missing file is no config.
+    pub fn load(profile: Profile, home: &Path) -> Result<Self, String> {
+        let config = crate::registry::read_config(home).and_then(|table| {
+            Config::parse(&table)
+                .map_err(|e| format!("{}: {e}", crate::registry::config_path(home).display()))
+        })?;
+        Self::resolve(profile, env_var, &config)
+    }
+
+    /// Environment (`env`) over `config` over the profile; a request's own
+    /// model or `keep_alive` is applied later, over all three.
+    fn resolve(
+        profile: Profile,
+        env: impl Fn(&str) -> Option<String>,
+        config: &Config,
+    ) -> Result<Self, String> {
         let keep_alive = match env("NARU_AUDIO_KEEP_ALIVE") {
             Some(v) => KeepAlive::parse(&v).map_err(|e| format!("NARU_AUDIO_KEEP_ALIVE: {e}"))?,
-            None => KeepAlive::For(DEFAULT_KEEP_ALIVE),
+            None => config
+                .keep_alive
+                .unwrap_or(KeepAlive::For(DEFAULT_KEEP_ALIVE)),
+        };
+        let default = |var: &str, configured: &Option<String>, profile: &str| {
+            env(var)
+                .or_else(|| configured.clone())
+                .unwrap_or_else(|| profile.to_string())
         };
         Ok(Self {
-            budget_bytes: profile.budget_bytes(),
+            budget_bytes: config
+                .max_resident
+                .unwrap_or_else(|| profile.budget_bytes()),
             keep_alive,
-            stt_default: env("NARU_AUDIO_STT_MODEL")
-                .unwrap_or_else(|| profile.default_stt().to_string()),
-            tts_default: env("NARU_AUDIO_TTS_MODEL")
-                .unwrap_or_else(|| profile.default_tts().to_string()),
+            stt_default: default("NARU_AUDIO_STT_MODEL", &config.stt, profile.default_stt()),
+            tts_default: default("NARU_AUDIO_TTS_MODEL", &config.tts, profile.default_tts()),
             profile,
         })
     }
+}
+
+fn env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// The keys of `config.toml` the manager reads: `[defaults] stt`, `tts`
+/// and `keep_alive` (§3.3, §3.4) and `[memory] max_resident` (§3.5). Other
+/// tables and keys are left alone: `[mlx]` belongs to [`crate::mlx`].
+#[derive(Debug, Default)]
+struct Config {
+    stt: Option<String>,
+    tts: Option<String>,
+    keep_alive: Option<KeepAlive>,
+    max_resident: Option<u64>,
+}
+
+impl Config {
+    fn parse(table: &toml::Table) -> Result<Self, String> {
+        let key = |section: &str, key: &str| -> Result<Option<&toml::Value>, String> {
+            match table.get(section) {
+                None => Ok(None),
+                Some(toml::Value::Table(t)) => Ok(t.get(key)),
+                Some(_) => Err(format!("[{section}] is not a table")),
+            }
+        };
+        let string = |section: &str, name: &str| match key(section, name)? {
+            None => Ok(None),
+            Some(toml::Value::String(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(format!("[{section}] {name}: not a string")),
+        };
+        let keep_alive = match key("defaults", "keep_alive")? {
+            None => None,
+            Some(toml::Value::String(s)) => Some(KeepAlive::parse(s)),
+            Some(toml::Value::Integer(n)) => Some(KeepAlive::from_secs(*n as f64)),
+            Some(_) => Some(Err("not a duration string or seconds".to_string())),
+        }
+        .transpose()
+        .map_err(|e| format!("[defaults] keep_alive: {e}"))?;
+        let max_resident = match key("memory", "max_resident")? {
+            None => None,
+            Some(toml::Value::String(s)) => Some(parse_size(s)),
+            Some(toml::Value::Integer(n)) => Some(u64::try_from(*n).map_err(|_| "negative".into())),
+            Some(_) => Some(Err("not a size string or bytes".to_string())),
+        }
+        .transpose()
+        .map_err(|e| format!("[memory] max_resident: {e}"))?;
+        Ok(Self {
+            stt: string("defaults", "stt")?,
+            tts: string("defaults", "tts")?,
+            keep_alive,
+            max_resident,
+        })
+    }
+}
+
+/// `"8GiB"`, `"512 MiB"`, `"6GB"` or plain bytes (`"1024"`): binary units
+/// are powers of 1024, decimal ones of 1000.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let split = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
+    let (number, unit) = s.split_at(split);
+    let scale: u64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "kb" => 1000,
+        "mb" => 1000 * 1000,
+        "gb" => 1000 * 1000 * 1000,
+        "kib" => 1 << 10,
+        "mib" => 1 << 20,
+        "gib" => 1 << 30,
+        _ => return Err(format!("{s:?} is not a size like \"8GiB\"")),
+    };
+    let number: f64 = number
+        .parse()
+        .map_err(|_| format!("{s:?} is not a size like \"8GiB\""))?;
+    let bytes = number * scale as f64;
+    if bytes > u64::MAX as f64 {
+        return Err(format!("{s:?} is too large"));
+    }
+    Ok(bytes as u64)
 }
 
 /// A loaded model.
@@ -792,5 +901,132 @@ mod tests {
         for bad in ["soon", "", "NaN", "1e300", "5 parsecs"] {
             assert!(KeepAlive::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    const GIB: u64 = 1 << 30;
+
+    fn config(text: &str) -> Result<Config, String> {
+        Config::parse(&toml::from_str(text).unwrap())
+    }
+
+    fn settings(env: &[(&str, &str)], text: &str) -> Settings {
+        let env: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let profile = Profile::new(64 * GIB, "aarch64", false);
+        Settings::resolve(profile, |k| env.get(k).cloned(), &config(text).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn no_config_keeps_the_profile_and_five_minutes() {
+        let s = settings(&[], "");
+        assert_eq!(s.stt_default, s.profile.default_stt());
+        assert_eq!(s.tts_default, s.profile.default_tts());
+        assert_eq!(s.budget_bytes, 32 * GIB);
+        assert_eq!(s.keep_alive, KeepAlive::For(DEFAULT_KEEP_ALIVE));
+    }
+
+    #[test]
+    fn config_defaults_beat_the_profile_and_env_beats_config() {
+        let text = "[defaults]\nstt = \"s-conf\"\ntts = \"t-conf\"\n";
+        let s = settings(&[], text);
+        assert_eq!(
+            (s.stt_default.as_str(), s.tts_default.as_str()),
+            ("s-conf", "t-conf")
+        );
+        let env = [
+            ("NARU_AUDIO_STT_MODEL", "s-env"),
+            ("NARU_AUDIO_TTS_MODEL", "t-env"),
+        ];
+        let s = settings(&env, text);
+        assert_eq!(
+            (s.stt_default.as_str(), s.tts_default.as_str()),
+            ("s-env", "t-env")
+        );
+    }
+
+    #[test]
+    fn config_keep_alive_beats_five_minutes_and_env_beats_config() {
+        let text = "[defaults]\nkeep_alive = \"1h\"\n";
+        let hour = KeepAlive::For(Duration::from_secs(3600));
+        assert_eq!(settings(&[], text).keep_alive, hour);
+        assert_eq!(
+            settings(&[], "[defaults]\nkeep_alive = 60\n").keep_alive,
+            KeepAlive::For(Duration::from_secs(60))
+        );
+        let env = [("NARU_AUDIO_KEEP_ALIVE", "-1")];
+        assert_eq!(settings(&env, text).keep_alive, KeepAlive::Forever);
+    }
+
+    #[test]
+    fn config_max_resident_overrides_the_profile_budget() {
+        let s = settings(&[], "[memory]\nmax_resident = \"8GiB\"\n");
+        assert_eq!(s.budget_bytes, 8 * GIB);
+        let s = settings(&[], "[memory]\nmax_resident = 1024\n");
+        assert_eq!(s.budget_bytes, 1024);
+    }
+
+    #[test]
+    fn sizes_parse_binary_and_decimal_units() {
+        assert_eq!(parse_size("8GiB").unwrap(), 8 * GIB);
+        assert_eq!(parse_size("512 MiB").unwrap(), 512 << 20);
+        assert_eq!(parse_size("1.5gib").unwrap(), GIB * 3 / 2);
+        assert_eq!(parse_size("6GB").unwrap(), 6_000_000_000);
+        assert_eq!(parse_size("2kb").unwrap(), 2000);
+        assert_eq!(parse_size("4096").unwrap(), 4096);
+        assert_eq!(parse_size("7B").unwrap(), 7);
+        for bad in ["", "GiB", "8 parsecs", "-1GiB", "1.2.3MB", "1e30GiB"] {
+            assert!(parse_size(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn bad_config_values_name_their_key() {
+        for (text, key) in [
+            (
+                "[defaults]\nkeep_alive = \"soon\"\n",
+                "[defaults] keep_alive",
+            ),
+            ("[defaults]\nkeep_alive = true\n", "[defaults] keep_alive"),
+            ("[defaults]\nstt = 1\n", "[defaults] stt"),
+            ("[defaults]\ntts = []\n", "[defaults] tts"),
+            (
+                "[memory]\nmax_resident = \"lots\"\n",
+                "[memory] max_resident",
+            ),
+            ("[memory]\nmax_resident = -1\n", "[memory] max_resident"),
+            ("defaults = 1\n", "[defaults]"),
+        ] {
+            let err = config(text).unwrap_err();
+            assert!(err.starts_with(key), "{text}: {err}");
+        }
+    }
+
+    #[test]
+    fn load_names_the_file_and_tolerates_its_absence() {
+        let home = tempfile::tempdir().unwrap();
+        let profile = || Profile::new(64 * GIB, "aarch64", false);
+        let s = Settings::load(profile(), home.path()).unwrap();
+        assert_eq!(s.budget_bytes, 32 * GIB);
+        let path = home.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[memory]\nmax_resident = \"8GiB\"\n[mlx]\npython = \"/p\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::load(profile(), home.path()).unwrap().budget_bytes,
+            8 * GIB
+        );
+        std::fs::write(&path, "[memory]\nmax_resident = \"lots\"\n").unwrap();
+        let err = Settings::load(profile(), home.path()).unwrap_err();
+        assert!(
+            err.starts_with(&format!("{}: [memory] max_resident", path.display())),
+            "{err}"
+        );
+        std::fs::write(&path, "[memory\n").unwrap();
+        let err = Settings::load(profile(), home.path()).unwrap_err();
+        assert!(err.starts_with(&path.display().to_string()), "{err}");
     }
 }

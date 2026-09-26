@@ -7,6 +7,8 @@ pub mod sidecar;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::registry::{config_path, read_config};
+
 /// Written into `<home>/mlx/` by `mlx setup`; `python -m naru_audio_mlx`
 /// runs from there.
 const FILES: &[(&str, &str)] = &[
@@ -110,20 +112,6 @@ pub fn python(home: &Path) -> Result<PathBuf, String> {
         .and_then(|p| p.as_str())
         .map(PathBuf::from)
         .ok_or_else(|| "not set up; run `naru-audio mlx setup`".to_string())
-}
-
-fn config_path(home: &Path) -> PathBuf {
-    home.join("config.toml")
-}
-
-/// `config.toml`, empty when there is none.
-fn read_config(home: &Path) -> Result<toml::Table, String> {
-    let path = config_path(home);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
-        Err(e) => Err(format!("cannot read {}: {e}", path.display())),
-    }
 }
 
 /// Sets `[mlx] python`, keeping every other key and table.

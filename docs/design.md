@@ -454,7 +454,8 @@ read from `sysctl hw.memsize`, and arch from `std::env::consts::ARCH` plus
 - A model loads on its first request or on `POST /api/load`; `loading` shows in `/api/ps` and `/health`.
 - `keep_alive` is accepted per request, as a duration string (`"5m"`) or as
   seconds. `0` means unload once idle. A negative value means never unload.
-  The default comes from `NARU_AUDIO_KEEP_ALIVE`, then config, then **5m**,
+  The default comes from `NARU_AUDIO_KEEP_ALIVE`, then `config.toml`
+  `[defaults] keep_alive = "5m"` (same forms), then **5m**,
   which is the same as auris's 300 s and Ollama's default.
 - A model's timer restarts when its last in-flight request or WS session ends.
   A model with an open WS session is never unloaded.

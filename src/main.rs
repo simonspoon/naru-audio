@@ -224,7 +224,7 @@ async fn main() -> ExitCode {
         Ok(r) => Arc::new(r),
         Err(code) => return code,
     };
-    let settings = match Profile::detect().and_then(Settings::from_env) {
+    let settings = match Profile::detect().and_then(|p| Settings::load(p, registry.home())) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("naru-audio: {e}");
