@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 
 use crate::log::Logger;
 use crate::profile::Profile;
@@ -344,6 +344,8 @@ pub struct ModelManager {
     inner: Mutex<Inner>,
     /// Serialises `measured.json` writes: one tmp file, newest snapshot last.
     measured_write: Mutex<()>,
+    /// Signalled when `disposing` drops to 0.
+    disposed: Notify,
 }
 
 struct Inner {
@@ -458,6 +460,7 @@ impl ModelManager {
                 disposing: 0,
             }),
             measured_write: Mutex::new(()),
+            disposed: Notify::new(),
         }
     }
 
@@ -528,11 +531,24 @@ impl ModelManager {
                 }
             }
             // After the evictions are dropped: they free memory before the
-            // load. A drop still running elsewhere could free memory during
-            // it, so its delta would not be its own.
-            let unloads = {
-                let inner = this.lock();
-                (inner.disposing == 0).then_some(inner.unloads)
+            // load. So does any other drop still running (an unload finishes
+            // off the runtime after its request returns): it would push the
+            // load past the budget, and its freed memory would shrink the
+            // load's delta.
+            let unloads = loop {
+                // Registered before the check, so a drop ending after it
+                // still wakes this task.
+                let disposed = this.disposed.notified();
+                let mut disposed = std::pin::pin!(disposed);
+                disposed.as_mut().enable();
+                let unloads = {
+                    let inner = this.lock();
+                    (inner.disposing == 0).then_some(inner.unloads)
+                };
+                if let Some(unloads) = unloads {
+                    break unloads;
+                }
+                disposed.await;
             };
             let started = Instant::now();
             let loader = this.loader.clone();
@@ -609,7 +625,7 @@ impl ModelManager {
         self: &Arc<Self>,
         name: String,
         need: u64,
-        unloads: Option<u64>,
+        unloads: u64,
         started: Instant,
         result: Result<Result<LoadedModel, ManagerError>, tokio::task::JoinError>,
     ) -> Result<Guard, ManagerError> {
@@ -626,9 +642,7 @@ impl ModelManager {
         };
         let mut inner = self.lock();
         // Memory freed during the load would shrink the delta: keep the estimate.
-        let measured = loaded
-            .measured_bytes
-            .filter(|_| unloads == Some(inner.unloads));
+        let measured = loaded.measured_bytes.filter(|_| unloads == inner.unloads);
         let Some(slot) = inner.slots.get_mut(&name) else {
             unreachable!("a loading slot is never removed by anyone else");
         };
@@ -801,8 +815,9 @@ impl ModelManager {
         }
         let this = self.clone();
         let drop_slot = move || {
+            // Counted out even if the drop panics.
+            let _disposed = Disposed(this);
             drop(slot);
-            this.lock().disposing -= 1;
         };
         match tokio::runtime::Handle::try_current() {
             Ok(rt) => Some(rt.spawn_blocking(drop_slot)),
@@ -810,6 +825,20 @@ impl ModelManager {
                 drop_slot();
                 None
             }
+        }
+    }
+}
+
+/// Ends one [`ModelManager::dispose`] when dropped, and wakes the loads
+/// waiting on the last one.
+struct Disposed(Arc<ModelManager>);
+
+impl Drop for Disposed {
+    fn drop(&mut self) {
+        let mut inner = self.0.lock();
+        inner.disposing -= 1;
+        if inner.disposing == 0 {
+            self.0.disposed.notify_waiters();
         }
     }
 }
@@ -1028,5 +1057,140 @@ mod tests {
         std::fs::write(&path, "[memory\n").unwrap();
         let err = Settings::load(profile(), home.path()).unwrap_err();
         assert!(err.starts_with(&path.display().to_string()), "{err}");
+    }
+
+    /// A model that runs its closure when dropped.
+    struct DropModel(Box<dyn Fn() + Send + Sync>);
+
+    impl SttModel for DropModel {
+        fn decode_each(
+            &self,
+            _pcm16k: &[f32],
+            _hotwords: Option<&crate::stt::Vocabulary>,
+            _vad: Option<&crate::stt::VadConfig>,
+            _on_segment: &mut dyn FnMut(crate::stt::Segment),
+        ) -> Result<(), SttError> {
+            Ok(())
+        }
+    }
+
+    impl Drop for DropModel {
+        fn drop(&mut self) {
+            (self.0)()
+        }
+    }
+
+    fn slot(model: DropModel) -> Slot {
+        Slot {
+            kind: Kind::Stt,
+            backend: "sherpa-onnx".to_string(),
+            resident_bytes: 0,
+            state: State::Ready(Resident::Stt(Arc::new(model))),
+            in_flight: 0,
+            last_used: Instant::now(),
+            keep_alive: KeepAlive::Forever,
+            expires_at: None,
+            generation: 0,
+        }
+    }
+
+    /// Loads any model, measured at 300 bytes, and records whether
+    /// `dropped` was set as each load started.
+    struct TestLoader {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+        loads: Mutex<Vec<bool>>,
+    }
+
+    impl Loader for TestLoader {
+        fn load(&self, _manifest: &Manifest, _dir: &Path) -> Result<LoadedModel, LoadError> {
+            let dropped = self.dropped.load(std::sync::atomic::Ordering::SeqCst);
+            self.loads.lock().unwrap().push(dropped);
+            Ok(LoadedModel {
+                model: Resident::Stt(Arc::new(DropModel(Box::new(|| {})))),
+                measured_bytes: Some(300),
+            })
+        }
+    }
+
+    /// A manager over `home` with `a` "pulled", and `a`'s manifest.
+    fn manager(home: &Path, loader: Arc<TestLoader>) -> (Arc<ModelManager>, Manifest) {
+        let dir = home.join("models").join("a");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{"model": {"name": "a", "kind": "stt", "backend": "sherpa-onnx", "languages": ["en"]}}"#,
+        )
+        .unwrap();
+        let registry = Arc::new(Registry::open(home).unwrap());
+        let manifest = registry.pulled_manifest("a").unwrap();
+        let models = ModelManager::new(
+            registry,
+            Arc::new(Logger::stderr()),
+            settings(&[], ""),
+            loader,
+        );
+        (Arc::new(models), manifest)
+    }
+
+    fn test_loader() -> Arc<TestLoader> {
+        Arc::new(TestLoader {
+            dropped: Arc::default(),
+            loads: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// A drop that panics still ends its dispose, so later loads are
+    /// measured again.
+    #[tokio::test]
+    async fn a_panicking_drop_still_ends_its_dispose() {
+        let home = tempfile::tempdir().unwrap();
+        let (models, manifest) = manager(home.path(), test_loader());
+        let model = DropModel(Box::new(|| panic!("the drop panics")));
+        let dropped = models.dispose("p", "test", Some(slot(model))).unwrap();
+        assert!(dropped.await.unwrap_err().is_panic());
+        assert_eq!(models.lock().disposing, 0);
+
+        let acquire = models.acquire(manifest, None);
+        let guard = tokio::time::timeout(Duration::from_secs(5), acquire)
+            .await
+            .expect("the load waited on a dispose that had ended")
+            .unwrap();
+        drop(guard);
+        assert_eq!(models.lock().measured["a"]["sherpa-onnx"], 300);
+    }
+
+    /// An unload's drop finishes after its request returns; a load right
+    /// after it waits for the drop, so both are never resident at once.
+    #[tokio::test]
+    async fn a_load_waits_for_a_running_drop() {
+        let home = tempfile::tempdir().unwrap();
+        let loader = test_loader();
+        let (models, manifest) = manager(home.path(), loader.clone());
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let blocked = Mutex::new(blocked);
+        let dropped = loader.dropped.clone();
+        let model = DropModel(Box::new(move || {
+            let _ = blocked.lock().unwrap().recv();
+            dropped.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let _ = models.dispose("p", "idle", Some(slot(model)));
+
+        let load = tokio::spawn({
+            let models = models.clone();
+            async move { models.acquire(manifest, None).await.map(drop) }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            loader.loads.lock().unwrap().is_empty(),
+            "loaded during a drop"
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), load)
+            .await
+            .expect("the load never started")
+            .unwrap()
+            .unwrap();
+        assert_eq!(*loader.loads.lock().unwrap(), [true]);
+        assert_eq!(models.lock().measured["a"]["sherpa-onnx"], 300);
     }
 }

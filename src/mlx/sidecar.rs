@@ -19,6 +19,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -166,16 +167,24 @@ struct State {
 }
 
 struct Process {
-    child: Child,
+    /// Shared with [`Sidecar::watch`], which reaps it if it exits alone.
+    child: Arc<Mutex<Child>>,
     stream: UnixStream,
+    /// Set under `child`'s lock by [`State::stop`], so the watcher does not
+    /// report a stop as a crash.
+    stopped: Arc<AtomicBool>,
 }
 
 impl State {
     /// Kills the sidecar if it is still running, and reaps it.
     fn stop(&mut self) -> Option<ExitStatus> {
-        let mut process = self.process.take()?;
-        let _ = process.child.kill();
-        process.child.wait().ok()
+        let process = self.process.take()?;
+        let mut child = process.child.lock().unwrap_or_else(|e| e.into_inner());
+        process.stopped.store(true, Ordering::SeqCst);
+        // Both no-ops once the watcher has reaped it: `Child` keeps the
+        // status, so a reused pid is never signalled.
+        let _ = child.kill();
+        child.wait().ok()
     }
 }
 
@@ -204,12 +213,15 @@ impl Sidecar {
     ) -> Result<(u64, u64, Value), SttError> {
         let mut state = self.lock();
         let replaced = state.models.remove(model).is_some();
-        if state.process.is_none() {
-            self.start(&mut state)?;
+        let ready = if state.process.is_none() {
+            self.start(&mut state)
         } else if replaced {
-            self.request(&mut state, json!({"op": "unload", "model": model}), None)?;
-        }
-        match self.load_one(&mut state, model, kind, dir) {
+            self.request(&mut state, json!({"op": "unload", "model": model}), None)
+                .map(drop)
+        } else {
+            Ok(())
+        };
+        match ready.and_then(|()| self.load_one(&mut state, model, kind, dir)) {
             Ok((bytes, answer)) => {
                 state.instances += 1;
                 let instance = state.instances;
@@ -394,7 +406,14 @@ impl Sidecar {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        state.process = Some(Process { child, stream });
+        let child = Arc::new(Mutex::new(child));
+        let stopped = Arc::new(AtomicBool::new(false));
+        self.watch(child.clone(), stopped.clone());
+        state.process = Some(Process {
+            child,
+            stream,
+            stopped,
+        });
         let models: Vec<(String, Kind, PathBuf)> = state
             .models
             .iter()
@@ -430,6 +449,40 @@ impl Sidecar {
             Ok((reply, _)) => answer(reply),
             Err(e) => Err(self.crashed(state, e)),
         }
+    }
+
+    /// Waits on the thread for `child` to exit, and when it exits alone,
+    /// reaps it and says so on `/health` at once, before any request finds
+    /// it dead (which then handles it as [`Sidecar::crashed`]).
+    fn watch(self: &Arc<Self>, child: Arc<Mutex<Child>>, stopped: Arc<AtomicBool>) {
+        let pid = child.lock().unwrap_or_else(|e| e.into_inner()).id();
+        let this = self.clone();
+        std::thread::spawn(move || {
+            // `WNOWAIT`: wait without reaping, so the pid stays the child's
+            // until `Child` reaps it and records its status.
+            // SAFETY: `info` is a valid out-pointer for the call.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            while unsafe {
+                libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT)
+            } != 0
+            {
+                if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    // Already reaped by `stop`, or no way to wait.
+                    return;
+                }
+            }
+            let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
+            if stopped.load(Ordering::SeqCst) {
+                return;
+            }
+            // Under `child`'s lock: a `stop`, and so the restart that
+            // clears the reason, comes after this.
+            if let Ok(Some(status)) = child.try_wait() {
+                this.set_reason(Some(format!(
+                    "the sidecar died ({status}); it restarts on the next request"
+                )));
+            }
+        });
     }
 
     /// The connection broke: reap the sidecar, say so on `/health`, and

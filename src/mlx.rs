@@ -114,23 +114,33 @@ pub fn python(home: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "not set up; run `naru-audio mlx setup`".to_string())
 }
 
-/// Sets `[mlx] python`, keeping every other key and table.
+/// Sets `[mlx] python`, keeping every other key and table, and their
+/// comments and layout. A symlinked `config.toml` stays a symlink: its
+/// target is what is replaced.
 fn write_python(home: &Path, python: &Path) -> Result<(), String> {
-    let mut config = read_config(home)?;
+    let path = config_path(home);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let mut config: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let mlx = config
         .entry("mlx")
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    let Some(mlx) = mlx.as_table_mut() else {
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(mlx) = mlx.as_table_like_mut() else {
         return Err("config.toml: `mlx` is not a table".to_string());
     };
-    mlx.insert(
-        "python".to_string(),
-        toml::Value::String(python.display().to_string()),
-    );
-    let text = toml::to_string(&config).map_err(|e| e.to_string())?;
-    let path = config_path(home);
+    mlx.insert("python", toml_edit::value(python.display().to_string()));
+    let path = match std::fs::canonicalize(&path) {
+        Ok(target) => target,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => path,
+        Err(e) => return Err(format!("cannot resolve {}: {e}", path.display())),
+    };
     let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text)
+    std::fs::write(&tmp, config.to_string())
         .and_then(|()| std::fs::rename(&tmp, &path))
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
@@ -157,5 +167,28 @@ mod tests {
         let config = read_config(home.path()).unwrap();
         assert_eq!(config["memory"]["max_resident"].as_str(), Some("8GiB"));
         assert_eq!(config["mlx"]["other"].as_integer(), Some(1));
+    }
+
+    #[test]
+    fn setting_python_keeps_comments_order_and_a_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path().join("naru-audio.toml");
+        let before = "# my settings\n[mlx]\nother = 1 # kept\n\n[defaults]\nstt = \"x\"\n";
+        std::fs::write(&target, before).unwrap();
+        std::os::unix::fs::symlink(&target, config_path(home.path())).unwrap();
+
+        write_python(home.path(), Path::new("/venv/bin/python")).unwrap();
+        assert!(
+            std::fs::symlink_metadata(config_path(home.path()))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "# my settings\n[mlx]\nother = 1 # kept\npython = \"/venv/bin/python\"\n\n\
+             [defaults]\nstt = \"x\"\n"
+        );
     }
 }

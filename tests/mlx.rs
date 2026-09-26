@@ -15,8 +15,10 @@ use http_body_util::BodyExt;
 use naru_audio::backend::load_tts;
 use naru_audio::log::Logger;
 use naru_audio::manager::{BackendLoader, ModelManager, Settings};
+use naru_audio::mlx::sidecar;
 use naru_audio::profile::Profile;
 use naru_audio::registry::Registry;
+use naru_audio::registry::manifest::Kind;
 use naru_audio::server::{AppState, router};
 use naru_audio::tts::{SynthOptions, TtsError, TtsModel};
 use serde_json::{Value, json};
@@ -62,6 +64,8 @@ def handle(header, samples):
             json.dump(header, f)
         return chunks(header["text"])
     if op == "unload":
+        if os.path.exists("unload.fail"):
+            raise RuntimeError("unload fails")
         loaded.discard(header["model"])
         return {}
     if op == "stats":
@@ -300,6 +304,82 @@ async fn a_killed_sidecar_is_503_then_the_retry_succeeds() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!alive(restarted), "the sidecar outlived its last model");
+}
+
+/// A reload whose unload of the instance it replaces fails still stops a
+/// sidecar that is left with no model.
+#[test]
+fn a_reload_whose_unload_fails_stops_an_empty_sidecar() {
+    let runs = std::process::Command::new(PYTHON)
+        .args(["-c", ""])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !runs {
+        eprintln!("skipped: {PYTHON} does not run");
+        return;
+    }
+    let home = home();
+    let sidecar = sidecar::for_home(home.path());
+    let dir = home.path().join("models").join("fake-mlx");
+    sidecar.load("fake-mlx", Kind::Stt, &dir).unwrap();
+    let pid = sidecar_pid(home.path());
+    std::fs::write(home.path().join("mlx").join("unload.fail"), "").unwrap();
+    assert!(sidecar.load("fake-mlx", Kind::Stt, &dir).is_err());
+    assert!(!alive(pid), "the sidecar outlived its last model");
+}
+
+/// A sidecar that dies while idle is on `/health` at once, before any
+/// request finds it dead; one stopped with its last model is not.
+#[tokio::test]
+async fn an_idle_crash_is_on_health_at_once() {
+    let runs = std::process::Command::new(PYTHON)
+        .args(["-c", ""])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !runs {
+        eprintln!("skipped: {PYTHON} does not run");
+        return;
+    }
+    let home = home();
+    let app = app(home.path());
+    let reason = async || get(&app, "/health").await["backends"][1]["reason"].clone();
+
+    let (status, body) = transcribe(&app).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pid = sidecar_pid(home.path());
+    let req = Request::post("/api/load")
+        .header(HOST, "127.0.0.1:7870")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({"model": "fake-mlx", "keep_alive": 0}).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(send(&app, req).await.0, StatusCode::OK);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while alive(pid) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!alive(pid), "the sidecar outlived its last model");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(reason().await, Value::Null, "a stop is not a crash");
+
+    let (status, body) = transcribe(&app).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pid = sidecar_pid(home.path());
+    // SAFETY: a plain kill of the sidecar this test started.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while reason().await.is_null() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let reason = reason().await;
+    assert!(
+        reason
+            .as_str()
+            .is_some_and(|r| r.contains("the sidecar died")),
+        "{reason}"
+    );
+    assert!(!alive(pid), "the dead sidecar was not reaped");
 }
 
 /// Synthesises `text` with the fake: the result and the chunks the sink
