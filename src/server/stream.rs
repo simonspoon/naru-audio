@@ -783,6 +783,8 @@ impl Segments {
         let start = open.max(self.floor);
         if at > start {
             self.queue(start, at, at);
+            // The next segment's partials count from its own start.
+            self.partial_at = 0;
         }
     }
 
@@ -1091,6 +1093,25 @@ mod tests {
         // the old tick (27 648); the window starts at the floor, 12 800.
         let lens = feed(&mut segments, &mut jobs, &busy, 24, true);
         assert_eq!(lens.first(), Some(&(48 * VAD_WINDOW - 12_800)), "{lens:?}");
+    }
+
+    /// A `max_segment` cut before the last tick: the next segment's first
+    /// partial is still 700 ms after the cut.
+    #[test]
+    fn a_segment_after_a_cut_ticks_from_the_cut() {
+        let (mut segments, mut jobs, busy) = open_segment(true);
+        // One tick, at 16 384.
+        assert_eq!(
+            feed(&mut segments, &mut jobs, &busy, 32, true),
+            [32 * VAD_WINDOW]
+        );
+        // The quietest point is at 13 000, before that tick.
+        segments.cut(13_000);
+        assert!(matches!(jobs.try_recv(), Ok(Job::Decode { .. })));
+        // 13 000 + 700 ms is first reached at 24 576, not 700 ms after
+        // the old tick (27 648); the window starts at the cut.
+        let lens = feed(&mut segments, &mut jobs, &busy, 24, true);
+        assert_eq!(lens.first(), Some(&(48 * VAD_WINDOW - 13_000)), "{lens:?}");
     }
 
     #[test]
