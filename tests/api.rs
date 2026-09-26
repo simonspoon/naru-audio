@@ -28,6 +28,7 @@ const HOSTPORT: &str = "127.0.0.1:7870";
 /// Built in, and listed on macOS only.
 const MLX: &[&str] = &[
     "chatterbox-tts-8bit-mlx",
+    "indextts-1.5-mlx",
     "parakeet-tdt-0.6b-v2-mlx",
     "qwen3-tts-0.6b-base-mlx",
     "qwen3-tts-0.6b-mlx",

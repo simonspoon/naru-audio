@@ -31,18 +31,23 @@ def handle(header, samples):
         if header.get("kind") == "tts":
             from mlx_audio.tts.utils import load_model
 
-            # Chatterbox's loader also fetches a small shared dependency,
-            # mlx-community/S3TokenizerV2, straight from the Hub rather
-            # than from `dir`; HF_HUB_OFFLINE would make that raise on a
-            # machine that has never cached it. Every other model's
-            # weights come entirely from `dir`, so only Chatterbox gets
-            # the exception.
-            with (
-                _network_allowed()
-                if header.get("model", "").startswith("chatterbox")
-                else nullcontext()
-            ):
-                model = load_model(Path(header["dir"]))
+            # IndexTTS needs `tokenizer_name` added to its config, done
+            # in a scratch directory rather than on `dir` itself (§ below,
+            # `_indextts_load_dir`). Chatterbox's loader also fetches a
+            # small shared dependency, mlx-community/S3TokenizerV2,
+            # straight from the Hub rather than from `dir`; HF_HUB_OFFLINE
+            # would make that raise on a machine that has never cached it.
+            # Every other model's weights come entirely from `dir` as-is.
+            if header.get("model", "").startswith("indextts"):
+                with _indextts_load_dir(Path(header["dir"])) as load_dir:
+                    model = load_model(load_dir)
+            else:
+                with (
+                    _network_allowed()
+                    if header.get("model", "").startswith("chatterbox")
+                    else nullcontext()
+                ):
+                    model = load_model(Path(header["dir"]))
             answer = {"sample_rate": model.sample_rate}
         else:
             from parakeet_mlx import from_pretrained
@@ -93,14 +98,16 @@ def synth(model, header):
     time as `serve` asks for them."""
     # Chatterbox does not support `speed` at all (mlx-audio's own
     # docstring: "Ignored (Chatterbox doesn't support speed adjustment)");
-    # VoxCPM2's `generate` has no `speed` parameter either, so it would
-    # otherwise be swallowed silently by its own `**kwargs`. Either way, a
-    # caller who asks for anything else gets a clear error instead of
-    # normal-speed audio it never asked for.
+    # VoxCPM2's and IndexTTS's `generate` have no `speed` parameter either,
+    # so it would otherwise be swallowed silently by their own `**kwargs`.
+    # Either way, a caller who asks for anything else gets a clear error
+    # instead of normal-speed audio it never asked for.
     speed = header.get("speed", 1.0)
     model_name = header.get("model", "")
     if (
-        model_name.startswith("chatterbox") or model_name.startswith("voxcpm2")
+        model_name.startswith("chatterbox")
+        or model_name.startswith("voxcpm2")
+        or model_name.startswith("indextts")
     ) and speed != 1.0:
         raise ValueError(
             f"{model_name} does not support speed (got {speed}); "
@@ -140,6 +147,35 @@ def synth(model, header):
             **kwargs,
         ):
             yield np.asarray(result.audio, dtype="<f4").tobytes()
+
+
+@contextmanager
+def _indextts_load_dir(model_dir):
+    """mlx-community's IndexTTS config.json has no `tokenizer_name` field,
+    which mlx-audio's `ModelArgs` requires to find `tokenizer.model`
+    (mlx-audio's own test suite fills it in by hand rather than reading it
+    from the repo). `model_dir` is a hash-pinned `[[file]]` set (§3.2),
+    re-hashed by `naru-audio verify`, so its `config.json` must not be
+    touched. Yields a fresh scratch directory instead: every other file
+    symlinked in unchanged, plus a `config.json` copy with `tokenizer_name`
+    pointing at the scratch directory itself, where the symlinked
+    `tokenizer.model` resolves. Removed once the caller is done with it;
+    by then `load_model` has already read everything it needs."""
+    import json
+    import shutil
+    import tempfile
+
+    load_dir = Path(tempfile.mkdtemp(prefix="naru-audio-indextts-"))
+    try:
+        for f in model_dir.iterdir():
+            if f.is_file() and f.name != "config.json":
+                (load_dir / f.name).symlink_to(f)
+        config = json.loads((model_dir / "config.json").read_text())
+        config["tokenizer_name"] = str(load_dir)
+        (load_dir / "config.json").write_text(json.dumps(config))
+        yield load_dir
+    finally:
+        shutil.rmtree(load_dir, ignore_errors=True)
 
 
 @contextmanager

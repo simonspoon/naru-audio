@@ -15,6 +15,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/chatterbox-tts-8bit-mlx.toml"),
     ),
     (
+        "indextts-1.5-mlx.toml",
+        include_str!("../../catalog/indextts-1.5-mlx.toml"),
+    ),
+    (
         "kokoro-v1.0.toml",
         include_str!("../../catalog/kokoro-v1.0.toml"),
     ),
@@ -405,6 +409,7 @@ mod tests {
             cat.models.keys().collect::<Vec<_>>(),
             [
                 "chatterbox-tts-8bit-mlx",
+                "indextts-1.5-mlx",
                 "kokoro-v1.0",
                 "parakeet-tdt-0.6b-v2-int8",
                 "parakeet-tdt-0.6b-v2-mlx",
@@ -638,6 +643,28 @@ mod tests {
             "kokoro-v1.0",
         ] {
             assert!(!cat.models[other].exaggerates(), "{other}");
+        }
+    }
+
+    #[test]
+    fn builtin_indextts_clones_and_has_no_extras() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["indextts-1.5-mlx"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(m.model.backend, "mlx");
+        assert_eq!(m.model.license.as_deref(), Some("Apache-2.0"));
+        assert!(!m.model.non_commercial);
+        assert!(m.clones());
+        assert!(!m.exaggerates());
+        assert!(!m.instructs());
+        assert!(m.voices.is_empty());
+        for f in &m.files {
+            let url = f.url.as_deref().unwrap();
+            assert!(
+                url.starts_with("https://huggingface.co/mlx-community/IndexTTS-1.5/resolve/")
+                    && url.ends_with(&format!("/{}", f.path)),
+                "{url}"
+            );
         }
     }
 

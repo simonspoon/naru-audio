@@ -1,0 +1,71 @@
+# IndexTTS 1.5 (Bilibili), mlx-community's fp16 conversion, served by
+# mlx-audio in the MLX sidecar (§5.3). A fifth cloning model: no preset
+# speakers, it clones a reference recording the same way as the Qwen3-TTS
+# Base pair, Chatterbox and VoxCPM2 (voices under $NARU_AUDIO_HOME/voices/,
+# `naru-audio voice add`, each passed to mlx-audio as `ref_audio`); it
+# needs no transcript at all — mlx-audio's `generate` has no `ref_text`
+# parameter for it, so the cloned voice's transcript is sent but swallowed
+# by its own `**kwargs`, as for Chatterbox and VoxCPM2. `speed` is not
+# supported either, for the same reason (no `speed` parameter, only
+# `**kwargs`); the sidecar shim errors on a non-1.0 speed instead of
+# silently producing normal-speed audio (`naru_audio_mlx/__main__.py`).
+# 24 kHz output (`model.sample_rate`).
+#
+# IndexTTS does not stream: mlx-audio's `generate` yields exactly one
+# chunk, after the whole utterance has decoded, regardless of the
+# `stream`/`streaming_interval` request; `say -o -` still works, but all
+# the audio arrives at once at the end rather than as it is produced.
+#
+# mlx-community's config.json for this repo has no `tokenizer_name` field,
+# which mlx-audio's IndexTTS `ModelArgs` requires to find `tokenizer.model`
+# (mlx-audio's own test suite fills it in by hand rather than reading it
+# from the repo). This manifest's config.json is hash-pinned and re-hashed
+# by `naru-audio verify`, so the sidecar never edits it: on load it builds
+# a scratch directory with every file symlinked in and its own patched
+# config.json (`tokenizer_name` pointing at that scratch directory, where
+# `tokenizer.model` resolves), loads from there, and removes it
+# (`naru_audio_mlx/__main__.py`, `_indextts_load_dir`) — no network access.
+#
+# Every [[file]] of the repo at the pinned commit but README.md and
+# .gitattributes; sizes and LFS hash from the HF API, config.json's hash
+# computed 2026-09-26 from the file at the pinned commit.
+
+[model]
+name        = "indextts-1.5-mlx"
+kind        = "tts"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["en", "zh"]
+license     = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0"
+# MLX active memory after a load, 2026-09-26 (`stats` delta).
+resident_bytes = 1_438_762_732
+
+[backend.mlx]
+# Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
+clone = true
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/IndexTTS-1.5/resolve/d163f13bc1816c20bd79d730cc88f866a2a43ceb/config.json"
+sha256 = "3eb2d5c0b36a0aa6ee2146a7afc8db0cb2ce184acb33fd9156b55cbdc471f112"
+size   = 4_212
+
+[[file]]
+path   = "model.safetensors"
+url    = "https://huggingface.co/mlx-community/IndexTTS-1.5/resolve/d163f13bc1816c20bd79d730cc88f866a2a43ceb/model.safetensors"
+sha256 = "d3caa59244869ed2ed2d865a3e800edb834cc7af46e29c92a3e7b7b44950437a"
+size   = 1_434_019_152
+
+[[file]]
+path   = "model.safetensors.index.json"
+url    = "https://huggingface.co/mlx-community/IndexTTS-1.5/resolve/d163f13bc1816c20bd79d730cc88f866a2a43ceb/model.safetensors.index.json"
+sha256 = "805c999a314710f6d89be790fdd88e19fd4310c78fbf02e7db1cc4f48e48a2af"
+size   = 113_733
+
+[[file]]
+path   = "tokenizer.model"
+url    = "https://huggingface.co/mlx-community/IndexTTS-1.5/resolve/d163f13bc1816c20bd79d730cc88f866a2a43ceb/tokenizer.model"
+sha256 = "b2a5ce8090d32da3642cc4f81fdc996376bc6dd3f4cd5e3d165f71120d9f2bc8"
+size   = 475_997

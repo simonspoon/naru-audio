@@ -186,7 +186,7 @@ The request body is JSON.
 | `input` | **Supported.** Must be non-empty. The cap is 16 384 chars (OpenAI's is 4 096; we raise it because Naru reads whole turns). Over the cap returns 413. |
 | `voice` | **Supported.** A voice id from `/v1/audio/voices` (for example `af_heart`). OpenAI names (`alloy`, …) return 400 `unknown_voice` with the valid list in `message`. We do not map them, because mapping would silently pick a voice nobody chose. |
 | `response_format` | **Supported:** `wav` (default here; OpenAI's default is mp3) and `pcm`. `mp3/opus/aac/flac` return 400 `unsupported_value`. See the open question on mp3. |
-| `speed` | **Supported** in the range 0.5–2.0. Outside that range returns 400. Qwen3-TTS ignores it silently; Chatterbox and VoxCPM2 do not support it at all, so a non-1.0 `speed` on either fails the synthesis (500 `internal_error`) instead of coming out at normal speed unannounced. |
+| `speed` | **Supported** in the range 0.5–2.0. Outside that range returns 400. Qwen3-TTS ignores it silently; Chatterbox, VoxCPM2 and IndexTTS do not support it at all, so a non-1.0 `speed` on any of them fails the synthesis (500 `internal_error`) instead of coming out at normal speed unannounced. |
 | `stream_format` | `audio` is **supported**. `sse` returns 400 `unsupported_value`. |
 | `instructions` | **Supported** by a model whose manifest sets `instruct = true` (§3.2), passed to mlx-audio as `instruct`; **ignored** by every other model (Kokoro cannot be steered by a prompt). For Qwen3-TTS 1.7B VoiceDesign, which has no preset voices, it is the voice's description plus any style direction in one string (for example "A warm, husky woman in her thirties, a little amused. Speak slowly."); `voice` is accepted and ignored, and a request without `instructions` returns 400 before any load. VoxCPM2 also clones (`clone = true` too): a named cloned voice wins over `instructions` if both are given, and only a request with no matching voice needs `instructions` (`voice` in `src/server/speech.rs`). |
 
@@ -768,6 +768,25 @@ Sidecar design:
   `TtsModel::sample_rate`, used end to end for the WAV header,
   `x-audio-sample-rate` and `/v1/models` — nothing downstream assumes
   24 kHz.
+- **IndexTTS** (`indextts-1.5-mlx`, Apache-2.0) is a fifth cloning model:
+  like Chatterbox and VoxCPM2 it sets `[backend.mlx] clone = true`, has no
+  preset voices and needs no transcript (mlx-audio's IndexTTS has no
+  `ref_text` parameter, swallowed by `**kwargs`), and does not support
+  `speed` either, rejected the same way. It is the first model whose
+  mlx-audio `generate` never streams: it yields exactly one chunk, after
+  the whole utterance has decoded, regardless of `stream` or
+  `streaming_interval`; `say -o -` still works (the WAV header's RIFF sizes
+  already handle a stream of unknown length, §2.4), but the first and only
+  audio is out only once generation finishes, not progressively like every
+  other MLX TTS model. mlx-community's `config.json` for it also has no
+  `tokenizer_name`, which mlx-audio's `ModelArgs` requires to find
+  `tokenizer.model`; since the manifest's `config.json` is hash-pinned and
+  re-hashed by `naru-audio verify`, the sidecar never edits it in place.
+  On `load` it instead builds a scratch directory with every file
+  symlinked in and its own patched `config.json` (`tokenizer_name`
+  pointing at the scratch directory itself), loads from there, and
+  removes it once `load_model` has read everything it needs
+  (`naru_audio_mlx/__main__.py`, `_indextts_load_dir`).
 - **Cost:** about 150–400 ms extra first-request latency for the process start
   **[assumption]**, then a per-request IPC overhead that is negligible
   compared with decode time.

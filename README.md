@@ -121,6 +121,7 @@ used.
 | `qwen3-tts-1.7b-base-mlx` | TTS, speaks cloned voices | mlx | 3.1 GB |
 | `qwen3-tts-1.7b-voicedesign-mlx` | TTS, voice from a text description | mlx | 3.1 GB |
 | `chatterbox-tts-8bit-mlx` | TTS, speaks cloned voices | mlx | 1.3 GB |
+| `indextts-1.5-mlx` | TTS, speaks cloned voices, does not stream | mlx | 1.4 GB |
 | `voxcpm2-8bit-mlx` | TTS, clones or designs a voice, 48 kHz | mlx | 3.2 GB |
 
 Each model's license is in its catalog file (`license = …`); check it before
@@ -169,8 +170,9 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   to redo it. Voices are read on each request, so a new one works without
   restarting the daemon.
 - `say` with a cloned voice and no `-m` uses `qwen3-tts-0.6b-base-mlx`;
-  `-m qwen3-tts-1.7b-base-mlx`, `-m chatterbox-tts-8bit-mlx` or
-  `-m voxcpm2-8bit-mlx` uses another cloning model.
+  `-m qwen3-tts-1.7b-base-mlx`, `-m chatterbox-tts-8bit-mlx`,
+  `-m indextts-1.5-mlx` or `-m voxcpm2-8bit-mlx` uses another cloning
+  model.
 - Voices can also be added with `POST /v1/audio/voices` and exported with
   `GET /v1/audio/voices/{name}` ([docs/design.md §2.5](docs/design.md)).
 - `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
@@ -184,6 +186,12 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   Chatterbox, does not support `speed` (mlx-audio has no `speed` parameter
   for it at all) — a non-1.0 `--speed` fails the request the same way. It
   speaks at 48 kHz, not the 24 kHz every other model here uses.
+- `indextts-1.5-mlx` (Apache-2.0) also needs no transcript and does not
+  support `speed` (no `speed` parameter, only `**kwargs`), same as
+  Chatterbox and VoxCPM2. Unlike every other model here, it does not
+  stream: mlx-audio generates the whole utterance before yielding
+  anything, so `-o -` still works but all the audio arrives in one piece
+  at the end rather than as it is produced.
 
 **Voice design**: `qwen3-tts-1.7b-voicedesign-mlx` has no voices; it makes
 one up from `--instructions`, which it requires:
