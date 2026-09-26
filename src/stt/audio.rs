@@ -160,6 +160,16 @@ fn map_hound_error(e: hound::Error) -> AudioError {
     AudioError::Wav(e)
 }
 
+/// The body ended before the data chunk's declared size. hound 3.5's
+/// `read_into` reports that as this `Other` error, not `UnexpectedEof`. A
+/// streamed WAV (`/v1/audio/speech` with `stream`) declares a placeholder
+/// size, so this is the end of the audio, not a malformed file.
+fn is_short_read(e: &hound::Error) -> bool {
+    matches!(e, hound::Error::IoError(io_err)
+        if io_err.kind() == ErrorKind::Other
+            && io_err.to_string() == "Failed to read enough bytes.")
+}
+
 fn map_io_error(e: std::io::Error) -> AudioError {
     if is_size_cap_error(&e) {
         AudioError::TooLarge
@@ -294,6 +304,7 @@ impl<R: Read> WavStream<R> {
                 self.wav
                     .samples::<i32>()
                     .take(wanted)
+                    .take_while(|s| !matches!(s, Err(e) if is_short_read(e)))
                     .map(|s| s.map(|v| v as f32 / scale).map_err(map_hound_error))
                     .collect::<Result<_, _>>()?
             }
@@ -301,10 +312,12 @@ impl<R: Read> WavStream<R> {
                 .wav
                 .samples::<f32>()
                 .take(wanted)
+                .take_while(|s| !matches!(s, Err(e) if is_short_read(e)))
                 .map(|s| s.map_err(map_hound_error))
                 .collect::<Result<_, _>>()?,
         };
 
+        // A short read can stop mid-frame; the downmix drops the partial one.
         let mono = downmix_to_mono(&interleaved, self.channels);
         self.frames_read += mono.len() as u64;
         if self.frames_read > MAX_DECODED_SECONDS as u64 * self.sample_rate as u64 {
@@ -503,11 +516,11 @@ mod tests {
     }
 
     #[test]
-    fn truncated_wav_errors_not_panics() {
+    fn truncated_wav_decodes_what_arrived() {
         let wav = write_wav_i16(16_000, 1, &[1, 2, 3, 4, 5, 6, 7, 8]);
         let cut = &wav[..wav.len() - 4]; // chop off part of the data chunk
-        let result = decode(Cursor::new(cut.to_vec()));
-        assert!(result.is_err());
+        let out = decode(Cursor::new(cut.to_vec())).unwrap();
+        assert_eq!(out.len(), 6);
     }
 
     #[test]
@@ -564,6 +577,49 @@ mod tests {
         buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
         buf.extend_from_slice(&data);
         buf
+    }
+
+    /// `hand_crafted_wav` with the streaming header's placeholder data size
+    /// (`STREAM_DATA_SIZE` in `server/speech.rs`); at one channel the header
+    /// is byte-for-byte `wav_header(sample_rate, 0x7FFF_0000)`.
+    fn streamed_wav(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
+        const STREAM_DATA_SIZE: u32 = 0x7FFF_0000;
+        let mut wav = hand_crafted_wav(sample_rate, channels, samples);
+        wav[4..8].copy_from_slice(&STREAM_DATA_SIZE.wrapping_add(36).to_le_bytes());
+        wav[40..44].copy_from_slice(&STREAM_DATA_SIZE.to_le_bytes());
+        wav
+    }
+
+    #[test]
+    fn placeholder_data_size_decodes_to_eof() {
+        let samples: Vec<i16> = (0..100).map(|i| i * 100).collect();
+        let out = decode(Cursor::new(streamed_wav(16_000, 1, &samples))).unwrap();
+        assert_eq!(out.len(), samples.len());
+        for (a, &b) in out.iter().zip(&samples) {
+            assert!((a - b as f32 / 32768.0).abs() < 1e-6);
+        }
+    }
+
+    /// Stereo is averaged to mono, so N stereo frames come out as N samples.
+    #[test]
+    fn placeholder_data_size_stereo_downmixes_per_frame() {
+        let samples: Vec<i16> = (0..100).flat_map(|i| [i * 100, i * 300]).collect();
+        let out = decode(Cursor::new(streamed_wav(16_000, 2, &samples))).unwrap();
+        assert_eq!(out.len(), 100);
+        assert!((out[10] - 2000.0 / 32768.0).abs() < 1e-6);
+    }
+
+    /// A body cut mid-sample (odd byte) keeps whole frames only.
+    #[test]
+    fn body_cut_mid_frame_keeps_whole_frames() {
+        // Stereo: 5 frames = 20 data bytes; cut 3 leaves 4 frames and 1 byte.
+        let wav = streamed_wav(16_000, 2, &[1000; 10]);
+        let out = decode(Cursor::new(wav[..wav.len() - 3].to_vec())).unwrap();
+        assert_eq!(out.len(), 4);
+        // Mono: 5 samples = 10 data bytes; cut 1 leaves 4 samples and 1 byte.
+        let wav = streamed_wav(16_000, 1, &[1000; 5]);
+        let out = decode(Cursor::new(wav[..wav.len() - 1].to_vec())).unwrap();
+        assert_eq!(out.len(), 4);
     }
 
     #[test]
