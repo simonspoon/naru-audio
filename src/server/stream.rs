@@ -6,9 +6,10 @@
 //! segments the audio with Silero (authoritative, §2.4 "VAD placement");
 //! a decode thread decodes each closed segment in order through the model's
 //! `decode`, as `POST /v1/audio/transcriptions` does, so the energy and
-//! Silero gates run on every segment and a gated one is dropped. A partial
-//! is a decode of the open segment's window so far, queued to the same
-//! thread, so it always comes before its segment's final.
+//! Silero gates run on every segment and a gated one is dropped (an empty
+//! final closes any partials it had). A partial is a decode of the open
+//! segment's window so far, queued to the same thread, so it always comes
+//! before its segment's final.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -32,7 +33,7 @@ use crate::error::ApiError;
 use crate::manager::{Guard, KeepAlive};
 use crate::stt::audio::TARGET_SAMPLE_RATE;
 use crate::stt::vad::{Segmenter, Span, Vad};
-use crate::stt::{SttError, VadConfig, Vocabulary};
+use crate::stt::{SttError, SttModel, VadConfig, Vocabulary};
 
 const RATE: usize = TARGET_SAMPLE_RATE as usize;
 
@@ -866,12 +867,26 @@ fn quietest(pcm: &[f32]) -> usize {
 fn decode(
     model: Guard,
     vad: VadConfig,
+    jobs: UnboundedReceiver<Job>,
+    events: UnboundedSender<Event>,
+    backlog: Arc<AtomicUsize>,
+    busy: Arc<AtomicBool>,
+) {
+    decode_with(model.stt().as_ref(), vad, jobs, events, backlog, busy);
+}
+
+/// [`decode`] with `stt`, which the tests fake.
+fn decode_with(
+    stt: &dyn SttModel,
+    vad: VadConfig,
     mut jobs: UnboundedReceiver<Job>,
     events: UnboundedSender<Event>,
     backlog: Arc<AtomicUsize>,
     busy: Arc<AtomicBool>,
 ) {
     let mut index = 0;
+    // A partial was sent for `index`, so its segment needs a final.
+    let mut partialled = false;
     while let Some(job) = jobs.blocking_recv() {
         // The client has gone: stop, and let the model go.
         if events.is_closed() {
@@ -893,7 +908,7 @@ fn decode(
                 // the final is next, and replaces it.
                 let result = jobs
                     .is_empty()
-                    .then(|| model.stt().decode(&pcm, hotwords.as_deref(), Some(&vad)));
+                    .then(|| stt.decode(&pcm, hotwords.as_deref(), Some(&vad)));
                 busy.store(false, Ordering::SeqCst);
                 let text = match result {
                     None => continue,
@@ -911,6 +926,7 @@ fn decode(
                         "start": start,
                         "text": text,
                     })));
+                    partialled = true;
                 }
                 continue;
             }
@@ -920,7 +936,7 @@ fn decode(
             }
         };
         let started = Instant::now();
-        let result = model.stt().decode(&pcm, hotwords.as_deref(), Some(&vad));
+        let result = stt.decode(&pcm, hotwords.as_deref(), Some(&vad));
         backlog.fetch_sub(pcm.len(), Ordering::SeqCst);
         let text = match result {
             Ok(segments) => join(&segments),
@@ -929,8 +945,9 @@ fn decode(
                 return;
             }
         };
-        // A gated segment has no text and no `final` (§2.4).
-        if text.is_empty() {
+        // A gated segment has no text and no `final`, unless partials
+        // were sent for it: an empty `final` closes them (§2.4).
+        if text.is_empty() && !partialled {
             continue;
         }
         let _ = events.send(Event::Send(json!({
@@ -942,6 +959,7 @@ fn decode(
             "decode_ms": started.elapsed().as_millis() as u64,
         })));
         index += 1;
+        partialled = false;
     }
 }
 
@@ -1078,5 +1096,120 @@ mod tests {
     #[test]
     fn partials_off_queue_nothing() {
         assert!(partials_over_10_s(false, true).is_empty());
+    }
+
+    /// Decodes a non-empty buffer starting with 1.0 to "word"; anything
+    /// else is gated.
+    struct Fake;
+
+    impl SttModel for Fake {
+        fn decode_each(
+            &self,
+            pcm16k: &[f32],
+            _: Option<&Vocabulary>,
+            _: Option<&VadConfig>,
+            on_segment: &mut dyn FnMut(crate::stt::Segment),
+        ) -> Result<(), SttError> {
+            if pcm16k.first() == Some(&1.0) {
+                on_segment(crate::stt::Segment {
+                    start: 0.0,
+                    end: 1.0,
+                    text: "word".into(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    /// A decode thread on [`Fake`], its job queue and its events.
+    fn decoder() -> (UnboundedSender<Job>, UnboundedReceiver<Event>) {
+        let (jobs, job_rx) = unbounded_channel();
+        let (events, event_rx) = unbounded_channel();
+        std::thread::spawn(move || {
+            decode_with(
+                &Fake,
+                VadConfig::default(),
+                job_rx,
+                events,
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicBool::new(false)),
+            )
+        });
+        (jobs, event_rx)
+    }
+
+    fn segment(pcm: f32) -> Job {
+        Job::Decode {
+            pcm: vec![pcm],
+            start: 0.0,
+            end: 1.0,
+            hotwords: None,
+        }
+    }
+
+    /// The next event's `type`, `segment` and `text`; `done` alone.
+    fn next(events: &mut UnboundedReceiver<Event>) -> (String, u64, String) {
+        match events.blocking_recv() {
+            Some(Event::Send(v)) => (
+                v["type"].as_str().unwrap().into(),
+                v["segment"].as_u64().unwrap(),
+                v["text"].as_str().unwrap().into(),
+            ),
+            Some(Event::Done) => ("done".into(), 0, String::new()),
+            Some(Event::Fail(e)) => panic!("{e:?}"),
+            None => panic!("the decode thread ended"),
+        }
+    }
+
+    /// Partials sent for a segment that is then gated are closed by an
+    /// empty final, and the next segment takes the next index.
+    #[test]
+    fn a_gated_segment_with_partials_gets_an_empty_final() {
+        let (jobs, mut events) = decoder();
+        let partial = || Job::Partial {
+            pcm: vec![1.0],
+            start: 0.0,
+            hotwords: None,
+        };
+        jobs.send(partial()).unwrap();
+        assert_eq!(next(&mut events), ("partial".into(), 0, "word".into()));
+        jobs.send(segment(0.0)).unwrap();
+        assert_eq!(next(&mut events), ("final".into(), 0, String::new()));
+        jobs.send(partial()).unwrap();
+        assert_eq!(next(&mut events), ("partial".into(), 1, "word".into()));
+        jobs.send(segment(1.0)).unwrap();
+        assert_eq!(next(&mut events), ("final".into(), 1, "word".into()));
+        jobs.send(Job::Stop).unwrap();
+        assert_eq!(next(&mut events).0, "done");
+    }
+
+    /// Without a partial sent, a gated segment has no final, and does not
+    /// take an index.
+    #[test]
+    fn a_gated_segment_without_partials_has_no_final() {
+        let (jobs, mut events) = decoder();
+        jobs.send(segment(0.0)).unwrap();
+        jobs.send(segment(1.0)).unwrap();
+        jobs.send(Job::Stop).unwrap();
+        assert_eq!(next(&mut events), ("final".into(), 0, "word".into()));
+        assert_eq!(next(&mut events).0, "done");
+    }
+
+    /// A partial skipped because its segment closed was never sent, so
+    /// it needs no empty final.
+    #[test]
+    fn a_skipped_partial_needs_no_empty_final() {
+        let (jobs, mut events) = decoder();
+        jobs.send(Job::Partial {
+            pcm: vec![1.0],
+            start: 0.0,
+            hotwords: None,
+        })
+        .unwrap();
+        jobs.send(segment(0.0)).unwrap();
+        jobs.send(segment(1.0)).unwrap();
+        jobs.send(Job::Stop).unwrap();
+        assert_eq!(next(&mut events), ("final".into(), 0, "word".into()));
+        assert_eq!(next(&mut events).0, "done");
     }
 }

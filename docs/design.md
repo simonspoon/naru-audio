@@ -292,7 +292,7 @@ flushes, delivers every final, sends `done` and closes.
 {"type":"done"}
 ```
 - `speech` uses the same shape as auris's JSONL line.
-- A `final` with an empty `text` is never sent; a gated segment is simply dropped.
+- A `final` with an empty `text` is never sent, and a gated segment is simply dropped, unless partials were sent for that segment: then an empty `final` closes them.
 - `segment` indexes increase monotonically. `final`s arrive in segment order.
 
 **VAD placement.** VAD runs **in the daemon** and is authoritative. Clients
