@@ -379,6 +379,17 @@ fn registry_command(command: Command) -> ExitCode {
             unreachable!("handled by main")
         }
         Command::Pull { names, force } => {
+            let names = if names.iter().any(|n| n == "default") {
+                match Profile::detect().and_then(|p| Settings::load(p, reg.home())) {
+                    Ok(s) => expand_pull_names(&names, &s.stt_default, &s.tts_default),
+                    Err(e) => {
+                        eprintln!("naru-audio: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                names
+            };
             for name in &names {
                 let mut progress = |p: Progress| {
                     if let Progress::Downloading {
@@ -457,6 +468,26 @@ fn registry_command(command: Command) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// §4.1 `pull default`: `default` becomes the STT and TTS models `serve`
+/// would load; the VAD model comes with the STT model's `requires`. Each
+/// name is kept once, first mention wins.
+fn expand_pull_names(names: &[String], stt: &str, tts: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in names {
+        let expanded = if name == "default" {
+            vec![stt, tts]
+        } else {
+            vec![name.as_str()]
+        };
+        for n in expanded {
+            if !out.iter().any(|o| o == n) {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// §3.7: `transcribe` and `say` exit 3 when the daemon is down, `health`
@@ -958,5 +989,42 @@ async fn stream(
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_pull_names;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn pull_default_expands_to_stt_and_tts() {
+        assert_eq!(
+            expand_pull_names(&names(&["default"]), "stt-a", "tts-b"),
+            names(&["stt-a", "tts-b"])
+        );
+    }
+
+    #[test]
+    fn pull_names_are_deduped_in_order() {
+        assert_eq!(
+            expand_pull_names(
+                &names(&["tts-b", "default", "silero-vad", "default", "tts-b"]),
+                "stt-a",
+                "tts-b"
+            ),
+            names(&["tts-b", "stt-a", "silero-vad"])
+        );
+    }
+
+    #[test]
+    fn pull_other_names_pass_through() {
+        assert_eq!(
+            expand_pull_names(&names(&["kokoro-v1.0", "silero-vad"]), "stt-a", "tts-b"),
+            names(&["kokoro-v1.0", "silero-vad"])
+        );
     }
 }
