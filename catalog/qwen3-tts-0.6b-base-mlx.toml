@@ -16,6 +16,7 @@ backend     = "mlx"
 platforms   = ["macos-arm64", "macos-x86_64"]
 languages   = ["en", "zh", "de", "it", "pt", "es", "ja", "ko", "fr", "ru"]
 license     = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0"
 # MLX peak while generating in a cloned voice, 2026-09-25. What a load
 # measures replaces it: the load's delta in `stats`, 2.05 GB.
 resident_bytes = 2_700_000_000

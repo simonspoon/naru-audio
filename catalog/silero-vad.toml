@@ -6,6 +6,7 @@ kind        = "vad"
 backend     = "sherpa-onnx"
 platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 license     = "MIT"
+license_url = "https://opensource.org/license/mit/"
 
 [[file]]
 path   = "silero_vad.onnx"

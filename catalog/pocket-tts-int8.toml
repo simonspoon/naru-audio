@@ -5,7 +5,8 @@
 # Licence: the model is CC-BY-4.0 (kyutai/pocket-tts; LICENSE below). The
 # package README also says "It is for non-commercial" and points at the
 # ONNX export's LICENSE; the test_wavs are from
-# kyutai-labs/delayed-streams-modeling.
+# kyutai-labs/delayed-streams-modeling. That README statement, not the
+# CC-BY-4.0 grant, is why `non_commercial` is set below.
 #
 # Pocket has one speaker (`sid` 0) and clones the voice from a reference
 # recording, so each [[voice]] names one of the package's test_wavs. The
@@ -18,6 +19,8 @@ backend     = "sherpa-onnx"
 platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 languages   = ["en"]
 license     = "CC-BY-4.0"
+license_url = "https://creativecommons.org/licenses/by/4.0/"
+non_commercial = true                    # see the README caveat above
 resident_bytes = 700_000_000             # daemon peak RSS serving it, 2026-09-25; state/measured.json corrects it
 
 [backend.sherpa-onnx]

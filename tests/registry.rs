@@ -8,7 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 use common::{Stub, file_entry, home, model_header, sha};
-use naru_audio::registry::manifest::Manifest;
+use naru_audio::profile::Profile;
+use naru_audio::registry::manifest::{Catalog, Manifest};
 use naru_audio::registry::{Pulled, Registry, RegistryError};
 
 /// Every path under `dir`, relative, sorted; empty when `dir` is absent.
@@ -374,4 +375,55 @@ fn incomplete_model_dir_is_replaced() {
 fn model_name_ending_in_lock_is_rejected() {
     let err = Manifest::parse(&model_header("m.lock", &[]), "test").unwrap_err();
     assert!(err.to_string().contains("must not end in `.lock`"), "{err}");
+}
+
+/// Naru 1441: every built-in model names its license, so a client never has
+/// to guess.
+#[test]
+fn every_builtin_model_has_a_non_empty_license_and_url() {
+    let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+    for m in cat.models.values() {
+        assert!(
+            m.model.license.as_deref().is_some_and(|s| !s.is_empty()),
+            "{} has no license",
+            m.model.name
+        );
+        assert!(
+            m.model
+                .license_url
+                .as_deref()
+                .is_some_and(|s| s.starts_with("https://")),
+            "{} has no license_url",
+            m.model.name
+        );
+    }
+}
+
+/// Pocket TTS's package README says "It is for non-commercial" even though
+/// the model itself is CC-BY-4.0 (catalog/pocket-tts-int8.toml); nothing else
+/// in the built-in catalog is restricted.
+#[test]
+fn only_pocket_tts_is_flagged_non_commercial() {
+    let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+    let nc: Vec<&str> = cat
+        .models
+        .values()
+        .filter(|m| m.model.non_commercial)
+        .map(|m| m.model.name.as_str())
+        .collect();
+    assert_eq!(nc, ["pocket-tts-int8"]);
+}
+
+/// Naru 1441: `serve` must never pick a non-commercial model by default.
+#[test]
+fn no_default_model_is_non_commercial() {
+    let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+    for profile in [
+        Profile::new(8 * 1024 * 1024 * 1024, "aarch64", false),
+        Profile::new(64 * 1024 * 1024 * 1024, "aarch64", false),
+    ] {
+        for name in [profile.default_stt(), profile.default_tts()] {
+            assert!(!cat.models[name].model.non_commercial, "{name}");
+        }
+    }
 }

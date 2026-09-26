@@ -229,6 +229,9 @@ async fn models(
                 "x_loaded": loaded.contains(name),
                 "x_size_bytes": e.size_bytes,
                 "x_default": st.models.default_for(e.manifest.model.kind) == Some(name.as_str()),
+                "x_license": e.manifest.model.license,
+                "x_license_url": e.manifest.model.license_url,
+                "x_non_commercial": e.manifest.model.non_commercial,
             })
         })
         .collect();

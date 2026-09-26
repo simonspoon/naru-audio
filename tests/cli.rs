@@ -77,6 +77,60 @@ fn list_names_prints_bare_pulled_names_offline() {
     assert!(stdout(&table).contains("remote"), "{}", stdout(&table));
 }
 
+/// Naru 1441: pulling a non-commercial model warns on stderr, since `pull`'s
+/// stdout ("pulled <name>") is meant to be scripted; `list` tags it too.
+#[test]
+fn non_commercial_model_warns_on_pull_and_is_tagged_in_list() {
+    let src = tempfile::tempdir().unwrap();
+    let path = src.path().join("m.onnx");
+    std::fs::write(&path, b"weights").unwrap();
+    let manifest = "[model]\nname = \"nc\"\nkind = \"tts\"\nbackend = \"sherpa-onnx\"\n\
+        license = \"CC-BY-NC-4.0\"\n\
+        license_url = \"https://creativecommons.org/licenses/by-nc/4.0/\"\n\
+        non_commercial = true\n"
+        .to_string()
+        + &file_entry("m.onnx", &format!("file://{}", path.display()), b"weights");
+    let home = home(&[manifest]);
+
+    let pull = run(home.path(), &["pull", "nc"]);
+    assert!(pull.status.success(), "{}", stderr(&pull));
+    assert_eq!(stdout(&pull), "pulled nc\n");
+    let warning = stderr(&pull);
+    assert!(warning.contains("non-commercial"), "{warning}");
+    assert!(warning.contains("CC-BY-NC-4.0"), "{warning}");
+
+    let table = stdout(&run(home.path(), &["list"]));
+    assert!(
+        table
+            .lines()
+            .any(|l| l.starts_with("nc ") && l.contains("CC-BY-NC-4.0 (non-commercial)")),
+        "{table}"
+    );
+}
+
+/// A pull that fails (here, an unavailable backend, as in
+/// `pull_refuses_an_unavailable_backend_without_force`) must not print the
+/// non-commercial warning: there is nothing pulled to warn about.
+#[test]
+fn failed_pull_of_a_non_commercial_model_prints_no_warning() {
+    let src = tempfile::tempdir().unwrap();
+    let path = src.path().join("m.onnx");
+    std::fs::write(&path, b"weights").unwrap();
+    let manifest = "[model]\nname = \"nc\"\nkind = \"tts\"\nbackend = \"nope\"\n\
+        license = \"CC-BY-NC-4.0\"\n\
+        license_url = \"https://creativecommons.org/licenses/by-nc/4.0/\"\n\
+        non_commercial = true\n"
+        .to_string()
+        + &file_entry("m.onnx", &format!("file://{}", path.display()), b"weights");
+    let home = home(&[manifest]);
+
+    let refused = run(home.path(), &["pull", "nc"]);
+    assert!(!refused.status.success());
+    let stderr = stderr(&refused);
+    assert!(stderr.contains("unknown backend `nope`"), "{stderr}");
+    assert!(!stderr.contains("non-commercial"), "{stderr}");
+}
+
 #[test]
 fn rm_of_required_model_needs_force() {
     let src = tempfile::tempdir().unwrap();

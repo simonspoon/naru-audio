@@ -7,6 +7,7 @@ backend     = "sherpa-onnx"
 platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 languages   = ["en"]
 license     = "CC-BY-4.0"
+license_url = "https://creativecommons.org/licenses/by/4.0/"
 resident_bytes = 1_600_000_000           # estimate; state/measured.json corrects it
 requires    = ["silero-vad"]
 

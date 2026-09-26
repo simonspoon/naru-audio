@@ -79,6 +79,15 @@ pub struct Model {
     pub platforms: Vec<String>,
     #[serde(default)]
     pub requires: Vec<String>,
+    /// SPDX id or name, e.g. `Apache-2.0`. The built-in catalog always sets
+    /// this; a `catalog.d` manifest may leave it unset.
+    pub license: Option<String>,
+    /// Where `license` can be read in full.
+    pub license_url: Option<String>,
+    /// The weights are restricted to non-commercial use (CC-BY-NC*,
+    /// research-only, or otherwise), whatever `license` itself says.
+    #[serde(default)]
+    pub non_commercial: bool,
 }
 
 /// A `[[file]]`. Without a `url` it comes out of an `[[archive]]` and is
@@ -214,6 +223,10 @@ impl Manifest {
         // It would collide with another model's `tmp/<name>.lock`.
         if name.ends_with(".lock") {
             return Err(format!("model name `{name}` must not end in `.lock`"));
+        }
+
+        if let Some(url) = &self.model.license_url {
+            check_url(url)?;
         }
 
         // §3.2: every file and archive has a sha256, no exceptions.

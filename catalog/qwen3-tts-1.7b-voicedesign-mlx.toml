@@ -15,6 +15,7 @@ backend     = "mlx"
 platforms   = ["macos-arm64", "macos-x86_64"]
 languages   = ["en", "zh", "de", "it", "pt", "es", "ja", "ko", "fr", "ru"]
 license     = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0"
 # An estimate, not measured: 3.08 GB of weights, plus the ~0.6 GB that
 # loading and generating add over the weights for the 0.6B models. What a
 # load measures replaces it: the load's delta in `stats`.

@@ -18,6 +18,7 @@ backend     = "mlx"
 platforms   = ["macos-arm64", "macos-x86_64"]
 languages   = ["en", "zh", "de", "it", "pt", "es", "ja", "ko", "fr", "ru"]
 license     = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0"
 # MLX peak while generating, 2026-09-25. What a load measures replaces it:
 # the load's delta in `stats`, 2.04 GB, without the 0.5 GB that
 # generating adds on top.

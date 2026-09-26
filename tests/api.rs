@@ -152,6 +152,19 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
             "vad"
         ]
     );
+    // Pocket TTS: CC-BY-4.0, but its README flags it non-commercial (§1441).
+    let pocket = data.iter().find(|m| m["id"] == "pocket-tts-int8").unwrap();
+    assert_eq!(pocket["x_license"], "CC-BY-4.0");
+    assert_eq!(
+        pocket["x_license_url"],
+        "https://creativecommons.org/licenses/by/4.0/"
+    );
+    assert_eq!(pocket["x_non_commercial"], true);
+    // Kokoro is Apache-2.0 and commercial-usable.
+    let kokoro = data.iter().find(|m| m["id"] == "kokoro-v1.0").unwrap();
+    assert_eq!(kokoro["x_license"], "Apache-2.0");
+    assert_eq!(kokoro["x_non_commercial"], false);
+
     let data: Vec<&Value> = data
         .iter()
         .filter(|m| {
@@ -176,7 +189,10 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         "x_backend",
         "x_default",
         "x_kind",
+        "x_license",
+        "x_license_url",
         "x_loaded",
+        "x_non_commercial",
         "x_pulled",
         "x_size_bytes",
         "x_unavailable_reason",

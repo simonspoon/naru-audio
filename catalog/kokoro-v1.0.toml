@@ -11,6 +11,7 @@ backend     = "sherpa-onnx"
 platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 languages   = ["en"]
 license     = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0"
 resident_bytes = 950_000_000             # spike's peak RSS; state/measured.json corrects it
 
 # `lang = "en-us"` per the spike, not §3.2's "en": en-gb fails in espeak-ng

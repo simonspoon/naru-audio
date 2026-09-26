@@ -122,7 +122,10 @@ used.
 | `qwen3-tts-1.7b-voicedesign-mlx` | TTS, voice from a text description | mlx | 3.1 GB |
 
 Each model's license is in its catalog file (`license = …`); check it before
-you use a model's output.
+you use a model's output. `naru-audio list` and `GET /v1/models` show it
+(`x_license`, `x_license_url`), and pulling a non-commercial model
+(`pocket-tts-int8`, per its README) prints a warning; `x_non_commercial`
+marks it in the API.
 
 ```sh
 naru-audio pull pocket-tts-int8       # pull by name; `default` means the configured STT and TTS models

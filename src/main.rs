@@ -409,10 +409,32 @@ fn registry_command(command: Command) -> ExitCode {
                         eprintln!("downloading {file}");
                     }
                 };
-                match reg.pull_with(name, force, &mut progress) {
-                    Ok(Pulled::Downloaded) => println!("pulled {name}"),
-                    Ok(Pulled::AlreadyInstalled) => println!("{name} is already pulled"),
-                    Err(e) => fail(name, e),
+                let pulled = match reg.pull_with(name, force, &mut progress) {
+                    Ok(Pulled::Downloaded) => {
+                        println!("pulled {name}");
+                        true
+                    }
+                    Ok(Pulled::AlreadyInstalled) => {
+                        println!("{name} is already pulled");
+                        true
+                    }
+                    Err(e) => {
+                        fail(name, e);
+                        false
+                    }
+                };
+                if pulled
+                    && let Some(m) = reg.catalog().models.get(name)
+                    && m.model.non_commercial
+                {
+                    eprintln!(
+                        "naru-audio: warning: {name} is {}, non-commercial use only{}",
+                        m.model.license.as_deref().unwrap_or("unlicensed"),
+                        m.model
+                            .license_url
+                            .as_deref()
+                            .map_or(String::new(), |u| format!(" ({u})"))
+                    );
                 }
             }
         }
@@ -423,8 +445,8 @@ fn registry_command(command: Command) -> ExitCode {
         Command::List { names: false } => match reg.list() {
             Ok(entries) => {
                 println!(
-                    "{:<32} {:<4} {:<12} {:<6} {:>14}  AVAILABLE",
-                    "NAME", "KIND", "BACKEND", "PULLED", "SIZE"
+                    "{:<32} {:<4} {:<12} {:<6} {:>14}  {:<24}LICENSE",
+                    "NAME", "KIND", "BACKEND", "PULLED", "SIZE", "AVAILABLE"
                 );
                 for e in entries {
                     let m = &e.manifest.model;
@@ -433,13 +455,19 @@ fn registry_command(command: Command) -> ExitCode {
                         Ok(()) => "yes".to_string(),
                         Err(reason) => format!("no: {reason}"),
                     };
+                    let license = match &m.license {
+                        Some(l) if m.non_commercial => format!("{l} (non-commercial)"),
+                        Some(l) => l.clone(),
+                        None => "-".to_string(),
+                    };
                     println!(
-                        "{:<32} {:<4} {:<12} {:<6} {:>14}  {available}",
+                        "{:<32} {:<4} {:<12} {:<6} {:>14}  {:<24}{license}",
                         m.name,
                         m.kind.as_str(),
                         m.backend,
                         if e.pulled { "yes" } else { "no" },
-                        size
+                        size,
+                        available
                     );
                 }
             }
