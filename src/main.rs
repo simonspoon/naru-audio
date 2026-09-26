@@ -91,13 +91,18 @@ enum Command {
         /// voice, else the daemon's default TTS model.
         #[arg(short, long)]
         model: Option<String>,
-        /// Speed, 0.5 to 2.0.
+        /// Speed, 0.5 to 2.0. Chatterbox does not support it: a non-1.0
+        /// value fails the request instead of coming out at normal speed.
         #[arg(short, long)]
         speed: Option<f64>,
         /// Voice description, which a VoiceDesign model needs; other models
         /// ignore it.
         #[arg(long)]
         instructions: Option<String>,
+        /// Emotion exaggeration, 0 to 1, for Chatterbox; other models
+        /// ignore it.
+        #[arg(long)]
+        exaggeration: Option<f64>,
         /// WAV file, written with exact sizes once synthesis ends; or `-`
         /// for stdout, streamed as each sentence is synthesised.
         #[arg(short, long)]
@@ -128,7 +133,8 @@ enum Command {
         action: MlxAction,
     },
     /// Cloned voices in $NARU_AUDIO_HOME/voices, spoken by any cloning model
-    /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx).
+    /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx,
+    /// chatterbox-tts-8bit-mlx).
     Voice {
         #[command(subcommand)]
         action: VoiceAction,
@@ -187,6 +193,7 @@ async fn main() -> ExitCode {
             model,
             speed,
             instructions,
+            exaggeration,
             output,
         } => {
             return say(
@@ -196,6 +203,7 @@ async fn main() -> ExitCode {
                 model.as_deref(),
                 speed,
                 instructions.as_deref(),
+                exaggeration,
                 &output,
             );
         }
@@ -808,6 +816,7 @@ fn speech_request(
     voice: Option<&str>,
     speed: Option<f64>,
     instructions: Option<&str>,
+    exaggeration: Option<f64>,
     stream: bool,
 ) -> serde_json::Value {
     let mut request = serde_json::json!({
@@ -822,6 +831,9 @@ fn speech_request(
     if let Some(instructions) = instructions {
         request["instructions"] = instructions.into();
     }
+    if let Some(exaggeration) = exaggeration {
+        request["exaggeration"] = exaggeration.into();
+    }
     request
 }
 
@@ -829,6 +841,7 @@ fn speech_request(
 /// stream and copies each piece to stdout as it arrives, so a player can
 /// start at once; a file asks for `stream=false`, whose header has the exact
 /// sizes. A stream the daemon aborts (§2.3) is exit 1.
+#[allow(clippy::too_many_arguments)]
 fn say(
     url: &str,
     text: &str,
@@ -836,6 +849,7 @@ fn say(
     model: Option<&str>,
     speed: Option<f64>,
     instructions: Option<&str>,
+    exaggeration: Option<f64>,
     output: &str,
 ) -> ExitCode {
     // As `transcribe`: a stopped daemon is exit 3, before stdin is read.
@@ -861,7 +875,15 @@ fn say(
     };
     let stream = output == "-";
     let model = voices::say_model(registry::default_home().as_deref(), model, voice);
-    let request = speech_request(model, &text, voice, speed, instructions, stream);
+    let request = speech_request(
+        model,
+        &text,
+        voice,
+        speed,
+        instructions,
+        exaggeration,
+        stream,
+    );
 
     let response = agent(None)
         .post(format!("{url}/v1/audio/speech"))
@@ -1091,6 +1113,7 @@ mod tests {
             None,
             None,
             Some("A warm calm man"),
+            None,
             false,
         );
         assert_eq!(request["instructions"], "A warm calm man");
@@ -1100,10 +1123,33 @@ mod tests {
 
     #[test]
     fn say_request_omits_instructions_when_not_given() {
-        let request = speech_request("default", "hello", Some("af_heart"), Some(1.5), None, true);
+        let request = speech_request(
+            "default",
+            "hello",
+            Some("af_heart"),
+            Some(1.5),
+            None,
+            None,
+            true,
+        );
         assert!(request.get("instructions").is_none());
         assert_eq!(request["voice"], "af_heart");
         assert_eq!(request["speed"], 1.5);
         assert_eq!(request["stream"], true);
+    }
+
+    #[test]
+    fn say_request_carries_exaggeration_when_given() {
+        let request = speech_request(
+            "chatterbox-tts-8bit-mlx",
+            "hello",
+            None,
+            None,
+            None,
+            Some(0.7),
+            false,
+        );
+        assert_eq!(request["exaggeration"], 0.7);
+        assert!(request.get("instructions").is_none());
     }
 }

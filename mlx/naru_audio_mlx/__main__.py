@@ -7,6 +7,7 @@ needs it."""
 
 import argparse
 import gc
+import os
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
@@ -30,7 +31,18 @@ def handle(header, samples):
         if header.get("kind") == "tts":
             from mlx_audio.tts.utils import load_model
 
-            model = load_model(Path(header["dir"]))
+            # Chatterbox's loader also fetches a small shared dependency,
+            # mlx-community/S3TokenizerV2, straight from the Hub rather
+            # than from `dir`; HF_HUB_OFFLINE would make that raise on a
+            # machine that has never cached it. Every other model's
+            # weights come entirely from `dir`, so only Chatterbox gets
+            # the exception.
+            with (
+                _network_allowed()
+                if header.get("model", "").startswith("chatterbox")
+                else nullcontext()
+            ):
+                model = load_model(Path(header["dir"]))
             answer = {"sample_rate": model.sample_rate}
         else:
             from parakeet_mlx import from_pretrained
@@ -79,28 +91,72 @@ def loaded(header):
 def synth(model, header):
     """The chunks of `header["text"]` as f32le bytes, generated one at a
     time as `serve` asks for them."""
+    # Chatterbox does not support `speed` at all (mlx-audio's own
+    # docstring: "Ignored (Chatterbox doesn't support speed adjustment)");
+    # a caller who asks for anything else gets a clear error instead of
+    # normal-speed audio it never asked for.
+    speed = header.get("speed", 1.0)
+    if header.get("model", "").startswith("chatterbox") and speed != 1.0:
+        raise ValueError(
+            f"chatterbox-tts-8bit-mlx does not support speed (got {speed}); "
+            "only the default, 1.0, is accepted"
+        )
     kwargs = {}
     if header.get("reference"):
         kwargs["ref_audio"] = header["reference"]
     # A cloned voice's transcript: with `ref_audio`, Qwen3-TTS Base clones
-    # the voice in context.
+    # the voice in context. Chatterbox takes no transcript and ignores it
+    # (mlx-audio's `**kwargs`), sent anyway so the request looks the same
+    # for every cloning model.
     if header.get("reference_text"):
         kwargs["ref_text"] = header["reference_text"]
     # What the voice should be and how it should speak: VoiceDesign's only
     # voice.
     if header.get("instruct"):
         kwargs["instruct"] = header["instruct"]
-    cloned = "ref_audio" in kwargs and "ref_text" in kwargs
+    # Chatterbox's emotion-exaggeration dial, 0-1.
+    if header.get("exaggeration") is not None:
+        kwargs["exaggeration"] = header["exaggeration"]
+    # Only Qwen3-TTS's cloning models have the streaming decoder `primed`
+    # feeds the reference codes to; Chatterbox has no `speech_tokenizer`
+    # and does not stream, so priming would only raise.
+    cloned = (
+        "ref_audio" in kwargs
+        and "ref_text" in kwargs
+        and hasattr(model, "speech_tokenizer")
+    )
     with primed(model) if cloned else nullcontext():
         for result in model.generate(
             text=header["text"],
             voice=header.get("voice"),
-            speed=header.get("speed", 1.0),
+            speed=speed,
             stream=True,
             streaming_interval=STREAMING_INTERVAL,
             **kwargs,
         ):
             yield np.asarray(result.audio, dtype="<f4").tobytes()
+
+
+@contextmanager
+def _network_allowed():
+    """Lifts `HF_HUB_OFFLINE` for one call, restoring it after: for
+    Chatterbox's `snapshot_download` of mlx-community/S3TokenizerV2, so it
+    can be fetched and cached under ~/.cache/huggingface the first time,
+    like any other `huggingface_hub` download. `huggingface_hub` reads the
+    env var once into a module constant at import time, so the env var
+    itself is set too (for any subprocess it spawns), but the constant is
+    what `is_offline_mode()` actually checks."""
+    import huggingface_hub.constants as hf_constants
+
+    prev_env = os.environ.pop("HF_HUB_OFFLINE", None)
+    prev_const = hf_constants.HF_HUB_OFFLINE
+    hf_constants.HF_HUB_OFFLINE = False
+    try:
+        yield
+    finally:
+        hf_constants.HF_HUB_OFFLINE = prev_const
+        if prev_env is not None:
+            os.environ["HF_HUB_OFFLINE"] = prev_env
 
 
 @contextmanager

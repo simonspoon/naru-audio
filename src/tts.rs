@@ -22,7 +22,7 @@ use crate::registry::manifest::Voice;
 pub type Sink = Box<dyn FnMut(&[f32]) -> bool + Send>;
 
 /// The per-request knobs (§2.3 `speed` and `instructions`, and the
-/// `gap`/`level` extensions).
+/// `gap`/`level`/`exaggeration` extensions).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SynthOptions {
     /// 0.5–2.0; the API checks the range.
@@ -35,6 +35,10 @@ pub struct SynthOptions {
     /// What the voice should be and how it should speak, for a model that
     /// takes it (`Manifest::instructs`); `None` for any other.
     pub instructions: Option<String>,
+    /// Emotion exaggeration, 0-1, for a model that takes it
+    /// (`Manifest::exaggerates`, mlx-audio's Chatterbox); `None` for any
+    /// other.
+    pub exaggeration: Option<f32>,
 }
 
 impl Default for SynthOptions {
@@ -44,6 +48,7 @@ impl Default for SynthOptions {
             gap: 0.12,
             level: true,
             instructions: None,
+            exaggeration: None,
         }
     }
 }

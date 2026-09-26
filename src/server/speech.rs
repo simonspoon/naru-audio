@@ -85,6 +85,10 @@ pub(super) async fn speech(
     if !manifest.instructs() {
         job.options.instructions = None;
     }
+    // Only a model that takes `exaggeration` sees it.
+    if !manifest.exaggerates() {
+        job.options.exaggeration = None;
+    }
     let model = st
         .models
         .acquire(manifest, job.keep_alive)
@@ -369,6 +373,16 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
         .and_then(Value::as_str)
         .filter(|i| !i.trim().is_empty())
         .map(str::to_string);
+    if let Some(exaggeration) = number("exaggeration")? {
+        if !(0.0..=1.0).contains(&exaggeration) {
+            return Err(bad_request(
+                "exaggeration",
+                "invalid_request",
+                format!("exaggeration must be between 0 and 1, got {exaggeration}"),
+            ));
+        }
+        options.exaggeration = Some(exaggeration as f32);
+    }
     let stream = boolean("stream", true)?;
 
     let keep_alive = match field("keep_alive") {

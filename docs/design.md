@@ -186,12 +186,15 @@ The request body is JSON.
 | `input` | **Supported.** Must be non-empty. The cap is 16 384 chars (OpenAI's is 4 096; we raise it because Naru reads whole turns). Over the cap returns 413. |
 | `voice` | **Supported.** A voice id from `/v1/audio/voices` (for example `af_heart`). OpenAI names (`alloy`, …) return 400 `unknown_voice` with the valid list in `message`. We do not map them, because mapping would silently pick a voice nobody chose. |
 | `response_format` | **Supported:** `wav` (default here; OpenAI's default is mp3) and `pcm`. `mp3/opus/aac/flac` return 400 `unsupported_value`. See the open question on mp3. |
-| `speed` | **Supported** in the range 0.5–2.0. Outside that range returns 400. |
+| `speed` | **Supported** in the range 0.5–2.0. Outside that range returns 400. Qwen3-TTS ignores it silently; Chatterbox does not support it at all, so a non-1.0 `speed` on Chatterbox fails the synthesis (500 `internal_error`) instead of coming out at normal speed unannounced. |
 | `stream_format` | `audio` is **supported**. `sse` returns 400 `unsupported_value`. |
 | `instructions` | **Supported** by a model whose manifest sets `instruct = true` (§3.2), passed to mlx-audio as `instruct`; **ignored** by every other model (Kokoro cannot be steered by a prompt). For Qwen3-TTS 1.7B VoiceDesign, which has no preset voices, it is the voice's description plus any style direction in one string (for example "A warm, husky woman in her thirties, a little amused. Speak slowly."); `voice` is accepted and ignored, and a request without `instructions` returns 400 before any load. |
 
 Extensions: `gap` (default 0.12 s), `level` (default `true`, the leveller),
-`keep_alive`. There is **no per-request `lang`**. sherpa fixes `lang` in
+`exaggeration` (0–1, **supported** only by a model whose manifest sets
+`exaggeration = true`, passed to mlx-audio as `exaggeration`; Chatterbox's
+emotion-exaggeration dial. **Ignored** by every other model), `keep_alive`.
+There is **no per-request `lang`**. sherpa fixes `lang` in
 `OfflineTtsKokoroModelConfig` when the model is created (sherpa-onnx
 tts.rs:166), with values such as `en`/`es` rather than `en-us`. Language
 therefore belongs to the manifest, with one catalog name per language
@@ -732,6 +735,19 @@ Sidecar design:
   them, and the `voice` asked for is ignored. The flag is ours, not
   mlx-audio's: its guard that drops `instruct` for the 0.6B models is
   dead code, so a model without the flag must not be sent it.
+- **Chatterbox** (`chatterbox-tts-8bit-mlx`, MIT) is a third cloning model:
+  like the Qwen3-TTS Base pair it sets `[backend.mlx] clone = true` and has
+  no preset voices, but it needs no transcript (mlx-audio's Chatterbox
+  ignores `ref_text`, sent anyway for a uniform request). It does not
+  support `speed` at all; the sidecar shim rejects a non-1.0 `speed` for it
+  rather than silently generating at normal speed. It takes the request's
+  `exaggeration` (0–1, an emotion-exaggeration dial), gated by
+  `[backend.mlx] exaggeration = true` the same way `instruct` gates
+  `instructions`. Its loader also fetches a small shared dependency,
+  `mlx-community/S3TokenizerV2`, straight from the Hub rather than from the
+  manifest's own files; the sidecar shim lifts `HF_HUB_OFFLINE` for that one
+  call, so it downloads once and is cached under `~/.cache/huggingface`
+  like any other `huggingface_hub` download.
 - **Cost:** about 150–400 ms extra first-request latency for the process start
   **[assumption]**, then a per-request IPC overhead that is negligible
   compared with decode time.

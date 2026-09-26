@@ -11,6 +11,10 @@ use super::RegistryError;
 /// Built-in manifests, `(file name, contents)`, compiled in from `catalog/`.
 const BUILTIN: &[(&str, &str)] = &[
     (
+        "chatterbox-tts-8bit-mlx.toml",
+        include_str!("../../catalog/chatterbox-tts-8bit-mlx.toml"),
+    ),
+    (
         "kokoro-v1.0.toml",
         include_str!("../../catalog/kokoro-v1.0.toml"),
     ),
@@ -215,6 +219,17 @@ impl Manifest {
             .unwrap_or(false)
     }
 
+    /// `backend.<model.backend>.exaggeration`: the model takes a request's
+    /// `exaggeration` (§2.3 extra), which mlx-audio's Chatterbox calls
+    /// `exaggeration`.
+    pub fn exaggerates(&self) -> bool {
+        self.backend
+            .get(&self.model.backend)
+            .and_then(|t| t.get("exaggeration"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     fn validate(&mut self) -> Result<(), String> {
         let name = &self.model.name;
         if !is_relative_path(name) || name.contains('/') {
@@ -385,6 +400,7 @@ mod tests {
         assert_eq!(
             cat.models.keys().collect::<Vec<_>>(),
             [
+                "chatterbox-tts-8bit-mlx",
                 "kokoro-v1.0",
                 "parakeet-tdt-0.6b-v2-int8",
                 "parakeet-tdt-0.6b-v2-mlx",
@@ -585,6 +601,38 @@ mod tests {
                 ) && url.ends_with(&format!("/{}", f.path)),
                 "{url}"
             );
+        }
+    }
+
+    #[test]
+    fn builtin_chatterbox_clones_and_takes_exaggeration_but_not_instructions() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["chatterbox-tts-8bit-mlx"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(m.model.backend, "mlx");
+        assert_eq!(m.model.license.as_deref(), Some("MIT"));
+        assert!(!m.model.non_commercial);
+        assert!(m.clones());
+        assert!(m.exaggerates());
+        assert!(!m.instructs());
+        assert!(m.voices.is_empty());
+        for f in &m.files {
+            let url = f.url.as_deref().unwrap();
+            assert!(
+                url.starts_with(
+                    "https://huggingface.co/mlx-community/Chatterbox-TTS-8bit/resolve/"
+                ) && url.ends_with(&format!("/{}", f.path)),
+                "{url}"
+            );
+        }
+        for other in [
+            "qwen3-tts-0.6b-base-mlx",
+            "qwen3-tts-0.6b-mlx",
+            "qwen3-tts-1.7b-base-mlx",
+            "qwen3-tts-1.7b-voicedesign-mlx",
+            "kokoro-v1.0",
+        ] {
+            assert!(!cat.models[other].exaggerates(), "{other}");
         }
     }
 

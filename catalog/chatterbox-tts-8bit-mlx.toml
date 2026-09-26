@@ -1,0 +1,60 @@
+# Chatterbox (ResembleAI), mlx-community's 8-bit conversion, served by
+# mlx-audio in the MLX sidecar (§5.3). A third cloning model, alongside the
+# Qwen3-TTS Base pair: no preset speakers, it clones a reference recording
+# instead, so its voices are the same cloned ones under
+# $NARU_AUDIO_HOME/voices/ (`naru-audio voice add`), each passed to
+# mlx-audio as `ref_audio`; unlike Qwen3-TTS it needs no transcript, so the
+# cloned voice's `ref_text` is passed but ignored. `speed` is not
+# supported at all (mlx-audio's own docstring: "Ignored (Chatterbox
+# doesn't support speed adjustment)"); the sidecar shim errors on a
+# non-1.0 speed rather than silently producing normal-speed audio
+# (`naru_audio_mlx/__main__.py`). `exaggeration` (0-1, mlx-audio's own
+# knob) is accepted as a request extra.
+#
+# mlx-audio's Chatterbox loader also fetches a small shared dependency,
+# mlx-community/S3TokenizerV2, straight from the Hub on first load,
+# outside this manifest; the sidecar shim lifts HF_HUB_OFFLINE for that
+# one call so it can be cached under ~/.cache/huggingface (see
+# `naru_audio_mlx/__main__.py`).
+#
+# Every [[file]] of the repo at the pinned commit but README.md and
+# .gitattributes; sizes and LFS hash from the HF API, the small files'
+# hashes computed 2026-09-26 from the files at the pinned commit.
+
+[model]
+name        = "chatterbox-tts-8bit-mlx"
+kind        = "tts"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it", "ja", "ko", "ms", "nl", "no", "pl", "pt", "ru", "sv", "sw", "tr", "zh"]
+license     = "MIT"
+license_url = "https://huggingface.co/ResembleAI/chatterbox"
+# MLX active memory after a load, 2026-09-26 (`stats` delta, 1.77 GB:
+# the 1.28 GB model.safetensors plus the shared S3Tokenizer, which is not
+# a [[file]] here since it comes from the Hub, not this manifest).
+resident_bytes = 1_770_928_124
+
+[backend.mlx]
+# Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
+clone = true
+# `exaggeration` (§2.3 extra) is passed through to mlx-audio.
+exaggeration = true
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/Chatterbox-TTS-8bit/resolve/0d4905ca99a604105f1cba6b947e306f066ab9f1/config.json"
+sha256 = "9f7e2f1ec2a805b394c18a52b31007ce49b9626e7eba68af38a0bfb6c63ff577"
+size   = 179
+
+[[file]]
+path   = "model.safetensors"
+url    = "https://huggingface.co/mlx-community/Chatterbox-TTS-8bit/resolve/0d4905ca99a604105f1cba6b947e306f066ab9f1/model.safetensors"
+sha256 = "b19a6b3056e9009f2a2b440050fd926f2f90cdde6d556c5238052a4e66e7554b"
+size   = 1_275_045_030
+
+[[file]]
+path   = "tokenizer.json"
+url    = "https://huggingface.co/mlx-community/Chatterbox-TTS-8bit/resolve/0d4905ca99a604105f1cba6b947e306f066ab9f1/tokenizer.json"
+sha256 = "d71e3a44eabb1784df9a68e9f95b251ecbf1a7af6a9f50835856b2ca9d8c14a5"
+size   = 25_470

@@ -558,6 +558,7 @@ fn aliases_defaults_and_options_reach_the_model() {
         gap: 0.0,
         level: false,
         instructions: None,
+        exaggeration: None,
     };
     assert_eq!(last(), ("bm_george".to_string(), expected));
 }

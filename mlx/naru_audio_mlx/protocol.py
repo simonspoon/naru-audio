@@ -17,7 +17,8 @@ Requests, one at a time, each answered before the next is sent:
     {"op": "synth", "model": NAME, "text": TEXT, "voice": ID (optional),
      "speed": X, "reference": PATH (optional), "reference_text": TEXT
      (optional, the reference's transcript), "instruct": TEXT (optional,
-     the voice's description or style direction)}
+     the voice's description or style direction), "exaggeration": X
+     (optional, 0-1, Chatterbox's emotion-exaggeration dial)}
     {"op": "stats"}
 
 Answers are {"ok": true, ...} or {"ok": false, "error": MESSAGE}. A `load`

@@ -9,7 +9,12 @@
 //! (`Manifest::instructs`) is sent the request's `instructions` as
 //! mlx-audio's `instruct`; if it has no voices (VoiceDesign), that is its
 //! voice, and the voice asked for is ignored. `sid` is not used. `speed`
-//! is passed on as mlx-audio's `speed`, which Qwen3-TTS ignores.
+//! is passed on as mlx-audio's `speed`, which Qwen3-TTS ignores; Chatterbox
+//! ignores it too, but the sidecar shim rejects a non-1.0 `speed` for it
+//! outright, so a caller gets a clear error instead of normal-speed audio
+//! (`naru_audio_mlx/__main__.py`). A model that exaggerates
+//! (`Manifest::exaggerates`, Chatterbox) is sent the request's
+//! `exaggeration` as mlx-audio's `exaggeration`.
 //!
 //! The sidecar is held for a whole synthesis, so `synth` never lets the
 //! sink hold it: chunks go through an unbounded queue to a thread that
@@ -45,6 +50,8 @@ pub struct MlxTts {
     cloned: Option<PathBuf>,
     /// Whether the model takes `instructions`.
     instructs: bool,
+    /// Whether the model takes `exaggeration`.
+    exaggerates: bool,
     /// What the sidecar's `load` reported.
     sample_rate: u32,
     /// What the load added to the sidecar's MLX active memory.
@@ -67,6 +74,7 @@ impl MlxTts {
             voices: manifest.voices.clone(),
             cloned: manifest.clones().then(|| home.to_path_buf()),
             instructs: manifest.instructs(),
+            exaggerates: manifest.exaggerates(),
             sample_rate: 0,
             resident_bytes,
         };
@@ -120,6 +128,11 @@ impl TtsModel for MlxTts {
             && let Some(instructions) = &options.instructions
         {
             request["instruct"] = json!(instructions);
+        }
+        if self.exaggerates
+            && let Some(exaggeration) = options.exaggeration
+        {
+            request["exaggeration"] = json!(exaggeration);
         }
         let (tx, rx) = mpsc::channel::<Vec<f32>>();
         std::thread::scope(|scope| {

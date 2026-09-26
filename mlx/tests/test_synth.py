@@ -83,5 +83,45 @@ class Synth(unittest.TestCase):
             self.assertEqual(model.calls, ["reset", 2, "reset"], header)
 
 
+class Chatterbox:
+    """mlx-audio's Chatterbox in outline: no `speech_tokenizer`, ignores
+    `voice`, takes `exaggeration`, yields once, non-streaming."""
+
+    def generate(self, text, ref_audio=None, exaggeration=None, **kwargs):
+        self.seen_exaggeration = exaggeration
+        yield type("Result", (), {"audio": mx.full((1,), 2.0)})
+
+
+class ChatterboxSynth(unittest.TestCase):
+    def test_reference_and_transcript_do_not_prime_a_model_with_no_speech_tokenizer(
+        self,
+    ):
+        model = Chatterbox()
+        header = {
+            "model": "chatterbox-tts-8bit-mlx",
+            "reference": "ref.wav",
+            "reference_text": "Hello there.",
+        }
+        # No AttributeError from `primed` reaching for `speech_tokenizer`.
+        self.assertEqual(audio(model, header), [2.0])
+
+    def test_exaggeration_is_passed_through(self):
+        model = Chatterbox()
+        header = {"model": "chatterbox-tts-8bit-mlx", "exaggeration": 0.8}
+        audio(model, header)
+        self.assertEqual(model.seen_exaggeration, 0.8)
+
+    def test_non_default_speed_raises(self):
+        model = Chatterbox()
+        header = {"model": "chatterbox-tts-8bit-mlx", "speed": 1.5}
+        with self.assertRaises(ValueError):
+            audio(model, header)
+
+    def test_default_speed_is_accepted(self):
+        model = Chatterbox()
+        header = {"model": "chatterbox-tts-8bit-mlx", "speed": 1.0}
+        self.assertEqual(audio(model, header), [2.0])
+
+
 if __name__ == "__main__":
     unittest.main()

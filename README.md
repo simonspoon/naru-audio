@@ -120,6 +120,7 @@ used.
 | `qwen3-tts-0.6b-base-mlx` | TTS, speaks cloned voices | mlx | 2.0 GB |
 | `qwen3-tts-1.7b-base-mlx` | TTS, speaks cloned voices | mlx | 3.1 GB |
 | `qwen3-tts-1.7b-voicedesign-mlx` | TTS, voice from a text description | mlx | 3.1 GB |
+| `chatterbox-tts-8bit-mlx` | TTS, speaks cloned voices | mlx | 1.3 GB |
 
 Each model's license is in its catalog file (`license = …`); check it before
 you use a model's output. `naru-audio list` and `GET /v1/models` show it
@@ -167,9 +168,17 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   to redo it. Voices are read on each request, so a new one works without
   restarting the daemon.
 - `say` with a cloned voice and no `-m` uses `qwen3-tts-0.6b-base-mlx`;
-  `-m qwen3-tts-1.7b-base-mlx` uses the larger cloning model.
+  `-m qwen3-tts-1.7b-base-mlx` or `-m chatterbox-tts-8bit-mlx` uses another
+  cloning model.
 - Voices can also be added with `POST /v1/audio/voices` and exported with
   `GET /v1/audio/voices/{name}` ([docs/design.md §2.5](docs/design.md)).
+- `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
+  entirely — a non-1.0 `--speed` with it fails the request instead of
+  quietly synthesising at normal speed. It takes `--exaggeration` (0-1, an
+  emotion-exaggeration dial); every other model ignores it. Its first load
+  fetches a small shared tokenizer from Hugging Face, so it needs network
+  access once even though every other model runs fully offline after
+  `pull`.
 
 **Voice design**: `qwen3-tts-1.7b-voicedesign-mlx` has no voices; it makes
 one up from `--instructions`, which it requires:
