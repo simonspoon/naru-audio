@@ -203,6 +203,8 @@ pub enum ManagerError {
     /// §3.5: the model does not fit even after evicting every idle model.
     InsufficientMemory(String),
     Load(LoadError),
+    /// The model stopped being pulled before it could load (a `DELETE`).
+    Registry(crate::registry::RegistryError),
     /// The load panicked.
     Internal(String),
 }
@@ -425,8 +427,23 @@ impl ModelManager {
             };
             let started = Instant::now();
             let loader = this.loader.clone();
-            let dir = this.registry.model_dir(&manifest.model.name);
-            let result = tokio::task::spawn_blocking(move || loader.load(&manifest, &dir)).await;
+            let registry = this.registry.clone();
+            let dir = registry.model_dir(&manifest.model.name);
+            // The load holds the model's registry lock, which `DELETE` holds
+            // from its unload through the file deletion. So either the load
+            // runs first and `DELETE` finds the model loading or loaded and
+            // busy (409, files kept), or the load waits, finds the model no
+            // longer pulled and fails. Re-checking "still pulled" after the
+            // load instead would leave a gap between that check and the
+            // deletion; `DELETE`'s unload has already run by then, so a
+            // model loaded in that gap would stay loaded over deleted files.
+            let result = tokio::task::spawn_blocking(move || {
+                registry
+                    .while_pulled(&manifest.model.name, || loader.load(&manifest, &dir))
+                    .map_err(ManagerError::Registry)?
+                    .map_err(ManagerError::Load)
+            })
+            .await;
             this.finish_load(name, need, unloads, started, result)
         });
         task.await
@@ -485,13 +502,13 @@ impl ModelManager {
         need: u64,
         unloads: Option<u64>,
         started: Instant,
-        result: Result<Result<LoadedModel, LoadError>, tokio::task::JoinError>,
+        result: Result<Result<LoadedModel, ManagerError>, tokio::task::JoinError>,
     ) -> Result<Guard, ManagerError> {
         let loaded = match result {
             Ok(Ok(loaded)) => loaded,
             Ok(Err(e)) => {
                 self.lock().slots.remove(&name);
-                return Err(ManagerError::Load(e));
+                return Err(e);
             }
             Err(e) => {
                 self.lock().slots.remove(&name);

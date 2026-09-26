@@ -14,9 +14,10 @@
 //! Before promoting, a pull also takes the lock of each model its manifest
 //! `requires` and checks it is still installed, holding those locks through
 //! the rename, so a concurrent `rm` of a requirement either fails the pull
-//! or sees the new model and refuses. Locks are only ever taken from a model
-//! to its `requires` (never the reverse), and `requires` has no cycles, so
-//! this cannot deadlock.
+//! or sees the new model and refuses. A model load holds its own model's
+//! lock (`while_pulled`), so `rm` never deletes files under a load. Locks
+//! are only ever taken from a model to its `requires` (never the reverse),
+//! and `requires` has no cycles, so this cannot deadlock.
 
 pub mod manifest;
 
@@ -374,6 +375,20 @@ impl Registry {
         force: bool,
         also_removing: &[String],
     ) -> Result<(), RegistryError> {
+        self.remove_with(name, force, also_removing, || true)
+            .map(|_| ())
+    }
+
+    /// `remove`, calling `before_delete` under the model's lock once the
+    /// `requires` check has passed and before any file goes. If it returns
+    /// false nothing is removed, and neither is the result.
+    pub fn remove_with(
+        &self,
+        name: &str,
+        force: bool,
+        also_removing: &[String],
+        before_delete: impl FnOnce() -> bool,
+    ) -> Result<bool, RegistryError> {
         let _lock = self.lock_pulled(name)?;
         if !force {
             let mut by = Vec::new();
@@ -394,6 +409,9 @@ impl Registry {
                 });
             }
         }
+        if !before_delete() {
+            return Ok(false);
+        }
         // Dropping `manifest.json` first uninstalls the model in one step;
         // a leftover directory is what `promote` already replaces.
         let dir = self.model_dir(name);
@@ -401,7 +419,15 @@ impl Registry {
         std::fs::remove_file(&json)
             .map_err(RegistryError::io(format!("remove {}", json.display())))?;
         std::fs::remove_dir_all(&dir)
-            .map_err(RegistryError::io(format!("remove {}", dir.display())))
+            .map_err(RegistryError::io(format!("remove {}", dir.display())))?;
+        Ok(true)
+    }
+
+    /// Runs `f` under the model's lock while it is pulled, so a `remove`
+    /// cannot delete its files meanwhile.
+    pub fn while_pulled<T>(&self, name: &str, f: impl FnOnce() -> T) -> Result<T, RegistryError> {
+        let _lock = self.lock_pulled(name)?;
+        Ok(f())
     }
 
     /// Re-hashes every `[[file]]` of a pulled model against the manifest it

@@ -292,37 +292,50 @@ async fn pull(State(st): State<Arc<AppState>>, body: Bytes) -> Result<Response, 
 }
 
 /// §2.5 `DELETE /api/models/{name}`: 409 `model_in_use` while the model is
-/// loaded and busy (or loading); an idle loaded model is unloaded first. A
-/// catalog model that is not pulled is 404: there is nothing to delete, and
-/// the usual `model_not_pulled` advice (pull it) is wrong here.
+/// loaded and busy (or loading); an idle loaded model is unloaded first,
+/// under the model's registry lock and only once no other pulled model
+/// `requires` it. A catalog model that is not pulled is 404: there is
+/// nothing to delete, and the usual `model_not_pulled` advice (pull it) is
+/// wrong here.
 async fn remove(
     State(st): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    st.models.unload(&name, "rm").map_err(|_| ApiError {
-        param: Some("model"),
-        ..ApiError::new(
-            StatusCode::CONFLICT,
-            "model_in_use",
-            format!("the model \"{name}\" is loaded and busy; try again once its requests finish"),
-        )
+    let (registry, models) = (st.registry.clone(), st.models.clone());
+    let removed = {
+        let name = name.clone();
+        // `remove` waits on the model's lock, which a pull may hold for
+        // minutes. A load holds it too, so no reload can slip in between
+        // the unload and the deletion (see `ModelManager::acquire`).
+        tokio::task::spawn_blocking(move || {
+            registry.remove_with(&name, false, &[], || models.unload(&name, "rm").is_ok())
+        })
+    }
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
+    .map_err(|e| match e {
+        RegistryError::NotPulled(name) => ApiError {
+            param: Some("model"),
+            ..ApiError::new(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                format!("the model \"{name}\" is not pulled; see GET /v1/models?pulled=true"),
+            )
+        },
+        e => registry_error(e),
     })?;
-    let registry = st.registry.clone();
-    // `remove` waits on the model's lock, which a pull may hold for minutes.
-    tokio::task::spawn_blocking(move || registry.remove(&name, false, &[]))
-        .await
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
-        .map_err(|e| match e {
-            RegistryError::NotPulled(name) => ApiError {
-                param: Some("model"),
-                ..ApiError::new(
-                    StatusCode::NOT_FOUND,
-                    "model_not_found",
-                    format!("the model \"{name}\" is not pulled; see GET /v1/models?pulled=true"),
-                )
-            },
-            e => registry_error(e),
-        })?;
+    if !removed {
+        return Err(ApiError {
+            param: Some("model"),
+            ..ApiError::new(
+                StatusCode::CONFLICT,
+                "model_in_use",
+                format!(
+                    "the model \"{name}\" is loaded and busy; try again once its requests finish"
+                ),
+            )
+        });
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -436,6 +449,7 @@ fn manager_error(st: &AppState, req_id: &str, e: ManagerError) -> ApiError {
             };
             ApiError::new(StatusCode::SERVICE_UNAVAILABLE, code, e.to_string())
         }
+        ManagerError::Registry(e) => registry_error(e),
         ManagerError::Internal(message) => transcriptions::internal(st, req_id, message),
     }
 }

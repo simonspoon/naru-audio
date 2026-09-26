@@ -383,6 +383,7 @@ fn loading_past_the_budget_with_a_busy_model_is_507() {
     let (status, body) = server.request("DELETE", "/api/models/a", "text/plain", b"");
     assert_eq!(status, 409, "{body}");
     assert_eq!(body["error"]["code"], "model_in_use");
+    assert!(home.path().join("models/a/manifest.json").is_file());
 
     decode.open();
     let (status, body) = busy.join().unwrap();
@@ -398,6 +399,60 @@ fn loading_past_the_budget_with_a_busy_model_is_507() {
         204
     );
     assert!(server.loaded().is_empty());
+}
+
+/// A `DELETE` refused because another pulled model `requires` the model
+/// leaves it loaded: the unload only runs once that check has passed.
+#[test]
+fn delete_of_a_required_model_keeps_it_loaded() {
+    let home = home();
+    let c = home.path().join("models").join("c");
+    std::fs::create_dir_all(&c).unwrap();
+    let manifest = json!({"model": {
+        "name": "c", "kind": "stt", "backend": "sherpa-onnx", "languages": ["en"],
+        "requires": ["a"],
+    }});
+    std::fs::write(c.join("manifest.json"), manifest.to_string()).unwrap();
+    let loader = FakeLoader::new(Gate::new(false), Gate::new(false));
+    let server = Server::start(home.path(), loader);
+
+    assert_eq!(server.load(json!({"model": "a"})).0, 200);
+    let (status, body) = server.request("DELETE", "/api/models/a", "text/plain", b"");
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], "model_required");
+    assert_eq!(server.loaded(), ["a"]);
+    assert!(home.path().join("models/a/manifest.json").is_file());
+}
+
+/// A `DELETE` during a load waits for it (the load holds the model's
+/// registry lock), then finds the model busy: 409, files kept.
+#[test]
+fn delete_during_a_load_is_409_and_keeps_the_files() {
+    let home = home();
+    let (load, decode) = (Gate::new(true), Gate::new(true));
+    let loader = FakeLoader::new(load.clone(), decode.clone());
+    let server = Arc::new(Server::start(home.path(), loader));
+
+    let busy = {
+        let server = server.clone();
+        thread::spawn(move || server.transcribe(&[("model", "a")]))
+    };
+    load.reached(1);
+    let delete = {
+        let server = server.clone();
+        thread::spawn(move || server.request("DELETE", "/api/models/a", "text/plain", b""))
+    };
+    // Give the `DELETE` time to block on the lock the load holds.
+    thread::sleep(Duration::from_millis(200));
+    assert!(!delete.is_finished(), "DELETE did not wait for the load");
+    load.open();
+    let (status, body) = delete.join().unwrap();
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], "model_in_use");
+    assert!(home.path().join("models/a/manifest.json").is_file());
+
+    decode.open();
+    assert_eq!(busy.join().unwrap().0, 200);
 }
 
 /// Acceptance: `keep_alive: 0` unloads, from `/api/load` and per request.

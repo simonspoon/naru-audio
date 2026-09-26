@@ -1005,11 +1005,12 @@ fn a_posted_clip_becomes_a_cloned_voice() {
             .collect()
     };
     assert_eq!(names(&home_dir.join("voices")), ["amy"]);
-    assert!(
-        names(&home_dir.join("tmp")).is_empty(),
-        "{:?}",
-        names(&home_dir.join("tmp"))
-    );
+    // A model load leaves its registry lock file, which is never unlinked.
+    let uploads: Vec<String> = names(&home_dir.join("tmp"))
+        .into_iter()
+        .filter(|n| !n.ends_with(".lock"))
+        .collect();
+    assert!(uploads.is_empty(), "{uploads:?}");
 }
 
 fn say(url: &str, args: &[&str], stdin: Option<&[u8]>) -> Output {
