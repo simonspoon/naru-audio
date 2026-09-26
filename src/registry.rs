@@ -11,6 +11,12 @@
 //! A per-model `tmp/<name>.lock` (an advisory `flock`, so it holds across
 //! threads and processes) serialises pulls: whoever waited finds the model
 //! installed and does nothing. `remove` and `verify` take the same lock.
+//! Before promoting, a pull also takes the lock of each model its manifest
+//! `requires` and checks it is still installed, holding those locks through
+//! the rename, so a concurrent `rm` of a requirement either fails the pull
+//! or sees the new model and refuses. Locks are only ever taken from a model
+//! to its `requires` (never the reverse), and `requires` has no cycles, so
+//! this cannot deadlock.
 
 pub mod manifest;
 
@@ -511,8 +517,17 @@ impl Registry {
         std::fs::create_dir_all(&staging)
             .map_err(RegistryError::io(format!("create {}", staging.display())))?;
 
-        let result =
-            stage(m, &staging, progress).and_then(|()| promote(&staging, &self.model_dir(name)));
+        let result = stage(m, &staging, progress).and_then(|()| {
+            // A `rm` of a requirement may have run while we staged; its locks
+            // are held until `promote` is done (see the module doc).
+            let _requires = m
+                .model
+                .requires
+                .iter()
+                .map(|r| self.lock_pulled(r))
+                .collect::<Result<Vec<_>, _>>()?;
+            promote(&staging, &self.model_dir(name))
+        });
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&staging);
         }

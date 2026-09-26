@@ -336,9 +336,12 @@ Every non-2xx HTTP response uses OpenAI's envelope:
 | 400 | `invalid_request` / `unsupported_value` / `unknown_voice` | A field is malformed or has an unsupported value (`param` names the field). |
 | 403 | `forbidden_origin` / `forbidden_host` | The Host or Origin guard (§2.1) rejected the request. |
 | 404 | `model_not_found` | The name is in neither the catalog nor the user catalog. |
+| 404 | `not_found` | No route for the path. |
 | 404 | `voice_not_found` | `GET /v1/audio/voices/{name}` with no cloned voice of that name. |
+| 405 | `method_not_allowed` | The route exists but not for this method. |
 | 409 | `model_not_pulled` | Known but not downloaded. The message gives the exact `naru-audio pull` command. The daemon **never auto-pulls** on an inference request. |
 | 409 | `model_in_use` | `rm` of a busy model. |
+| 409 | `model_required` | `rm` of a model another pulled model `requires` (§3.2). |
 | 409 | `voice_exists` | `POST /v1/audio/voices` with a name already taken. |
 | 413 | `payload_too_large` | Input over 256 MiB or 10 minutes, or text over 16 384 chars. |
 | 415 | `unsupported_media_type` | The audio is not WAV, or a voice clip `afconvert` cannot read. |
@@ -346,6 +349,7 @@ Every non-2xx HTTP response uses OpenAI's envelope:
 | 503 | `model_load_failed` | The files are present but the backend rejected them (bad sha after tampering, ORT error). |
 | 507 | `insufficient_memory` | The model cannot fit in the budget even after evicting idle models (§3.5). |
 | 500 | `internal` | A bug. The log has a request id, and the response carries `X-Request-Id`. |
+| — | `pull_failed` | In-stream, not an HTTP status: the `{"error":…}` line (`type` `server_error`) that ends a `POST /api/pull` NDJSON stream after a failure. The response itself is already 200. |
 
 Every response carries `X-Request-Id`. WebSocket errors use the same `code`
 strings inside `{"type":"error"}`.

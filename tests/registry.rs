@@ -238,6 +238,42 @@ fn requires_are_pulled_first() {
     assert_eq!(stub.hits().len(), 2);
 }
 
+/// `rm vad` while `stt` (which requires it) is staging must not leave `stt`
+/// installed without `vad`: the removal runs from the progress callback, after
+/// `stt`'s lock is taken and before its promote.
+#[test]
+fn requirement_removed_while_staging_fails_the_pull() {
+    let vad = b"silero".to_vec();
+    let enc = b"parakeet".to_vec();
+    let stub = Stub::start(
+        &[("/vad.onnx", vad.clone()), ("/enc.onnx", enc.clone())],
+        Duration::ZERO,
+    );
+    let dir = home(&[
+        model_header("stt", &["vad"]) + &file_entry("enc.onnx", &stub.url("/enc.onnx"), &enc),
+        model_header("vad", &[]) + &file_entry("vad.onnx", &stub.url("/vad.onnx"), &vad),
+    ]);
+
+    let reg = Registry::open(dir.path()).unwrap();
+    reg.pull("vad").unwrap();
+    let mut removed = false;
+    let err = reg
+        .pull_with("stt", false, &mut |_| {
+            if !removed {
+                reg.remove("vad", false, &[]).unwrap();
+                removed = true;
+            }
+        })
+        .unwrap_err();
+    assert!(removed);
+    assert!(
+        matches!(&err, RegistryError::NotPulled(name) if name == "vad"),
+        "{err}"
+    );
+    assert!(!reg.is_installed("stt") && !reg.is_installed("vad"));
+    assert_nothing_left(dir.path());
+}
+
 #[test]
 fn requires_cycle_is_an_error() {
     let dir = home(&[model_header("a", &["b"]), model_header("b", &["a"])]);
