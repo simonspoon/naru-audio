@@ -267,6 +267,9 @@ async fn main() -> ExitCode {
     let addr = listener.local_addr().unwrap_or(listen);
     let log = Arc::new(log);
     log.info(None, &format!("listening addr={addr}"));
+    // Before any model load can start the sidecar.
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    naru_audio::mlx::refresh_scripts(registry.home(), &log);
 
     let models = ModelManager::new(
         registry.clone(),

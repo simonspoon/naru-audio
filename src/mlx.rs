@@ -7,6 +7,7 @@ pub mod sidecar;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::log::Logger;
 use crate::registry::{config_path, read_config};
 
 /// Written into `<home>/mlx/` by `mlx setup`; `python -m naru_audio_mlx`
@@ -72,6 +73,47 @@ pub fn setup(home: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("cannot resolve the venv's python: {e}"))?;
     write_python(home, &python)?;
     Ok(python)
+}
+
+/// Serve startup: brings the sidecar's deployed Python (`naru_audio_mlx/`)
+/// up to the embedded copy, so an upgraded daemon does not run stale
+/// scripts. Only differing (or missing) files are rewritten, each through a
+/// tmp file and a rename. A changed `pyproject.toml` or `uv.lock` needs
+/// `uv sync`, which this does not run: it only warns. Without `<home>/mlx/`
+/// (`mlx setup` never ran) it does nothing. Failures are logged, not fatal.
+pub fn refresh_scripts(home: &Path, log: &Logger) {
+    let dir = dir(home);
+    if !dir.is_dir() {
+        return;
+    }
+    for (name, text) in FILES {
+        let path = dir.join(name);
+        if std::fs::read(&path).is_ok_and(|deployed| deployed == text.as_bytes()) {
+            continue;
+        }
+        if !name.starts_with("naru_audio_mlx/") {
+            log.line(
+                "warn",
+                None,
+                &format!("mlx_env_stale file={name} run=`naru-audio mlx setup`"),
+            );
+            continue;
+        }
+        let tmp = path.with_extension("py.tmp");
+        let written = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&tmp, text))
+            .and_then(|()| std::fs::rename(&tmp, &path));
+        match written {
+            Ok(()) => log.info(None, &format!("mlx_script_refreshed file={name}")),
+            Err(e) => log.line(
+                "warn",
+                None,
+                &format!("mlx_script_refresh_failed file={name} error={e}"),
+            ),
+        }
+    }
 }
 
 /// `mlx status`: the recorded interpreter, if any, and whether it runs the
@@ -167,6 +209,58 @@ mod tests {
         let config = read_config(home.path()).unwrap();
         assert_eq!(config["memory"]["max_resident"].as_str(), Some("8GiB"));
         assert_eq!(config["mlx"]["other"].as_integer(), Some(1));
+    }
+
+    #[test]
+    fn refreshing_rewrites_only_stale_scripts_and_warns_on_a_stale_env() {
+        let home = tempfile::tempdir().unwrap();
+        let log_path = home.path().join("log");
+        let log = Logger::file(&log_path, u64::MAX).unwrap();
+        let dir = dir(home.path());
+        std::fs::create_dir_all(dir.join("naru_audio_mlx")).unwrap();
+        let embedded = |name: &str| FILES.iter().find(|(n, _)| *n == name).unwrap().1;
+        std::fs::write(dir.join("pyproject.toml"), "stale").unwrap();
+        std::fs::write(dir.join("uv.lock"), embedded("uv.lock")).unwrap();
+        let init = dir.join("naru_audio_mlx/__init__.py");
+        std::fs::write(&init, embedded("naru_audio_mlx/__init__.py")).unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&init)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let main = dir.join("naru_audio_mlx/__main__.py");
+        std::fs::write(&main, "print('stale')\n").unwrap();
+
+        refresh_scripts(home.path(), &log);
+
+        assert_eq!(
+            std::fs::read(&main).unwrap(),
+            embedded("naru_audio_mlx/__main__.py").as_bytes()
+        );
+        // Missing counts as stale.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("naru_audio_mlx/protocol.py")).unwrap(),
+            embedded("naru_audio_mlx/protocol.py")
+        );
+        assert_eq!(std::fs::metadata(&init).unwrap().modified().unwrap(), old);
+        // The environment files are never rewritten, only warned about.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pyproject.toml")).unwrap(),
+            "stale"
+        );
+        let logged = std::fs::read_to_string(&log_path).unwrap();
+        assert!(logged.contains("mlx_env_stale file=pyproject.toml"));
+        assert!(!logged.contains("file=uv.lock"));
+        assert!(!logged.contains("file=naru_audio_mlx/__init__.py"));
+    }
+
+    #[test]
+    fn refreshing_without_setup_creates_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        refresh_scripts(home.path(), &Logger::stderr());
+        assert!(!dir(home.path()).exists());
     }
 
     #[test]
