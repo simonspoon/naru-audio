@@ -126,10 +126,14 @@ Design lessons, used in §4:
 - DNS-rebinding and drive-by guards: by default `Host` must be `127.0.0.1:<port>`,
   `localhost:<port>` or `[::1]:<port>`. `--allow-remote` **skips the Host
   check**, since LAN clients send the machine's LAN name or address; this is
-  exactly what Naru's `--lan` does (naru/src/cli.rs:160–161). A request carrying an `Origin`
-  header gets 403 unless the origin is in `allowed_origins` (empty by
-  default). Browsers therefore reach the daemon **through Naru** (§6.2), which
-  keeps its own access gates.
+  exactly what Naru's `--lan` does (naru/src/cli.rs:160–161). A request carrying
+  an `Origin` header (a browser fetch or WebSocket) is allowed only when the
+  origin's authority is exactly the `Host` it arrived on — same-origin, case-
+  insensitively — and that `Host` is itself allowed; with `--allow-remote` the
+  Host check is skipped but the Origin/Host match is still required. Anything
+  else, including a cross-site `Origin`, is 403 `forbidden_origin`. This is
+  what lets `/admin` (§3) — served same-origin by this daemon — call its own
+  API from the browser, while a page on another site still cannot.
 
 Two namespaces: `/v1/*` is OpenAI-compatible; `/api/*` is native and
 Ollama-shaped (registry, load state).

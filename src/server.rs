@@ -2,6 +2,7 @@
 //! streaming transcriptions, §2.5 `/health`, voices and registry routes,
 //! §2.6 errors, `X-Request-Id`.
 
+mod admin;
 mod pulls;
 mod speech;
 mod stream;
@@ -103,6 +104,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ps", get(ps))
         .route("/api/load", post(load))
         .route("/api/defaults", get(get_defaults).put(put_defaults))
+        .route("/admin", get(admin::index))
+        .route("/admin/", get(admin::index))
+        .route("/admin/{*path}", get(admin::asset))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), guard))
@@ -806,9 +810,23 @@ async fn guard(State(st): State<Arc<AppState>>, mut req: Request, next: Next) ->
 }
 
 fn rejection(st: &AppState, req: &Request) -> Option<ApiError> {
-    // `allowed_origins` is empty by default and there is no config yet, so
-    // any Origin is refused.
-    if let Some(origin) = req.headers().get(ORIGIN) {
+    // The URI authority stands in only when there is no Host header at all;
+    // an unreadable or repeated Host is refused.
+    let mut hosts = req.headers().get_all(HOST).iter();
+    let host = match (hosts.next(), hosts.next()) {
+        (None, _) => req.uri().authority().map(|a| a.as_str()),
+        (Some(h), None) => h.to_str().ok(),
+        (Some(_), Some(_)) => None,
+    };
+
+    // An `Origin` header is only ever sent by a browser (fetch, WebSocket).
+    // The admin UI is served from this same origin, so its requests carry
+    // `Origin: http://<Host>` back to us; anything else — a cross-site page,
+    // or an `Origin` that doesn't match the `Host` we were reached on — is
+    // refused, the same as a bad `Host`.
+    if let Some(origin) = req.headers().get(ORIGIN)
+        && !origin_allowed(st, origin.as_bytes(), host)
+    {
         return Some(ApiError::new(
             StatusCode::FORBIDDEN,
             "forbidden_origin",
@@ -821,14 +839,6 @@ fn rejection(st: &AppState, req: &Request) -> Option<ApiError> {
     if st.allow_remote {
         return None;
     }
-    // The URI authority stands in only when there is no Host header at all;
-    // an unreadable or repeated Host is refused.
-    let mut hosts = req.headers().get_all(HOST).iter();
-    let host = match (hosts.next(), hosts.next()) {
-        (None, _) => req.uri().authority().map(|a| a.as_str()),
-        (Some(h), None) => h.to_str().ok(),
-        (Some(_), Some(_)) => None,
-    };
     match host {
         Some(h) if host_allowed(h, st.port) => None,
         _ => Some(ApiError::new(
@@ -842,6 +852,24 @@ fn rejection(st: &AppState, req: &Request) -> Option<ApiError> {
             ),
         )),
     }
+}
+
+/// §2.1: an `Origin` is allowed only when its authority is exactly the
+/// `Host` the request came in on (case-insensitively) — same-origin, never
+/// cross-site — and that `Host` is itself allowed: one of the loopback
+/// names, unless `--allow-remote`, which trusts whatever `Host` the server
+/// and browser agree on.
+fn origin_allowed(st: &AppState, origin: &[u8], host: Option<&str>) -> bool {
+    let (Ok(origin), Some(host)) = (std::str::from_utf8(origin), host) else {
+        return false;
+    };
+    let Some(authority) = origin.strip_prefix("http://") else {
+        return false;
+    };
+    if !authority.eq_ignore_ascii_case(host) {
+        return false;
+    }
+    st.allow_remote || host_allowed(host, st.port)
 }
 
 fn host_allowed(host: &str, port: u16) -> bool {
@@ -961,6 +989,79 @@ mod tests {
             assert_envelope(&body, "forbidden_origin");
             assert!(id.is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn same_origin_get_is_allowed() {
+        let req = get_req("/health", "127.0.0.1:7870")
+            .header(ORIGIN, "http://127.0.0.1:7870")
+            .body(Body::empty())
+            .unwrap();
+        let (status, id, body) = send(app(false), req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(id.is_some());
+    }
+
+    #[tokio::test]
+    async fn same_origin_post_is_allowed() {
+        // A cross-origin `Origin` used to be a blanket 403 for every
+        // method; a same-origin POST (what the admin UI's `fetch` calls
+        // send) must reach the handler instead of being rejected on
+        // Origin grounds. `/api/pull` with an unknown model still fails,
+        // but for `model_not_pulled`/`model_not_found`, never
+        // `forbidden_origin`.
+        let req = Request::post("/api/pull")
+            .header(HOST, "127.0.0.1:7870")
+            .header(ORIGIN, "http://127.0.0.1:7870")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"model":"nonexistent-model"}"#))
+            .unwrap();
+        let (status, id, body) = send(app(false), req).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(id.is_some());
+    }
+
+    #[tokio::test]
+    async fn same_origin_websocket_upgrade_is_not_rejected_on_origin() {
+        // No real WebSocket handshake in a `oneshot` test, but the guard
+        // must not be the reason a same-origin upgrade fails: it should
+        // run past `rejection()` into the stream handler.
+        let req = Request::get("/v1/audio/transcriptions/stream")
+            .header(HOST, "127.0.0.1:7870")
+            .header(ORIGIN, "http://127.0.0.1:7870")
+            .header("upgrade", "websocket")
+            .header("connection", "upgrade")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+            .unwrap();
+        let (status, id, body) = send(app(false), req).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(id.is_some());
+    }
+
+    #[tokio::test]
+    async fn cross_site_origin_with_matching_style_host_is_still_403() {
+        // `evil.test:7870` naming itself as both `Host` and `Origin`
+        // authority is same-origin by our rule, but `evil.test` is not a
+        // loopback name, so it is still refused without `--allow-remote`.
+        let req = get_req("/health", "evil.test:7870")
+            .header(ORIGIN, "http://evil.test:7870")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = send(app(false), req).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_envelope(&body, "forbidden_origin");
+    }
+
+    #[tokio::test]
+    async fn allow_remote_permits_origin_matching_non_loopback_host() {
+        let req = get_req("/health", "evil.test:7870")
+            .header(ORIGIN, "http://evil.test:7870")
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = send(app(true), req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     #[tokio::test]
