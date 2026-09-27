@@ -97,6 +97,15 @@ async fn delete(home: &Path, name: &str) -> (StatusCode, Vec<u8>) {
     (status, body)
 }
 
+async fn delete_voice(home: &Path, name: &str) -> (StatusCode, Vec<u8>) {
+    let req = Request::delete(format!("/v1/audio/voices/{name}"))
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(app(home), req).await;
+    (status, body)
+}
+
 fn error_code(body: &[u8]) -> Value {
     serde_json::from_slice::<Value>(body).unwrap()["error"]["code"].clone()
 }
@@ -441,6 +450,64 @@ async fn a_path_traversal_name_is_refused() {
     let (status, body) = get_json(dir.path(), "/v1/audio/voices/../x").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
+}
+
+/// `DELETE /v1/audio/voices/{name}` removes a cloned voice's directory;
+/// the listing no longer has it. Unknown names are a 404, a bad name a
+/// 400 (as `GET` and `POST` have it), and a built-in voice, never in
+/// `voices/`, is refused rather than answered as merely unknown.
+#[tokio::test]
+async fn delete_removes_a_cloned_voice_or_refuses() {
+    let dir = home(&[]);
+    let model = dir.path().join("models/fake-clone");
+    std::fs::create_dir_all(&model).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-clone", "kind": "tts", "backend": "sherpa-onnx"},
+        "backend": {"sherpa-onnx": {"clone": true}},
+    });
+    std::fs::write(model.join("manifest.json"), manifest.to_string()).unwrap();
+    add_voice(dir.path(), "amy", b"RIFF", "Hi.");
+
+    // Unknown name: 404, same code `GET` uses.
+    let (status, body) = delete_voice(dir.path(), "nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "voice_not_found");
+
+    // A built-in voice (kokoro's, from the catalog, never a directory
+    // under `voices/`) is refused, not merely reported unknown.
+    let (status, body) = delete_voice(dir.path(), "af_heart").await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(error_code(&body), "builtin_voice");
+
+    // A bad name is a 400, as the other voice routes have it.
+    let (status, body) = delete_voice(dir.path(), "..%2Fetc").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_code(&body), "invalid_request");
+    assert!(dir.path().join("voices/amy").is_dir());
+
+    // The real thing: removed, and gone from the listing.
+    let (status, body) = delete_voice(dir.path(), "amy").await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert!(body.is_empty());
+    assert!(!dir.path().join("voices/amy").exists());
+    let (status, body) = get_json(dir.path(), "/v1/audio/voices?model=fake-clone").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["voices"], json!([]));
+
+    // Already gone: a repeat is a 404, not success again.
+    let (status, body) = delete_voice(dir.path(), "amy").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "voice_not_found");
 }
 
 #[tokio::test]

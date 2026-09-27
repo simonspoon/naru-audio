@@ -209,6 +209,24 @@ pub fn add(home: &Path, name: &str, clip: &Path, text: &str) -> Result<f64, AddE
     result
 }
 
+/// Removes the cloned voice `name` from `home`, whether or not it is
+/// complete (an `add` left half-done, say). Returns whether it existed.
+/// An invalid name, as `find` treats it, is just not found. Used by
+/// `DELETE /v1/audio/voices/{name}`; there is no `voice rm` yet, as
+/// there is no `voice list` either.
+pub fn remove(home: &Path, name: &str) -> Result<bool, String> {
+    if check_name(name).is_err() {
+        return Ok(false);
+    }
+    let voice = dir(home).join(name);
+    if !voice.is_dir() {
+        return Ok(false);
+    }
+    std::fs::remove_dir_all(&voice)
+        .map_err(|e| format!("remove {}: {e}", voice.display()))
+        .map(|()| true)
+}
+
 /// `afconvert`s `clip` to `wav` and returns its length in seconds.
 fn convert(clip: &Path, wav: &Path) -> Result<f64, AddError> {
     let out = Command::new("afconvert")
@@ -285,6 +303,24 @@ mod tests {
         for name in ["no-text", "no-wav", "nope", "../models/voices/x", ".tmp"] {
             assert_eq!(find(home.path(), name), None, "{name}");
         }
+    }
+
+    #[test]
+    fn remove_deletes_the_directory_and_ignores_what_is_already_gone() {
+        let home = tempfile::tempdir().unwrap();
+        voice(home.path(), "amy", &[REF_WAV, REF_TXT]);
+        voice(home.path(), "half", &[REF_WAV]);
+
+        assert_eq!(remove(home.path(), "amy"), Ok(true));
+        assert!(find(home.path(), "amy").is_none());
+        assert!(!dir(home.path()).join("amy").exists());
+        // Already gone, and never there: no error either way.
+        assert_eq!(remove(home.path(), "amy"), Ok(false));
+        assert_eq!(remove(home.path(), "nope"), Ok(false));
+        // Incomplete voices are removed all the same.
+        assert_eq!(remove(home.path(), "half"), Ok(true));
+        // A bad name, as if path traversal were tried: not found either.
+        assert_eq!(remove(home.path(), "../etc"), Ok(false));
     }
 
     #[test]

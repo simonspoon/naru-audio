@@ -1,5 +1,5 @@
 //! §2.3 `POST /v1/audio/speech`, §2.5 `GET`/`POST /v1/audio/voices` and
-//! `GET /v1/audio/voices/{name}`.
+//! `GET`/`DELETE /v1/audio/voices/{name}`.
 //!
 //! Speech checks run cheapest first: the JSON fields, then the model
 //! (404/409/400) and the voice against its manifest, and only then the load.
@@ -554,6 +554,54 @@ pub(super) async fn voice_export(
     Ok(Json(
         json!({"name": name, "text": text, "wav_base64": STANDARD.encode(wav)}),
     ))
+}
+
+/// §2.5 `DELETE /v1/audio/voices/{name}`: removes a cloned voice's
+/// directory. A bad name is a 400, as `GET` and
+/// `POST` have it. A name that is a built-in voice of some catalog
+/// model (never in `voices/`) is a 409: there is nothing cloned to
+/// remove, and it is not this route's place to touch a manifest's
+/// `[[voice]]`s. Anything else unknown is a 404.
+pub(super) async fn delete_voice(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    voices::check_name(&name).map_err(|m| bad_request("name", "invalid_request", m))?;
+    if st
+        .registry
+        .catalog()
+        .models
+        .values()
+        .any(|m| m.voices.iter().any(|v| v.id == name))
+    {
+        return Err(ApiError {
+            param: Some("name"),
+            ..ApiError::new(
+                StatusCode::CONFLICT,
+                "builtin_voice",
+                format!("{name:?} is a built-in voice; only cloned voices can be removed"),
+            )
+        });
+    }
+    let removed = {
+        let (home, name) = (st.registry.home().to_path_buf(), name.clone());
+        tokio::task::spawn_blocking(move || voices::remove(&home, &name))
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?
+    .map_err(|m| internal(&st, &req_id, m))?;
+    if !removed {
+        return Err(ApiError {
+            param: Some("name"),
+            ..ApiError::new(
+                StatusCode::NOT_FOUND,
+                "voice_not_found",
+                format!("there is no cloned voice {name:?}"),
+            )
+        });
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// §2.5 `POST /v1/audio/voices`: the multipart fields `name`, `file` (the
