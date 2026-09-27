@@ -125,7 +125,12 @@ pub async fn asset(Path(path): Path<String>) -> Response {
 /// cache buys nothing and only confuses a `naru-audio` upgrade), no MIME
 /// sniffing, and a CSP scoped to what the admin UI actually does — no
 /// build step, no third-party origins, audio playback from `blob:` object
-/// URLs, and the plain WebSocket the streaming STT tab will use.
+/// URLs, the plain WebSocket the streaming STT tab will use, and
+/// `style-src 'unsafe-inline'` because every `.mjs` module styles elements
+/// with a `style=""` attribute built from app data (dot colors, waveform
+/// bars, layout) rather than a stylesheet class per state; none of it is
+/// user-controlled text, so it carries none of the injection risk
+/// `unsafe-inline` script would (`script-src` stays plain `'self'`).
 fn asset_response(content_type: &'static str, bytes: &'static [u8]) -> Response {
     let mut resp = bytes.into_response();
     let headers = resp.headers_mut();
@@ -138,7 +143,7 @@ fn asset_response(content_type: &'static str, bytes: &'static [u8]) -> Response 
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; media-src 'self' blob:; connect-src 'self' ws: wss:",
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; connect-src 'self' ws: wss:",
         ),
     );
     resp

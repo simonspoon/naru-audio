@@ -135,7 +135,11 @@ export function peaks(samples, bars = 70) {
   return out;
 }
 
-/** Renders `peaks()` output as the mockup's `<svg class="wv">` bar chart. */
+/** Renders `peaks()` output as the mockup's `<svg class="wv">` bar chart.
+ * `el()` can't build this: `document.createElement('svg'/'rect')` makes
+ * HTML-namespace elements that never paint, so the root is created with
+ * `createElementNS` instead — that gives `innerHTML` the right namespace
+ * context to parse the `<rect>` markup as real SVG shapes. */
 export function waveformSvg(peakValues) {
   const w = peakValues.length * 4;
   const h = 28;
@@ -146,11 +150,10 @@ export function waveformSvg(peakValues) {
       return `<rect x="${i * 4}" y="${y.toFixed(2)}" width="2" height="${barH.toFixed(2)}" rx="1"/>`;
     })
     .join('');
-  const svg = el('svg', {
-    class: 'wv',
-    viewBox: `0 0 ${w} ${h}`,
-    preserveAspectRatio: 'none',
-  });
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'wv');
+  svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
   svg.innerHTML = bars;
   return svg;
 }

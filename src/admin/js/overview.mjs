@@ -57,6 +57,7 @@ export function mount(view) {
     const label = [m.id];
     if (m.x_default) label.push(' ', el('span', { class: 'star' }, ['★']));
     if (m.x_kind !== 'tts') label.push(` · ${m.x_kind.toUpperCase()}`);
+    if (m.x_non_commercial) label.push(' ', el('small', { style: 'color:var(--amber)' }, ['NC']));
     return el('div', { class: 'row' }, [
       el('span', { class: 'dot', style: dotStyle }),
       el('b', {}, label),
@@ -150,7 +151,8 @@ export function mount(view) {
         objectUrl = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
         card.append(waveformSvg(peaks(decodeWav(buffer).samples)));
       } else {
-        card.append(el('div', { class: 'wave-placeholder' }));
+        const placeholder = el('div', { class: 'wave-placeholder' });
+        card.append(placeholder);
         if (!voice.cloned) {
           card.append(
             el(
@@ -159,11 +161,18 @@ export function mount(view) {
                 class: 'btn v',
                 onclick: async (e) => {
                   e.stopPropagation();
+                  const btn = e.currentTarget;
+                  btn.disabled = true;
                   try {
-                    await fetch(`${sampleUrl}?generate=true`);
-                    toast(`generating preview for ${voice.id}…`);
+                    const genRes = await fetch(sampleUrl, { method: 'POST' });
+                    if (!genRes.ok) throw new Error('generate failed');
+                    const buffer = await genRes.arrayBuffer();
+                    objectUrl = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+                    placeholder.replaceWith(waveformSvg(peaks(decodeWav(buffer).samples)));
+                    btn.remove();
                   } catch {
-                    toast('failed to start preview generation', true);
+                    toast('failed to generate preview', true);
+                    btn.disabled = false;
                   }
                 },
               },
