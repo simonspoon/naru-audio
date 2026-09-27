@@ -1,11 +1,23 @@
 // Clone tab (mockup: na-admin-clone): pick a clone-capable model, get a
-// single-speaker sample (drop/browse a file or record one), trim it to
-// 5-15 s (the server accepts 3-30), auto-transcribe the trimmed clip,
-// name it, and create the voice. The right panel plays the original and
-// previews the clone saying a test line before anything is saved.
+// single-speaker sample (drop/browse a file, record one, or pick one from
+// the samples library — naru task 1463), trim it to 5-15 s (the server
+// accepts 3-30), auto-transcribe the trimmed clip, name it, and create the
+// voice. The right panel plays the original and previews the clone saying
+// a test line before anything is saved.
 //
-// Exposes `window.naruAdmin.clone.loadFile(file)` so a headless test
-// without a file picker can drive the drop path directly.
+// A dropped/recorded file is a *raw* clip: it is uploaded to
+// `POST /v1/audio/prep/clips` and handed to the samples tab
+// (`#samples?clip=<id>&return=clone&model=<model>`) to go through voice-prep
+// first, rather than trimmed here directly. Picking a sample from the
+// library, by contrast, is already a cleaned single-speaker clip: its audio
+// is fetched and loaded through the same local decode/trim path as before,
+// and its saved transcript pre-fills the transcript box (skipping
+// auto-transcribe) unless the sample has none, in which case auto-transcribe
+// runs as it does for a fresh recording.
+//
+// Exposes `window.naruAdmin.clone.loadFile(file)` and
+// `window.naruAdmin.clone.pickSample(id)` so a headless test without a file
+// picker or a live samples library can drive either path directly.
 
 import { getJson, request } from './api.mjs';
 import { el, toast, encodeWav, waveformSvg, peaks, playButton } from './ui.mjs';
@@ -35,8 +47,21 @@ export function mount(view, params) {
   let transcript = '';
   let mediaRecorder = null;
   let recordedChunks = [];
+  let sampleLibrary = []; // [{id, name, transcript, ...}] from GET /v1/audio/samples
+  const presetSample = params.sample ?? null;
+  // Bumped on every pickSample() call so a slower, superseded fetch can
+  // tell it lost the race and skip applying its (now stale) result.
+  let pickGen = 0;
+  let pickedSampleId = null;
 
   const modelBar = el('div', { class: 'filt' });
+  const sampleSelect = el('select', {
+    class: 'inp',
+    onchange: (e) => {
+      if (e.target.value) pickSample(e.target.value);
+    },
+  });
+  const sampleHint = el('div', { style: 'color:var(--muted);font-size:11px' });
   const dropZone = el('div', { class: 'drop' });
   const waveWrap = el('div', { class: 'trim-wrap' });
   const transcriptBox = el('textarea', { class: 'inp', rows: 2 });
@@ -60,6 +85,7 @@ export function mount(view, params) {
       el('span', { class: 'num' }, ['2']),
       el('div', { style: 'flex:1' }, [
         el('div', { class: 'lab' }, ['SAMPLE · ONE SPEAKER · 5-15 S']),
+        el('div', { class: 'row' }, [sampleSelect, sampleHint]),
         dropZone,
         waveWrap,
       ]),
@@ -169,7 +195,7 @@ export function mount(view, params) {
     });
   }
 
-  async function loadFile(file) {
+  async function loadFile(file, opts = {}) {
     const buffer = await file.arrayBuffer();
     const Ctx = window.AudioContext || window.webkitAudioContext;
     const ctx = new Ctx();
@@ -188,7 +214,90 @@ export function mount(view, params) {
     renderWave();
     const objectUrl = URL.createObjectURL(file);
     originalPlay.replaceChildren(playButton(() => objectUrl), ` your clip · ${trimEnd.toFixed(1)} s`);
-    await transcribeSelection();
+    // A picked sample already has a saved transcript (`opts.presetTranscript`)
+    // — use it instead of clobbering it with a fresh auto-transcribe. A
+    // sample with no transcript falls back to the same auto-transcribe a
+    // fresh recording gets.
+    if (opts.presetTranscript != null) {
+      transcript = opts.presetTranscript;
+      transcriptBox.value = transcript;
+    } else {
+      await transcribeSelection();
+    }
+  }
+
+  /** Raw upload (drop/browse/record): routes through voice-prep instead of
+   * trimming here directly (naru task 1463) — upload the clip, then hand
+   * off to the samples tab to transcribe/crop/clean it. */
+  async function uploadRawClip(file) {
+    const form = new FormData();
+    form.append('file', file, file.name || 'clip');
+    let clip;
+    try {
+      const res = await request('/v1/audio/prep/clips', { method: 'POST', body: form });
+      clip = await res.json();
+    } catch {
+      return;
+    }
+    const modelPart = selectedModel ? `&model=${encodeURIComponent(selectedModel)}` : '';
+    location.hash = `#samples?clip=${encodeURIComponent(clip.id)}&return=clone${modelPart}`;
+  }
+
+  function renderSampleSelect() {
+    if (!sampleLibrary.length) {
+      sampleSelect.replaceChildren();
+      sampleSelect.style.display = 'none';
+      sampleHint.replaceChildren('no prepped samples yet — ', el('a', { href: '#samples' }, ['prep one']));
+      return;
+    }
+    sampleSelect.style.display = '';
+    sampleHint.replaceChildren();
+    sampleSelect.replaceChildren(
+      el('option', { value: '' }, ['— pick a sample —']),
+      ...sampleLibrary.map((s) => el('option', { value: s.id }, [s.name])),
+    );
+  }
+
+  async function refreshSamples() {
+    let ids;
+    try {
+      ids = (await getJson('/v1/audio/samples')).samples;
+    } catch {
+      return;
+    }
+    if (disposed) return;
+    sampleLibrary = await Promise.all(
+      ids.map((id) => getJson(`/v1/audio/samples/${encodeURIComponent(id)}`, { silent: true }).catch(() => null)),
+    ).then((list) => list.filter(Boolean));
+    if (disposed) return;
+    renderSampleSelect();
+    if (presetSample && sampleLibrary.some((s) => s.id === presetSample)) {
+      pickSample(presetSample);
+    }
+  }
+
+  async function pickSample(id) {
+    const meta = sampleLibrary.find((s) => s.id === id);
+    if (!meta) return;
+    const gen = ++pickGen;
+    let blob;
+    try {
+      const res = await fetch(`/v1/audio/samples/${encodeURIComponent(id)}/audio?variant=clean`);
+      if (!res.ok) throw new Error('fetch failed');
+      blob = await res.blob();
+    } catch {
+      if (gen !== pickGen) return; // a newer pick already won; don't clobber it
+      toast('could not load that sample', true);
+      sampleSelect.value = pickedSampleId ?? '';
+      return;
+    }
+    if (gen !== pickGen) return; // a newer pick already won; drop this stale result
+    const hasTranscript = !!(meta.transcript && meta.transcript.trim());
+    const file = new File([blob], `${meta.name}.wav`, { type: 'audio/wav' });
+    await loadFile(file, hasTranscript ? { presetTranscript: meta.transcript } : {});
+    if (gen !== pickGen) return;
+    pickedSampleId = id;
+    sampleSelect.value = id;
   }
 
   async function transcribeSelection() {
@@ -211,7 +320,7 @@ export function mount(view, params) {
       const input = el('input', { type: 'file', accept: 'audio/*', style: 'display:none' });
       input.addEventListener('change', (e) => {
         const file = e.target.files[0];
-        if (file) loadFile(file);
+        if (file) uploadRawClip(file);
         e.target.value = '';
       });
       const browse = el('span', { style: 'color:var(--cyan);cursor:pointer' }, ['browse']);
@@ -234,7 +343,7 @@ export function mount(view, params) {
     e.preventDefault();
     dropZone.classList.remove('over');
     const file = e.dataTransfer.files[0];
-    if (file) loadFile(file);
+    if (file) uploadRawClip(file);
   });
 
   async function toggleRecord(btn) {
@@ -261,7 +370,7 @@ export function mount(view, params) {
       btn.classList.remove('on');
       btn.textContent = '● RECORD';
       const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
-      await loadFile(new File([blob], 'recording', { type: blob.type }));
+      await uploadRawClip(new File([blob], 'recording', { type: blob.type }));
     };
     mediaRecorder.start();
     btn.classList.add('on');
@@ -334,9 +443,11 @@ export function mount(view, params) {
   }
 
   window.naruAdmin = window.naruAdmin ?? {};
-  window.naruAdmin.clone = { loadFile };
+  window.naruAdmin.clone = { loadFile, pickSample };
 
+  renderSampleSelect();
   refresh();
+  refreshSamples();
   return () => {
     disposed = true;
     if (window.naruAdmin) delete window.naruAdmin.clone;

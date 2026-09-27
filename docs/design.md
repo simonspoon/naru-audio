@@ -1236,7 +1236,9 @@ $NARU_AUDIO_HOME/prep/
   samples/<id>/
     clean.wav           denoised, trimmed, normalised
     cropped.wav          the same span before cleaning, for A/B
-    transcript.txt       the cropped span's words, joined
+    transcript.txt       the cropped span's words, joined (surfaced as
+                          the sample's JSON "transcript" field, null if
+                          the file is absent)
     meta.json             source clip, range, speaker, engines + licences, name
 ```
 

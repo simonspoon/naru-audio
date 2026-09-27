@@ -7,6 +7,13 @@
 //
 // Exposes `window.naruAdmin.samples.loadFile(file)` so a headless test
 // without a file picker can drive the upload path directly.
+//
+// `#samples?clip=<id>&return=clone&model=<model>` (naru task 1463): the
+// clone tab routes a raw drop/recording here first instead of trimming it
+// itself. `clip` opens the prep flow directly on that already-uploaded
+// clip (reusing `loadClipWave`/`runTranscribe`, no re-upload); once the
+// user keeps the processed sample, `return=clone` sends them back to
+// `#clone?model=<model>&sample=<new id>` instead of the library.
 
 import { getJson, postJson, request, del } from './api.mjs';
 import { el, toast, decodeWav, waveformSvg, peaks, playButton } from './ui.mjs';
@@ -40,6 +47,9 @@ export function mount(view, params) {
   let mode = 'library'; // 'library' | 'prep'
   let selectedId = params.sample ?? null;
   let renameValue = '';
+  // Set when we arrived from the clone tab's raw-upload hand-off: keeping
+  // the processed sample sends the user back there instead of the library.
+  const returnTo = params.return === 'clone' ? { model: params.model ?? null } : null;
 
   // ---- prep-flow state ------------------------------------------------------
   let clip = null; // ClipMeta json
@@ -53,6 +63,12 @@ export function mount(view, params) {
   let sampleName = '';
   let created = null; // SampleMeta json once POST /v1/audio/samples has run
   let busy = false;
+  // Bumped by every entry point into the prep flow (startPrep, loadFile,
+  // startPrepForClip) so a stale continuation — e.g. params.clip's own
+  // fetch still in flight when the user hits "+ new clip" or drops a file
+  // — can tell it is no longer the current attempt and bail out instead of
+  // overwriting clip/clipWave/transcript out from under the newer one.
+  let prepGen = 0;
 
   const listCard = el('div', { class: 'card' });
   const sidePanel = el('div', { class: 'card' });
@@ -210,9 +226,45 @@ export function mount(view, params) {
 
   function startPrep() {
     mode = 'prep';
+    prepGen++;
     resetPrep();
     renderList();
     renderSide();
+  }
+
+  /** Opens the prep flow on a clip the clone tab already uploaded
+   * (`#samples?clip=<id>`, naru task 1463) — reuses `loadClipWave`/
+   * `runTranscribe` same as a fresh upload, but skips `loadFile`'s own
+   * `POST /v1/audio/prep/clips` since the clip already exists.
+   *
+   * This runs automatically from `params.clip` and can race a user who
+   * hits "+ new clip" or drops a file while its own fetch is still in
+   * flight; `gen` lets it notice it's been superseded and bail rather than
+   * overwrite `clip`/`clipWave`/`transcript` out from under the newer
+   * attempt. */
+  async function startPrepForClip(clipId) {
+    mode = 'prep';
+    const gen = ++prepGen;
+    resetPrep();
+    renderList();
+    renderSide();
+    busy = true;
+    renderPrep();
+    let fetchedClip;
+    try {
+      fetchedClip = await getJson(`/v1/audio/prep/clips/${encodeURIComponent(clipId)}`);
+    } catch {
+      if (gen !== prepGen) return;
+      busy = false;
+      renderPrep();
+      return;
+    }
+    if (gen !== prepGen) return;
+    clip = fetchedClip;
+    busy = false;
+    await loadClipWave();
+    if (gen !== prepGen) return;
+    await runTranscribe();
   }
 
   function backToLibrary() {
@@ -221,7 +273,20 @@ export function mount(view, params) {
     refresh();
   }
 
+  /** "Keep" on a freshly processed sample: back to the library normally,
+   * or back to the clone tab with this sample preselected when we arrived
+   * via its raw-upload hand-off (naru task 1463). */
+  function keepSample() {
+    if (returnTo && created) {
+      const modelPart = returnTo.model ? `model=${encodeURIComponent(returnTo.model)}&` : '';
+      location.hash = `#clone?${modelPart}sample=${encodeURIComponent(created.id)}`;
+      return;
+    }
+    backToLibrary();
+  }
+
   async function loadFile(file) {
+    prepGen++;
     const form = new FormData();
     form.append('file', file, file.name || 'clip');
     busy = true;
@@ -455,7 +520,7 @@ export function mount(view, params) {
         playRow(() => cleanUrl, 'cleaned'),
         created.warnings?.length ? el('div', { class: 'warn' }, [created.warnings.join('; ')]) : null,
         el('div', { style: 'display:flex;gap:8px;margin-top:8px' }, [
-          el('button', { class: 'big', style: 'margin:0', onclick: backToLibrary }, ['✓ KEEP IN LIBRARY']),
+          el('button', { class: 'big', style: 'margin:0', onclick: keepSample }, ['✓ KEEP IN LIBRARY']),
           el(
             'button',
             {
@@ -576,8 +641,12 @@ export function mount(view, params) {
   window.naruAdmin = window.naruAdmin ?? {};
   window.naruAdmin.samples = { loadFile };
 
-  renderList();
-  renderSide();
+  if (params.clip) {
+    startPrepForClip(params.clip);
+  } else {
+    renderList();
+    renderSide();
+  }
   refresh();
   return () => {
     disposed = true;

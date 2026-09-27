@@ -93,7 +93,9 @@ fn clip_json(m: &ClipMeta) -> Value {
     })
 }
 
-fn sample_json(m: &SampleMeta) -> Value {
+fn sample_json(home: &Path, m: &SampleMeta) -> Value {
+    let transcript =
+        std::fs::read_to_string(prep::sample_dir(home, &m.id).join(prep::TRANSCRIPT_TXT)).ok();
     json!({
         "id": m.id,
         "name": m.name,
@@ -109,6 +111,7 @@ fn sample_json(m: &SampleMeta) -> Value {
         })).collect::<Vec<_>>(),
         "warnings": m.warnings,
         "created_at": m.created_at,
+        "transcript": transcript,
     })
 }
 
@@ -653,7 +656,7 @@ pub(super) async fn create_sample(
     let trim_enabled = req.trim_silence;
     let normalize_enabled = req.normalize;
 
-    let build = move || -> Result<(SampleMeta, ()), CreateSampleError> {
+    let build = move || -> Result<(Value, ()), CreateSampleError> {
         let working = prep::clip_dir(&home, &clip_id).join(prep::WORKING_WAV);
         let pcm = prep::read_wav(&working).map_err(CreateSampleError::Prep)?;
         let cropped = prep::crop(&pcm, start, end);
@@ -759,18 +762,18 @@ pub(super) async fn create_sample(
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&dir);
         }
-        result.map(|meta| (meta, ()))
+        result.map(|meta| (sample_json(&home, &meta), ()))
     };
     let _ = denoise_enabled;
 
-    let (sample_meta, ()) = tokio::task::spawn_blocking(build)
+    let (value, ()) = tokio::task::spawn_blocking(build)
         .await
         .map_err(|e| internal(&st, &req_id, e.to_string()))?
         .map_err(|e| match e {
             CreateSampleError::Prep(e) => prep_error(&st, &req_id, e),
             CreateSampleError::Engine(m) => internal(&st, &req_id, m),
         })?;
-    Ok((StatusCode::CREATED, Json(sample_json(&sample_meta))).into_response())
+    Ok((StatusCode::CREATED, Json(value)).into_response())
 }
 
 enum CreateSampleError {
@@ -862,12 +865,13 @@ pub(super) async fn get_sample(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
     let home = st.registry.home().to_path_buf();
-    let meta = tokio::task::spawn_blocking(move || load_sample_meta(&home, &id))
-        .await
-        .map_err(|e| {
-            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string())
-        })??;
-    Ok(Json(sample_json(&meta)))
+    let value = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
+        let meta = load_sample_meta(&home, &id)?;
+        Ok(sample_json(&home, &meta))
+    })
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))??;
+    Ok(Json(value))
 }
 
 #[derive(Debug, Deserialize)]
@@ -894,7 +898,7 @@ pub(super) async fn rename_sample(
     }
     let home = st.registry.home().to_path_buf();
     let id2 = id.clone();
-    let meta = tokio::task::spawn_blocking(move || -> Result<SampleMeta, ApiError> {
+    let value = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
         let mut meta = load_sample_meta(&home, &id2)?;
         meta.name = req.name.trim().to_string();
         prep::save_json(
@@ -902,11 +906,11 @@ pub(super) async fn rename_sample(
             &meta,
         )
         .map_err(prep_error_to_api)?;
-        Ok(meta)
+        Ok(sample_json(&home, &meta))
     })
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
-    Ok(Json(sample_json(&meta)))
+    Ok(Json(value))
 }
 
 /// `DELETE /v1/audio/samples/{id}`.

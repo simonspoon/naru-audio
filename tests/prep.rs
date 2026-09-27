@@ -440,6 +440,11 @@ async fn create_list_get_rename_fetch_and_delete_a_sample() {
     assert!((body["range"]["start"].as_f64().unwrap() - 0.1).abs() < 1e-6);
     assert!((body["range"]["end"].as_f64().unwrap() - 0.4).abs() < 1e-6);
     assert_eq!(body["warnings"], json!([]));
+    // The clip was never transcribed, so the cropped span has no words —
+    // `transcript.txt` still gets written (empty), which is a `""`, not a
+    // `null`; `null` is reserved for a sample whose `transcript.txt` is
+    // absent entirely.
+    assert_eq!(body["transcript"], "");
 
     let (status, listed) = get(home.path(), "/v1/audio/samples").await;
     assert_eq!(status, StatusCode::OK);
@@ -448,6 +453,7 @@ async fn create_list_get_rename_fetch_and_delete_a_sample() {
     let (status, got) = get(home.path(), &format!("/v1/audio/samples/{id}")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(got["name"], "bria");
+    assert_eq!(got["transcript"], "");
 
     let (status, renamed) = patch_json(
         home.path(),
