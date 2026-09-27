@@ -320,7 +320,9 @@ impl Registry {
         Ok(names)
     }
 
-    /// The manifest a pulled model was installed with, from its `manifest.json`.
+    /// The manifest a pulled model was installed with, from its
+    /// `manifest.json`, overlaid with the catalog's `prompt_format` and
+    /// `design_voice_model` (naru task 1458 ST7).
     pub fn pulled_manifest(&self, name: &str) -> Result<Manifest, RegistryError> {
         let path = self.model_dir(name).join(MANIFEST_JSON);
         let bytes = match std::fs::read(&path) {
@@ -336,7 +338,43 @@ impl Registry {
                 origin: origin.clone(),
                 message: e.to_string(),
             })?;
-        Manifest::from_table(raw, &origin)
+        let mut manifest = Manifest::from_table(raw, &origin)?;
+        self.overlay_catalog_metadata(&mut manifest);
+        Ok(manifest)
+    }
+
+    /// A pinned `manifest.json` (§3.2's doc comment above) is exactly what
+    /// was on disk when a model was pulled, so a model pulled before this
+    /// admin API grew `prompt_format` and `design_voice_model` never
+    /// reports either — the per-model controls and Design's save target
+    /// silently go missing for every already-installed model (naru task
+    /// 1458 ST7). Both fields are read-only descriptions of how to *talk
+    /// to* a model that is already staged and hashed; neither names a
+    /// file, a size, or anything `install`/`remove` decide by, so backfilling
+    /// them from the live catalog on every read cannot make a pulled model
+    /// look like a different install — it only keeps two descriptive
+    /// fields current without a re-pull. Everything else (files, archives,
+    /// `resident_bytes`, `pulled_at`, ...) stays exactly as pinned.
+    fn overlay_catalog_metadata(&self, manifest: &mut Manifest) {
+        let Some(catalog_manifest) = self.catalog.models.get(&manifest.model.name) else {
+            return;
+        };
+        let Some(catalog_backend) = catalog_manifest.backend.get(&manifest.model.backend) else {
+            return;
+        };
+        let Some(backend) = manifest.backend.get_mut(&manifest.model.backend) else {
+            return;
+        };
+        for key in ["prompt_format", "design_voice_model"] {
+            match catalog_backend.get(key) {
+                Some(value) => {
+                    backend.insert(key.to_string(), value.clone());
+                }
+                None => {
+                    backend.remove(key);
+                }
+            }
+        }
     }
 
     /// `NotPulled` for a catalog model, `UnknownModel` otherwise.

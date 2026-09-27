@@ -488,6 +488,17 @@ Rules:
   pulled model requires unless `--force` is passed.
 - On load, the daemon re-checks sizes (cheap). A full re-hash is `naru-audio verify [NAME]`.
 - A user manifest with a `file:///` URL is allowed for local experiments. It still needs a sha256.
+- `manifest.json` is a pinned copy from pull time (§3.1): a model pulled
+  before a catalog update never picks it up, even after an upgrade,
+  because a re-`pull` of an already-installed model is a no-op. The one
+  exception (naru task 1458 ST7) is `prompt_format` and
+  `design_voice_model`: `Registry::pulled_manifest` overlays both from the
+  live catalog on every read, since they only describe how to talk to a
+  model already staged and hashed — never a file, a size, or anything
+  `install`/`remove` decide by — so an old install still gets today's
+  per-model controls and Design save target without a re-download.
+  Everything else (files, archives, `resident_bytes`, `pulled_at`, ...)
+  stays exactly as pinned.
 
 ### 3.3 Per-machine defaults
 

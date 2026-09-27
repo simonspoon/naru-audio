@@ -433,3 +433,75 @@ fn no_default_model_is_non_commercial() {
         }
     }
 }
+
+/// naru task 1458 ST7: a model pulled before the catalog grew
+/// `prompt_format`/`design_voice_model` pins a `manifest.json` without
+/// them forever (`Registry::pulled_manifest` never re-reads the catalog
+/// for an installed model). `pulled_manifest` overlays those two fields
+/// from the live built-in catalog so an old install still gets its
+/// per-model controls and Design's save target; everything else --
+/// here, `[[file]]` and `resident_bytes` -- must come from the pinned
+/// manifest unchanged, since only `prompt_format`/`design_voice_model`
+/// are descriptive metadata rather than something `install`/`remove`
+/// decide by.
+#[test]
+fn pulled_manifest_overlays_catalog_prompt_format_and_design_voice_model() {
+    let dir = home(&[]);
+    let name = "qwen3-tts-1.7b-voicedesign-mlx";
+    let model_dir = dir.path().join("models").join(name);
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let pinned = serde_json::json!({
+        "model": {
+            "name": name,
+            "kind": "tts",
+            "backend": "mlx",
+            "platforms": [],
+            "requires": [],
+            "license": "Apache-2.0",
+            "license_url": "https://example.invalid/license",
+            "non_commercial": false,
+            "resident_bytes": 123_456,
+        },
+        "backend": {
+            // Predates `prompt_format` and `design_voice_model`: only the
+            // fields that already existed when this model was pulled.
+            "mlx": { "instruct": true },
+        },
+        "file": [
+            {
+                "path": "weights.bin",
+                "url": "http://example.invalid/weights.bin",
+                "sha256": sha(b"weights"),
+                "size": 7,
+            },
+        ],
+        "pulled_at": "2020-01-01T00:00:00Z",
+    });
+    std::fs::write(
+        model_dir.join("manifest.json"),
+        serde_json::to_vec(&pinned).unwrap(),
+    )
+    .unwrap();
+
+    let reg = Registry::open(dir.path()).unwrap();
+    let catalog_manifest = reg.catalog().models[name].clone();
+    let manifest = reg.pulled_manifest(name).unwrap();
+
+    // Overlaid: matches what the live catalog declares today.
+    assert_eq!(
+        manifest.prompt_format().unwrap().knobs,
+        catalog_manifest.prompt_format().unwrap().knobs
+    );
+    assert_eq!(
+        manifest.design_voice_model(),
+        Some("qwen3-tts-1.7b-base-mlx".to_string())
+    );
+
+    // Pinned: unaffected by the overlay.
+    assert_eq!(manifest.files.len(), 1);
+    assert_eq!(manifest.files[0].path, "weights.bin");
+    assert_eq!(
+        manifest.raw["model"]["resident_bytes"].as_integer(),
+        Some(123_456)
+    );
+}

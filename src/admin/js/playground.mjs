@@ -656,8 +656,11 @@ export function mount(view, params) {
       return;
     }
     if (disposed) return;
-    ttsModels = models.filter((m) => m.x_kind === 'tts');
-    sttModels = models.filter((m) => m.x_kind === 'stt');
+    // Only what's actually loadable here: an unpulled model has no voices
+    // and no /v1/audio/speech|transcriptions to try it against, so it
+    // would just be a picker entry that always errors.
+    ttsModels = models.filter((m) => m.x_kind === 'tts' && m.x_pulled);
+    sttModels = models.filter((m) => m.x_kind === 'stt' && m.x_pulled);
     if (!speakModel && ttsModels.length) speakModel = ttsModels[0].id;
     if (!sttModel && sttModels.length) sttModel = sttModels[0].id;
     onSpeakModelChanged();
