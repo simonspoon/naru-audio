@@ -354,3 +354,41 @@ textarea.inp { resize: vertical; }
   background: var(--cyan);
   cursor: ew-resize;
 }
+
+/* Playground (mockup: na-admin-play2) */
+.two { display: grid; grid-template-columns: 1.3fr 1fr; gap: 10px; }
+@media (max-width: 820px) {
+  .two { grid-template-columns: 1fr; }
+}
+.sel {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-h);
+  padding: 3px 8px;
+  font: 12px var(--font-mono);
+}
+.stat { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-top: 6px; align-items: center; }
+.stat b { color: var(--green); font-weight: normal; }
+.code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  width: 100%;
+  display: flex;
+  gap: 6px;
+}
+.code i { color: var(--cyan); font-style: normal; }
+.live {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  padding: 8px;
+  min-height: 90px;
+  font-size: 12px;
+  color: var(--text-h);
+}
+.live span { color: var(--muted); }

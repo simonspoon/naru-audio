@@ -90,6 +90,11 @@ const ASSETS: &[Asset] = &[
         content_type: "text/javascript; charset=utf-8",
         bytes: include_bytes!("../admin/js/playground.mjs"),
     },
+    Asset {
+        path: "js/pcm-worklet.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../admin/js/pcm-worklet.mjs"),
+    },
 ];
 
 const INDEX: &[u8] = include_bytes!("../admin/index.html");
