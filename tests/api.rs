@@ -210,6 +210,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         "x_license_url",
         "x_loaded",
         "x_non_commercial",
+        "x_prompt_format",
         "x_pulled",
         "x_size_bytes",
         "x_unavailable_reason",
@@ -226,6 +227,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         assert_eq!(m["x_clone"], false);
         assert_eq!(m["x_clone_requires_transcript"], false);
         assert_eq!(m["x_instruct"], false);
+        assert_eq!(m["x_prompt_format"], Value::Null);
     }
 
     let vad = &data[2];
@@ -544,26 +546,65 @@ async fn v1_models_names_cloning_and_voice_design_capability() {
     assert_eq!(kokoro["x_clone"], false);
     assert_eq!(kokoro["x_clone_requires_transcript"], false);
     assert_eq!(kokoro["x_instruct"], false);
+    // Speed is the only style control sherpa-onnx's Kokoro takes.
+    assert_eq!(
+        kokoro["x_prompt_format"],
+        json!({"knobs": [{"name": "speed", "default": 1.0}]})
+    );
 
     // Chatterbox: clones, but its transcript is ignored, so no
-    // `x_clone_requires_transcript`.
+    // `x_clone_requires_transcript`. No `instruct`, but it still declares
+    // its own knobs.
     let chatterbox = get("chatterbox-tts-8bit-mlx");
     assert_eq!(chatterbox["x_clone"], true);
     assert_eq!(chatterbox["x_clone_requires_transcript"], false);
     assert_eq!(chatterbox["x_instruct"], false);
+    assert_eq!(chatterbox["x_prompt_format"]["style"], Value::Null);
+    assert_eq!(
+        chatterbox["x_prompt_format"]["knobs"],
+        json!([
+            {"name": "exaggeration", "default": 0.1, "min": 0.0, "max": 1.0},
+            {"name": "cfg_weight", "default": 0.5},
+        ])
+    );
 
     // Qwen3-TTS Base: clones, and needs the transcript for in-context
-    // cloning.
+    // cloning. No `instruct`, but `Model.generate`'s own sampling knobs
+    // are still declared.
     let base = get("qwen3-tts-0.6b-base-mlx");
     assert_eq!(base["x_clone"], true);
     assert_eq!(base["x_clone_requires_transcript"], true);
     assert_eq!(base["x_instruct"], false);
+    assert_eq!(base["x_prompt_format"]["style"], Value::Null);
+    assert_eq!(
+        base["x_prompt_format"]["knobs"],
+        json!([
+            {"name": "temperature", "default": 0.9},
+            {"name": "top_p", "default": 1.0, "min": 0.0, "max": 1.0},
+        ])
+    );
 
-    // VoxCPM2: clones (no transcript needed) and also designs a voice.
+    // VoxCPM2: clones (no transcript needed) and also designs a voice —
+    // inline, as a `(description)` prefix mlx-audio's own `generate`
+    // prepends onto the text (naru_1457).
     let voxcpm2 = get("voxcpm2-8bit-mlx");
     assert_eq!(voxcpm2["x_clone"], true);
     assert_eq!(voxcpm2["x_clone_requires_transcript"], false);
     assert_eq!(voxcpm2["x_instruct"], true);
+    assert_eq!(voxcpm2["x_prompt_format"]["style"], "inline_prefix");
+    assert_eq!(
+        voxcpm2["x_prompt_format"]["inline"],
+        json!({"syntax": "(description)text"})
+    );
+
+    // IndexTTS and Pocket TTS have no style control at all, but declare
+    // that explicitly as an empty object — distinct from `null`, which is
+    // reserved for a non-TTS model (asserted below).
+    assert_eq!(get("indextts-1.5-mlx")["x_prompt_format"], json!({}));
+    assert_eq!(get("pocket-tts-int8")["x_prompt_format"], json!({}));
+
+    // A non-TTS model has no `prompt_format` table at all: `null`.
+    assert_eq!(get("silero-vad")["x_prompt_format"], Value::Null);
 }
 
 #[tokio::test]

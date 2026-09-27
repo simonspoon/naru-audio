@@ -243,6 +243,10 @@ async fn models(
                 "x_clone": e.manifest.clones(),
                 "x_clone_requires_transcript": e.manifest.clone_requires_transcript(),
                 "x_instruct": e.manifest.instructs(),
+                // §5.3 extra: how a model that takes `instructions` or its
+                // own knobs (e.g. Chatterbox's `exaggeration`) reads style
+                // guidance; `null` when there is nothing to declare.
+                "x_prompt_format": e.manifest.prompt_format(),
             })
         })
         .collect();

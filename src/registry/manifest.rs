@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::RegistryError;
 
@@ -146,6 +146,66 @@ pub struct Voice {
     pub default: bool,
 }
 
+/// `backend.<model.backend>.prompt_format`: how a model reads style
+/// guidance beyond the bare `instruct`/`exaggeration` booleans above —
+/// hand-written documentation for a client, not something naru-audio
+/// wires up itself. Every field is optional, so a manifest states only
+/// what applies to that model.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptFormat {
+    /// How the model reads `instructions` (§2.3): `"free_text"` (one
+    /// prose string, e.g. Qwen3-TTS VoiceDesign), `"attributes"` (a
+    /// comma-separated attribute list, e.g. OmniVoice), or
+    /// `"inline_prefix"` (VoxCPM2's `(description)text`, where the
+    /// description rides inside the spoken text rather than a separate
+    /// field). Unset for a model that takes no `instructions` at all,
+    /// even one with its own knobs (Chatterbox).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
+    /// Tags placed inline in the text itself, distinct from `style`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline: Option<PromptFormatInline>,
+    /// Generation knobs beyond `instructions`/`exaggeration`, e.g.
+    /// `temperature` or `cfg_scale`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knobs: Vec<PromptFormatKnob>,
+    /// A short user-facing example, e.g. `"(cheerful, slightly
+    /// faster)Hello there."`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// One inline tag syntax within [`PromptFormat`], e.g. OmniVoice's
+/// `[laughter]` or Breeze's `(sigh)`/`[叹气]`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptFormatInline {
+    /// The tag's shape, e.g. `"[tag]"` or `"(tag)"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syntax: Option<String>,
+    /// Known tags, without their brackets, e.g. `"laughter"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// A short example using one of `tags`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<String>,
+}
+
+/// One generation knob within [`PromptFormat`]. `min`/`max` are set only
+/// where the model or its docs actually give a range.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptFormatKnob {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub model: Model,
@@ -233,6 +293,26 @@ impl Manifest {
             .and_then(|t| t.get("instruct"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
+    }
+
+    /// `backend.<model.backend>.prompt_format`: how the model takes style
+    /// guidance beyond `instruct`/`exaggeration` (§ [`PromptFormat`]), for
+    /// a client to read next to `instructs()`. `None` when the manifest
+    /// has no `prompt_format` table at all — every non-TTS model, since
+    /// only a TTS manifest declares one. A TTS model with no style
+    /// control at all (IndexTTS, Pocket TTS) still declares an *empty*
+    /// table, so it comes back `Some(PromptFormat::default())` — a
+    /// deliberate "nothing to declare" distinct from "not a TTS model".
+    /// A malformed table (an unknown key, `deny_unknown_fields`, or the
+    /// wrong shape) also comes back `None` here rather than failing the
+    /// whole manifest, matching `instructs()` and friends above; the
+    /// `builtin_prompt_format_is_declared_per_model_naru_1457` test below
+    /// additionally asserts every catalog `prompt_format` table
+    /// deserializes cleanly, so that silence never hides a typo.
+    pub fn prompt_format(&self) -> Option<PromptFormat> {
+        let table = self.backend.get(&self.model.backend)?;
+        let value = table.get("prompt_format")?.clone();
+        PromptFormat::deserialize(value).ok()
     }
 
     /// `backend.<model.backend>.exaggeration`: the model takes a request's
@@ -817,6 +897,151 @@ mod tests {
                 url.starts_with("https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/")
                     && url.ends_with(&format!("/{}", f.path)),
                 "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_prompt_format_is_declared_per_model_naru_1457() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+
+        // Every TTS model declares a `prompt_format` table, even if empty;
+        // only a non-TTS model has none at all.
+        for name in [
+            "parakeet-tdt-0.6b-v2-int8",
+            "parakeet-tdt-0.6b-v2-mlx",
+            "silero-vad",
+        ] {
+            assert!(
+                cat.models[name].prompt_format().is_none(),
+                "{name} should have no prompt_format"
+            );
+        }
+        let tts_models: Vec<&str> = cat
+            .models
+            .values()
+            .filter(|m| m.model.kind == Kind::Tts)
+            .map(|m| m.model.name.as_str())
+            .collect();
+        assert!(!tts_models.is_empty());
+        for name in &tts_models {
+            let m = &cat.models[*name];
+            // `prompt_format()` itself silently drops a table that fails
+            // to deserialize (matching `instructs()` and friends, which
+            // silently default rather than fail the whole manifest); this
+            // asserts the raw table underneath actually deserializes
+            // clean, so a typo'd key cannot hide behind that silence.
+            let raw = m
+                .backend
+                .get(&m.model.backend)
+                .and_then(|t| t.get("prompt_format"))
+                .unwrap_or_else(|| panic!("{name} (TTS) has no [backend.*.prompt_format] table"))
+                .clone();
+            PromptFormat::deserialize(raw)
+                .unwrap_or_else(|e| panic!("{name}'s prompt_format does not deserialize: {e}"));
+            assert!(
+                m.prompt_format().is_some(),
+                "{name} (TTS) should have a prompt_format"
+            );
+        }
+
+        let voicedesign = cat.models["qwen3-tts-1.7b-voicedesign-mlx"]
+            .prompt_format()
+            .unwrap();
+        assert_eq!(voicedesign.style.as_deref(), Some("free_text"));
+        assert!(voicedesign.inline.is_none());
+        assert_eq!(
+            voicedesign
+                .knobs
+                .iter()
+                .map(|k| k.name.as_str())
+                .collect::<Vec<_>>(),
+            ["temperature", "top_p"]
+        );
+
+        // No `instruct`, but its own knobs are still declared.
+        let chatterbox = cat.models["chatterbox-tts-8bit-mlx"]
+            .prompt_format()
+            .unwrap();
+        assert!(chatterbox.style.is_none());
+        assert_eq!(chatterbox.knobs[0].name, "exaggeration");
+        assert_eq!(chatterbox.knobs[0].default, Some(0.1));
+
+        // Style rides inline in the text, not a separate field.
+        let voxcpm2 = cat.models["voxcpm2-8bit-mlx"].prompt_format().unwrap();
+        assert_eq!(voxcpm2.style.as_deref(), Some("inline_prefix"));
+        assert_eq!(
+            voxcpm2.inline.unwrap().syntax.as_deref(),
+            Some("(description)text")
+        );
+        // The `[[file]]` table right after `prompt_format` in the same
+        // manifest is still intact: this regressed once (naru_1457),
+        // deleting Breeze's LICENSE `[[file]]` when its prompt_format was
+        // inserted above it.
+        let breeze = &cat.models["breeze-tts-2-mlx"];
+        assert!(
+            breeze.files.iter().any(|f| f.path == "LICENSE"),
+            "{:?}",
+            breeze.files
+        );
+
+        let omnivoice = cat.models["omnivoice-bf16-mlx"].prompt_format().unwrap();
+        assert_eq!(omnivoice.style.as_deref(), Some("attributes"));
+        assert!(
+            omnivoice
+                .inline
+                .unwrap()
+                .tags
+                .contains(&"laughter".to_string())
+        );
+
+        let breeze_pf = breeze.prompt_format().unwrap();
+        assert_eq!(breeze_pf.style.as_deref(), Some("free_text"));
+        assert!(breeze_pf.inline.unwrap().tags.contains(&"sigh".to_string()));
+
+        let kokoro = cat.models["kokoro-v1.0"].prompt_format().unwrap();
+        assert!(kokoro.style.is_none());
+        assert_eq!(
+            kokoro.knobs,
+            [PromptFormatKnob {
+                name: "speed".to_string(),
+                default: Some(1.0),
+                min: None,
+                max: None,
+            }]
+        );
+
+        // The Qwen3-TTS Base pair and CustomVoice take no `instruct`, but
+        // still expose `Model.generate`'s own temperature/top_p.
+        for name in [
+            "qwen3-tts-0.6b-mlx",
+            "qwen3-tts-0.6b-base-mlx",
+            "qwen3-tts-1.7b-base-mlx",
+        ] {
+            let pf = cat.models[name].prompt_format().unwrap();
+            assert!(pf.style.is_none(), "{name}");
+            assert_eq!(
+                pf.knobs.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+                ["temperature", "top_p"],
+                "{name}"
+            );
+        }
+
+        // IndexTTS and Pocket TTS have no style control at all, but
+        // declare that explicitly as an empty table — `Some(default())`,
+        // not `None` — so a client can tell "TTS, nothing to declare"
+        // apart from "not a TTS model".
+        for name in ["indextts-1.5-mlx", "pocket-tts-int8"] {
+            let pf = cat.models[name].prompt_format().unwrap();
+            assert_eq!(pf.style, None, "{name}");
+            assert!(pf.inline.is_none(), "{name}");
+            assert!(pf.knobs.is_empty(), "{name}");
+            assert!(pf.hint.is_none(), "{name}");
+            // Serializes as `{}`, distinguishable from `null`.
+            assert_eq!(
+                serde_json::to_value(&pf).unwrap(),
+                serde_json::json!({}),
+                "{name}"
             );
         }
     }

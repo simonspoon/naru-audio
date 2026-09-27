@@ -29,6 +29,15 @@ clone = true
 # ref_text is not None`).
 clone_requires_transcript = true
 
+# No `instruct`; `temperature`/`top_p` are `Model.generate`'s own sampling
+# knobs (`qwen3_tts.py`), shared by every route including Base's, not
+# currently sent by naru-audio.
+[backend.mlx.prompt_format]
+knobs = [
+    { name = "temperature", default = 0.9 },
+    { name = "top_p", default = 1.0, min = 0.0, max = 1.0 },
+]
+
 [[file]]
 path   = "config.json"
 url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit/resolve/50f45ef0047cde7e84c2ef04326acb8ada2436a7/config.json"

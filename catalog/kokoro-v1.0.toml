@@ -24,6 +24,11 @@ tokens   = "tokens.txt"
 data_dir = "espeak-ng-data"
 lang     = "en-us"
 
+# No `instruct`, no inline tags — the request's `speed` (§2.3) is the only
+# style control sherpa-onnx's Kokoro takes.
+[backend.sherpa-onnx.prompt_format]
+knobs = [{ name = "speed", default = 1.0 }]
+
 [[archive]]
 url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"
 sha256 = "c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298"

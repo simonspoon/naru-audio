@@ -41,6 +41,20 @@ clone = true
 # `exaggeration` (§2.3 extra) is passed through to mlx-audio.
 exaggeration = true
 
+# No `instruct` (original Chatterbox, unlike Turbo, takes no prompt at
+# all, and `[laugh]`-style tags are Turbo-only — mlx-audio ships them as
+# separate model classes, `chatterbox.py` vs `chatterbox_turbo.py`, and
+# only Turbo's has that tag handling). `exaggeration`'s 0-1 range and
+# `cfg_weight` are mlx-audio's own `Model.generate` defaults
+# (`chatterbox.py`), not the CLI's (`mlx_audio/tts/generate.py` defaults
+# `--exaggeration` to 0.5, but naru-audio calls `generate` directly, not
+# the CLI).
+[backend.mlx.prompt_format]
+knobs = [
+    { name = "exaggeration", default = 0.1, min = 0.0, max = 1.0 },
+    { name = "cfg_weight", default = 0.5 },
+]
+
 [[file]]
 path   = "config.json"
 url    = "https://huggingface.co/mlx-community/Chatterbox-TTS-8bit/resolve/0d4905ca99a604105f1cba6b947e306f066ab9f1/config.json"

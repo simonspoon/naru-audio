@@ -26,6 +26,18 @@ resident_bytes = 3_800_000_000
 # voice's description, required.
 instruct = true
 
+# One free-text description, no inline tags (mlx-audio's `qwen3_tts.py`
+# `generate_voice_design` takes `instruct` as a single string and has no
+# tag syntax of its own). `temperature`/`top_p` are `Model.generate`'s own
+# sampling knobs, not currently sent by naru-audio.
+[backend.mlx.prompt_format]
+style = "free_text"
+knobs = [
+    { name = "temperature", default = 0.9 },
+    { name = "top_p", default = 1.0, min = 0.0, max = 1.0 },
+]
+hint = "A cheerful young female voice with high pitch"
+
 [[file]]
 path   = "config.json"
 url    = "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit/resolve/f90d617701d9f7f4ca499291e0b57f2b3c2fd2ee/config.json"

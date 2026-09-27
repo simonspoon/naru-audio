@@ -117,6 +117,25 @@ clone = true
 # voice up from a description instead of cloning one.
 instruct = true
 
+# `instruct` is a comma-separated attribute list (mlx-audio's
+# `omnivoice.py` docstring / k2-fsa's own model card: "assigned speaker
+# attributes (gender, age, pitch, dialect/accent, whisper, etc.)"), not
+# free text. Inline tags are the atomic tokens `omnivoice.py`'s own
+# `_NONVERBAL_PATTERN` recognises in the text (a longer list than shown
+# here: also confirmation-en, question-en/ah/oh/ei/yi, surprise-oh/wa/yo,
+# dissatisfaction-hnn). `num_steps`/`guidance_scale` are `generate`'s own
+# defaults; the k2-fsa card also advertises pinyin/phoneme pronunciation
+# overrides, but mlx-audio's port has no code for them (no such syntax
+# anywhere in `omnivoice.py`), so they are not declared here.
+[backend.mlx.prompt_format]
+style = "attributes"
+inline = { syntax = "[tag]", tags = ["laughter", "sigh", "surprise-ah"], example = "[laughter] That's hilarious!" }
+knobs = [
+    { name = "num_steps", default = 32 },
+    { name = "guidance_scale", default = 2.0 },
+]
+hint = "female, low pitch, british accent, whisper"
+
 [[file]]
 path   = "config.json"
 url    = "https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/8fb0b754cad788aaefec690cd55c207e8a628f85/config.json"

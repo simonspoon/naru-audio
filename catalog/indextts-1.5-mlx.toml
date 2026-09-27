@@ -46,6 +46,12 @@ resident_bytes = 1_438_762_732
 # Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
 clone = true
 
+# No style control at all: mlx-audio's `indextts.py` `generate` takes no
+# `instruct` and has no knob of its own beyond sampling internals it does
+# not expose (`sampler`); declared empty rather than omitted, so a client
+# can tell "TTS, nothing to declare" apart from "not a TTS model".
+[backend.mlx.prompt_format]
+
 [[file]]
 path   = "config.json"
 url    = "https://huggingface.co/mlx-community/IndexTTS-1.5/resolve/d163f13bc1816c20bd79d730cc88f866a2a43ceb/config.json"

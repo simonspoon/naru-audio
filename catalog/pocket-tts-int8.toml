@@ -33,6 +33,11 @@ text_conditioner = "text_conditioner.onnx"
 vocab_json       = "vocab.json"
 token_scores_json = "token_scores.json"
 
+# No style control at all: `speed` is ignored (`sherpa.rs`), and there is
+# no `instruct`; declared empty rather than omitted, so a client can tell
+# "TTS, nothing to declare" apart from "not a TTS model".
+[backend.sherpa-onnx.prompt_format]
+
 [[archive]]
 url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2"
 sha256 = "2f3b88823cbbb9bf0b2477ec8ae7b3fec417b3a87b6bb5f256dba66f2ad967cb"

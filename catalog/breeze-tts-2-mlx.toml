@@ -55,6 +55,20 @@ clone_requires_transcript = true
 # voice up from a description instead of cloning one.
 instruct = true
 
+# One free-text instruction, for a voice design or direction on a clone
+# alike (`breeze_tts.py`: `target = f"{speaker}<ins_bos>{instruct}<ins_eos>{text}"`).
+# Inline tags are BreezeBlue's own model card syntax, not something
+# mlx-audio's `breeze_tts.py` parses specially — they are plain text the
+# model was trained to recognise, English in parentheses and Chinese in
+# brackets. `cfg_scale`'s default is `generate`'s own (no CFG unless set);
+# 4 is the card's recommendation for voice design/direction, not a code
+# default.
+[backend.mlx.prompt_format]
+style = "free_text"
+inline = { syntax = "(tag) or [标签]", tags = ["laugh", "sigh", "clears throat", "笑", "叹气"], example = "(laugh) That's hilarious!" }
+knobs = [{ name = "cfg_scale", default = 4.0 }]
+hint = "Speak slowly and warmly, like reading a bedtime story"
+
 [[file]]
 path   = "LICENSE"
 url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/LICENSE"

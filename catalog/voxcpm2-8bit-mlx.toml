@@ -40,6 +40,22 @@ clone = true
 # voice up from a description instead of cloning one.
 instruct = true
 
+# Not a separate field on the wire: mlx-audio's `voxcpm2.py` `generate`
+# itself prepends `instruct` onto the text as `(instruct)text` before
+# tokenizing (confirmed 2026-09-27 against
+# mlx/.venv/.../mlx_audio/tts/models/voxcpm2/voxcpm2.py:444-445), so the
+# description rides inside the spoken text rather than a field of its
+# own — style "inline_prefix", not "free_text". Works whether or not
+# `ref_audio` is also given, i.e. for both voice design and cloning.
+[backend.mlx.prompt_format]
+style = "inline_prefix"
+inline = { syntax = "(description)text" }
+knobs = [
+    { name = "cfg_value", default = 2.0 },
+    { name = "inference_timesteps", default = 10 },
+]
+hint = "(cheerful, slightly faster)Hello there."
+
 [[file]]
 path   = "config.json"
 url    = "https://huggingface.co/mlx-community/VoxCPM2-8bit/resolve/d52725898a0675703f7f9ddc5a4d1a3cdbb99032/config.json"

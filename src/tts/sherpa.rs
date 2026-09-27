@@ -738,7 +738,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let m = pocket();
         for (key, value) in &m.backend["sherpa-onnx"] {
-            if key != "family" {
+            // `prompt_format` (naru_1457) is a table, not a model-file
+            // name, same reason `family` is excluded here.
+            if key != "family" && key != "prompt_format" {
                 std::fs::write(tmp.path().join(value.as_str().unwrap()), b"").unwrap();
             }
         }
