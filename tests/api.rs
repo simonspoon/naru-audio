@@ -174,6 +174,9 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
             "parakeet-tdt-0.6b-v2-int8",
             "pocket-tts-int8",
             "silero-vad",
+            "source-separation-spleeter-2stems-int8",
+            "speaker-diarization-en",
+            "speech-denoiser-gtcrn",
             "stt",
             "vad"
         ]
@@ -200,6 +203,12 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
                 "parakeet-tdt-0.6b-v2-int8",
                 "pocket-tts-int8",
                 "silero-vad",
+                // The diarization/denoise/separation kinds are not "stt",
+                // so they would fail this loop's `x_kind == "stt"` check
+                // (naru task 1461 review).
+                "source-separation-spleeter-2stems-int8",
+                "speaker-diarization-en",
+                "speech-denoiser-gtcrn",
             ]
             .contains(&id)
                 && !MLX.contains(&id)
@@ -418,6 +427,9 @@ async fn unreadable_manifest_json_is_skipped() {
             "parakeet-tdt-0.6b-v2-int8",
             "pocket-tts-int8",
             "silero-vad",
+            "source-separation-spleeter-2stems-int8",
+            "speaker-diarization-en",
+            "speech-denoiser-gtcrn",
             "vad"
         ]
     );
