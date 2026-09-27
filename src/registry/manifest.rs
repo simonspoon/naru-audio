@@ -11,6 +11,10 @@ use super::RegistryError;
 /// Built-in manifests, `(file name, contents)`, compiled in from `catalog/`.
 const BUILTIN: &[(&str, &str)] = &[
     (
+        "breeze-tts-2-mlx.toml",
+        include_str!("../../catalog/breeze-tts-2-mlx.toml"),
+    ),
+    (
         "chatterbox-tts-8bit-mlx.toml",
         include_str!("../../catalog/chatterbox-tts-8bit-mlx.toml"),
     ),
@@ -412,6 +416,7 @@ mod tests {
         assert_eq!(
             cat.models.keys().collect::<Vec<_>>(),
             [
+                "breeze-tts-2-mlx",
                 "chatterbox-tts-8bit-mlx",
                 "indextts-1.5-mlx",
                 "kokoro-v1.0",
@@ -749,6 +754,40 @@ mod tests {
             let url = f.url.as_deref().unwrap();
             assert!(
                 url.starts_with("https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/")
+                    && url.ends_with(&format!("/{}", f.path)),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_breeze_clones_and_instructs_and_is_non_commercial() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        let m = &cat.models["breeze-tts-2-mlx"];
+        assert_eq!(m.model.kind, Kind::Tts);
+        assert_eq!(m.model.backend, "mlx");
+        assert_eq!(
+            m.model.license.as_deref(),
+            Some("BreezeBlue Research and Non-Commercial License")
+        );
+        assert_eq!(
+            m.model.license_url.as_deref(),
+            Some(
+                "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/blob/\
+                 3c8829fb7fd335818f085cd2ef49b4100c0e46c8/LICENSE"
+            )
+        );
+        // Naru 1446: BreezeBlue's own LICENSE grants research and
+        // non-commercial use only.
+        assert!(m.model.non_commercial);
+        assert!(m.clones());
+        assert!(m.instructs());
+        assert!(!m.exaggerates());
+        assert!(m.voices.is_empty());
+        for f in &m.files {
+            let url = f.url.as_deref().unwrap();
+            assert!(
+                url.starts_with("https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/")
                     && url.ends_with(&format!("/{}", f.path)),
                 "{url}"
             );

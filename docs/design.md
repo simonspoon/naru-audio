@@ -186,9 +186,9 @@ The request body is JSON.
 | `input` | **Supported.** Must be non-empty. The cap is 16 384 chars (OpenAI's is 4 096; we raise it because Naru reads whole turns). Over the cap returns 413. |
 | `voice` | **Supported.** A voice id from `/v1/audio/voices` (for example `af_heart`). OpenAI names (`alloy`, …) return 400 `unknown_voice` with the valid list in `message`. We do not map them, because mapping would silently pick a voice nobody chose. |
 | `response_format` | **Supported:** `wav` (default here; OpenAI's default is mp3) and `pcm`. `mp3/opus/aac/flac` return 400 `unsupported_value`. See the open question on mp3. |
-| `speed` | **Supported** in the range 0.5–2.0. Outside that range returns 400. Qwen3-TTS ignores it silently; Chatterbox, VoxCPM2, IndexTTS and OmniVoice do not support it at all, so a non-1.0 `speed` on any of them fails the synthesis (500 `internal_error`) instead of coming out at normal speed unannounced. |
+| `speed` | **Supported** in the range 0.5–2.0. Outside that range returns 400. Qwen3-TTS ignores it silently; Chatterbox, VoxCPM2, IndexTTS, OmniVoice and Breeze do not support it at all, so a non-1.0 `speed` on any of them fails the synthesis (500 `internal_error`) instead of coming out at normal speed unannounced. |
 | `stream_format` | `audio` is **supported**. `sse` returns 400 `unsupported_value`. |
-| `instructions` | **Supported** by a model whose manifest sets `instruct = true` (§3.2), passed to mlx-audio as `instruct`; **ignored** by every other model (Kokoro cannot be steered by a prompt). For Qwen3-TTS 1.7B VoiceDesign, which has no preset voices, it is the voice's description plus any style direction in one string (for example "A warm, husky woman in her thirties, a little amused. Speak slowly."); `voice` is accepted and ignored, and a request without `instructions` returns 400 before any load. VoxCPM2 and OmniVoice also clone (`clone = true` too): a named cloned voice wins over `instructions` if both are given, and only a request with no matching voice needs `instructions` (`voice` in `src/server/speech.rs`). |
+| `instructions` | **Supported** by a model whose manifest sets `instruct = true` (§3.2), passed to mlx-audio as `instruct`; **ignored** by every other model (Kokoro cannot be steered by a prompt). For Qwen3-TTS 1.7B VoiceDesign, which has no preset voices, it is the voice's description plus any style direction in one string (for example "A warm, husky woman in her thirties, a little amused. Speak slowly."); `voice` is accepted and ignored, and a request without `instructions` returns 400 before any load. VoxCPM2, OmniVoice and Breeze also clone (`clone = true` too): a named cloned voice wins over `instructions` if both are given, and only a request with no matching voice needs `instructions` (`voice` in `src/server/speech.rs`). |
 
 Extensions: `gap` (default 0.12 s), `level` (default `true`, the leveller),
 `exaggeration` (0–1, **supported** only by a model whose manifest sets
@@ -808,6 +808,20 @@ Sidecar design:
   `mlx/pyproject.toml` (2026-09-26); bf16 has no `quantization` key in its
   config, so `apply_quantization` never runs and the mismatch does not
   arise.
+- **Breeze TTS 2** (`breeze-tts-2-mlx`, BreezeBlue Research and
+  Non-Commercial License, **non-commercial**) is a seventh cloning model,
+  and the third (after VoxCPM2 and OmniVoice) that also designs a voice
+  from a description: `[backend.mlx] clone = true` and `instruct = true`,
+  no preset voices, 24 kHz output. It does not support `speed` either (no
+  `speed` parameter, swallowed silently by its own `**kwargs`, same
+  mechanism as Chatterbox/VoxCPM2/IndexTTS/OmniVoice), rejected the same
+  way as those four. Unlike those four, its `generate` does declare a
+  `streaming_interval` parameter and accepts the sidecar's usual short
+  cadence (`STREAMING_INTERVAL = 0.32`) without error — confirmed by
+  pulling the model and running `say` end to end (2026-09-26) — so, unlike
+  `speed`, no sidecar shim is needed for it. The catalog pins
+  mlx-community's full-precision `Breeze-TTS-2-mlx` conversion (~7.6 GB),
+  not their 4-bit or 8-bit ones, per task 1446.
 - **Cost:** about 150–400 ms extra first-request latency for the process start
   **[assumption]**, then a per-request IPC overhead that is negligible
   compared with decode time.

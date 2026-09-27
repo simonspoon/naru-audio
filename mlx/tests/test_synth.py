@@ -239,6 +239,54 @@ class OmniVoiceSynth(unittest.TestCase):
         self.assertEqual(audio(model, header), [5.0])
 
 
+class Breeze:
+    """mlx-audio's Breeze TTS 2 in outline: clones with `ref_audio`/
+    `ref_text` and designs with `instruct`, like OmniVoice. Its `generate`
+    has no `speed` parameter, so it would otherwise be swallowed silently
+    by its own `**kwargs` (confirmed against mlx-audio 0.5.6 as pinned in
+    `mlx/pyproject.toml`, 2026-09-26: pulling the real model and calling
+    `say` with a non-1.0 `-s` produces normal-speed audio, not an error,
+    unless the sidecar rejects it first)."""
+
+    def generate(
+        self, text, voice=None, ref_audio=None, ref_text=None, instruct=None, **kwargs
+    ):
+        self.seen_ref_audio = ref_audio
+        self.seen_ref_text = ref_text
+        self.seen_instruct = instruct
+        yield type("Result", (), {"audio": mx.full((1,), 6.0)})
+
+
+class BreezeSynth(unittest.TestCase):
+    def test_reference_and_transcript_clone(self):
+        model = Breeze()
+        header = {
+            "model": "breeze-tts-2-mlx",
+            "reference": "ref.wav",
+            "reference_text": "Hello there.",
+        }
+        self.assertEqual(audio(model, header), [6.0])
+        self.assertEqual(model.seen_ref_audio, "ref.wav")
+        self.assertEqual(model.seen_ref_text, "Hello there.")
+
+    def test_instruct_is_passed_through_for_voice_design(self):
+        model = Breeze()
+        header = {"model": "breeze-tts-2-mlx", "instruct": "A calm narrator."}
+        audio(model, header)
+        self.assertEqual(model.seen_instruct, "A calm narrator.")
+
+    def test_non_default_speed_raises(self):
+        model = Breeze()
+        header = {"model": "breeze-tts-2-mlx", "speed": 1.5}
+        with self.assertRaises(ValueError):
+            audio(model, header)
+
+    def test_default_speed_is_accepted(self):
+        model = Breeze()
+        header = {"model": "breeze-tts-2-mlx", "speed": 1.0}
+        self.assertEqual(audio(model, header), [6.0])
+
+
 class IndexTTSLoadDir(unittest.TestCase):
     """`_indextts_load_dir` must never touch the pulled model directory:
     its `config.json` is one of the manifest's hash-pinned `[[file]]`s,

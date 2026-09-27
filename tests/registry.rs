@@ -402,10 +402,11 @@ fn every_builtin_model_has_a_non_empty_license_and_url() {
 /// Pocket TTS's package README says "It is for non-commercial" even though
 /// the model itself is CC-BY-4.0 (catalog/pocket-tts-int8.toml); OmniVoice's
 /// README says its pre-trained weights are CC-BY-NC outright
-/// (catalog/omnivoice-bf16-mlx.toml). Nothing else in the built-in catalog
-/// is restricted.
+/// (catalog/omnivoice-bf16-mlx.toml); Breeze TTS 2's own LICENSE is a
+/// research/non-commercial-only grant (catalog/breeze-tts-2-mlx.toml).
+/// Nothing else in the built-in catalog is restricted.
 #[test]
-fn only_pocket_tts_and_omnivoice_are_flagged_non_commercial() {
+fn only_pocket_tts_omnivoice_and_breeze_are_flagged_non_commercial() {
     let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
     let nc: Vec<&str> = cat
         .models
@@ -413,7 +414,10 @@ fn only_pocket_tts_and_omnivoice_are_flagged_non_commercial() {
         .filter(|m| m.model.non_commercial)
         .map(|m| m.model.name.as_str())
         .collect();
-    assert_eq!(nc, ["omnivoice-bf16-mlx", "pocket-tts-int8"]);
+    assert_eq!(
+        nc,
+        ["breeze-tts-2-mlx", "omnivoice-bf16-mlx", "pocket-tts-int8"]
+    );
 }
 
 /// Naru 1441: `serve` must never pick a non-commercial model by default.

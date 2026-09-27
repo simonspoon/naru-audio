@@ -1,0 +1,136 @@
+# Breeze TTS 2 (BreezeBlue), mlx-community's bf16 conversion, served by
+# mlx-audio in the MLX sidecar (§5.3). A seventh cloning model, and the
+# third (after VoxCPM2 and OmniVoice) that also designs a voice from a
+# description: it clones a reference recording the same way as the
+# Qwen3-TTS Base pair, Chatterbox, VoxCPM2, IndexTTS and OmniVoice (no
+# preset speakers, so its voices are the cloned ones under
+# $NARU_AUDIO_HOME/voices/, each passed to mlx-audio as `ref_audio` with
+# its transcript as `ref_text`), and separately takes the request's
+# `instructions` as mlx-audio's `instruct` to make a voice up from a
+# description. 24 kHz output (`model.sample_rate`).
+#
+# `speed` is not supported at all — mlx-audio's Breeze `generate` has no
+# `speed` parameter, so it would otherwise be swallowed silently by its own
+# `**kwargs`; the sidecar shim errors on a non-1.0 speed instead
+# (`naru_audio_mlx/__main__.py`), as for Chatterbox, VoxCPM2, IndexTTS and
+# OmniVoice. Unlike those four, Breeze's `generate` does declare a
+# `streaming_interval` parameter and accepts the sidecar's usual streaming
+# cadence without error (confirmed 2026-09-26 by pulling this model and
+# running `say` end to end); no shim is needed for it.
+#
+# Only mlx-community's full-precision conversion is used, not their 4-bit
+# or 8-bit ones: task-1446 does not ask for a smaller quantization, and the
+# bf16 repo is the one whose size (~7.6 GB total) matches the brief.
+#
+# Licence: this is BreezeBlue's own research/non-commercial grant, not an
+# OSI license — "This Agreement permits research and non-commercial use of
+# the Model Materials free of charge. It does not grant any commercial
+# rights and is not an open source license. Commercial use requires a
+# separate written license from BreezeBlue." (LICENSE, pinned below) — so
+# `non_commercial` is set, same as pocket-tts-int8 and omnivoice-bf16-mlx.
+#
+# Every [[file]] of the repo at the pinned commit but README.md and
+# .gitattributes; sizes and LFS hash from the HF API, the small files'
+# hashes computed 2026-09-26 from the files at the pinned commit.
+
+[model]
+name        = "breeze-tts-2-mlx"
+kind        = "tts"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["en", "zh"]
+license     = "BreezeBlue Research and Non-Commercial License"
+license_url = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/blob/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/LICENSE"
+non_commercial = true                    # see the LICENSE excerpt above
+
+[backend.mlx]
+# Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
+clone = true
+# Takes the request's `instructions` as mlx-audio's `instruct`, to make a
+# voice up from a description instead of cloning one.
+instruct = true
+
+[[file]]
+path   = "LICENSE"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/LICENSE"
+sha256 = "2a143ae167cb0253d95bafa694e415570dcce336d712230d205c538523bbd855"
+size   = 18_856
+
+[[file]]
+path   = "NOTICE"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/NOTICE"
+sha256 = "70bc248b98e5bb527f160c86be56d60ef8c63776c43051273643db036ebee40d"
+size   = 146
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/config.json"
+sha256 = "11f40bae4cb68c87638d3998c78926f7b5143c4ca7aa782e50c02209dbb072c0"
+size   = 12_176
+
+[[file]]
+path   = "generation_config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/generation_config.json"
+sha256 = "2ef3f2c0ab8d9ad241059138a795433c5410fd9954efb9625674ecd2a9529434"
+size   = 251
+
+[[file]]
+path   = "model-00001-of-00002.safetensors"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/model-00001-of-00002.safetensors"
+sha256 = "06c0acb9057e13659aa297a889001dcf86f181d1355ef84c1134ba8b72313572"
+size   = 4_904_052_381
+
+[[file]]
+path   = "model-00002-of-00002.safetensors"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/model-00002-of-00002.safetensors"
+sha256 = "83e7d3a903b70a0be2a1f3dc1b37c4605678536efe9e1a45b86fd70599f5bf77"
+size   = 2_004_566_801
+
+[[file]]
+path   = "model.safetensors.index.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/model.safetensors.index.json"
+sha256 = "b2b8ad998777f80440a51b8504d22c44575623e8bae3a76a925bccc59725ad02"
+size   = 73_409
+
+[[file]]
+path   = "special_tokens_map.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/special_tokens_map.json"
+sha256 = "194f265bb588d142a16f27d9576104eb3dab3d7ba9961541d2d6e3d5e77e6470"
+size   = 886
+
+[[file]]
+path   = "tokenizer.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/tokenizer.json"
+sha256 = "d3ec9ac3eb2392389b9f5112e85d8b43316494addb587ba7b7a9d61eac23af96"
+size   = 33_386_945
+
+[[file]]
+path   = "tokenizer_config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/tokenizer_config.json"
+sha256 = "2c084fd6725c2284e8aa6da095a8d036d48fe79665595bfcd50371821b620e44"
+size   = 1_157_960
+
+[[file]]
+path   = "audio_tokenizer/config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/audio_tokenizer/config.json"
+sha256 = "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167"
+size   = 2_336
+
+[[file]]
+path   = "audio_tokenizer/configuration.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/audio_tokenizer/configuration.json"
+sha256 = "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd"
+size   = 76
+
+[[file]]
+path   = "audio_tokenizer/model.safetensors"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/audio_tokenizer/model.safetensors"
+sha256 = "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+size   = 682_293_092
+
+[[file]]
+path   = "audio_tokenizer/preprocessor_config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/3c8829fb7fd335818f085cd2ef49b4100c0e46c8/audio_tokenizer/preprocessor_config.json"
+sha256 = "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb"
+size   = 234

@@ -124,11 +124,13 @@ used.
 | `indextts-1.5-mlx` | TTS, speaks cloned voices, does not stream | mlx | 1.4 GB |
 | `voxcpm2-8bit-mlx` | TTS, clones or designs a voice, 48 kHz | mlx | 3.2 GB |
 | `omnivoice-bf16-mlx` | TTS, clones or designs a voice, 646 languages, does not stream, **non-commercial** | mlx | 1.6 GB |
+| `breeze-tts-2-mlx` | TTS, clones or designs a voice, **non-commercial** | mlx | 7.6 GB |
 
 Each model's license is in its catalog file (`license = …`); check it before
 you use a model's output. `naru-audio list` and `GET /v1/models` show it
 (`x_license`, `x_license_url`), and pulling a non-commercial model
-(`pocket-tts-int8`, per its README; `omnivoice-bf16-mlx`, CC-BY-NC-4.0)
+(`pocket-tts-int8`, per its README; `omnivoice-bf16-mlx`, CC-BY-NC-4.0;
+`breeze-tts-2-mlx`, BreezeBlue's own research/non-commercial license)
 prints a warning; `x_non_commercial` marks it in the API.
 
 ```sh
@@ -172,8 +174,8 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   restarting the daemon.
 - `say` with a cloned voice and no `-m` uses `qwen3-tts-0.6b-base-mlx`;
   `-m qwen3-tts-1.7b-base-mlx`, `-m chatterbox-tts-8bit-mlx`,
-  `-m indextts-1.5-mlx`, `-m voxcpm2-8bit-mlx` or `-m omnivoice-bf16-mlx`
-  uses another cloning model.
+  `-m indextts-1.5-mlx`, `-m voxcpm2-8bit-mlx`, `-m omnivoice-bf16-mlx` or
+  `-m breeze-tts-2-mlx` uses another cloning model.
 - Voices can also be added with `POST /v1/audio/voices` and exported with
   `GET /v1/audio/voices/{name}` ([docs/design.md §2.5](docs/design.md)).
 - `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
@@ -201,6 +203,13 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   works but nothing plays until synthesis finishes. Its cloned voice's
   transcript (`--text`) is not ignored: mlx-audio prepends it to the
   spoken text, so it should still be the clip's exact words.
+- `breeze-tts-2-mlx` (**BreezeBlue Research and Non-Commercial License,
+  non-commercial only** — the LICENSE: "This Agreement permits research
+  and non-commercial use of the Model Materials free of charge... it does
+  not grant any commercial rights") clones or designs a voice like
+  VoxCPM2 and OmniVoice, and does not support `speed` either (no `speed`
+  parameter). Unlike those two, it does stream at the sidecar's usual
+  cadence with no extra handling needed.
 
 **Voice design**: `qwen3-tts-1.7b-voicedesign-mlx` has no voices; it makes
 one up from `--instructions`, which it requires:
@@ -211,11 +220,12 @@ naru-audio say "Good evening." -m qwen3-tts-1.7b-voicedesign-mlx \
   --instructions "A warm, husky woman in her thirties. Speak slowly." -o designed.wav
 ```
 
-`voxcpm2-8bit-mlx` and `omnivoice-bf16-mlx` do both: `say -v myvoice -m
-voxcpm2-8bit-mlx` (or `-m omnivoice-bf16-mlx`) clones a voice added the
-same way as above, and `say -m voxcpm2-8bit-mlx --instructions "..."`
-designs one instead, with no voice named — the two are mutually exclusive
-per request, and a named cloned voice always wins if both are given.
+`voxcpm2-8bit-mlx`, `omnivoice-bf16-mlx` and `breeze-tts-2-mlx` do both:
+`say -v myvoice -m voxcpm2-8bit-mlx` (or `-m omnivoice-bf16-mlx` / `-m
+breeze-tts-2-mlx`) clones a voice added the same way as above, and `say -m
+voxcpm2-8bit-mlx --instructions "..."` designs one instead, with no voice
+named — the two are mutually exclusive per request, and a named cloned
+voice always wins if both are given.
 
 ## Configuration
 
