@@ -1,7 +1,10 @@
 //! Cloned voices: `$NARU_AUDIO_HOME/voices/<name>/` holds `ref.wav`, a
-//! short clip of the voice, and `ref.txt`, what it says. A model whose
-//! manifest sets `[backend.<backend>] clone = true` (Qwen3-TTS Base) speaks
-//! in each of them as voice `<name>`, after its own `[[voice]]`s. They are
+//! short clip of the voice, `ref.txt`, what it says, and `model.txt`, the
+//! model it was cloned or designed for. A model whose manifest sets
+//! `[backend.<backend>] clone = true` (Qwen3-TTS Base) speaks in each voice
+//! made for it, after its own `[[voice]]`s. A voice with no `model.txt` —
+//! everything `add` made before per-model voices existed — is attributed to
+//! [`CLONE_MODEL`], what `say_model` always asked for before too. They are
 //! read from disk on each request, so a voice added while the daemon runs
 //! is usable at once.
 
@@ -13,6 +16,7 @@ use crate::registry::manifest::{Manifest, Voice};
 
 pub const REF_WAV: &str = "ref.wav";
 pub const REF_TXT: &str = "ref.txt";
+pub const MODEL_TXT: &str = "model.txt";
 
 /// Clip lengths `add` accepts, in seconds; 5–15 s is the target.
 pub const MIN_SECS: f64 = 3.0;
@@ -25,11 +29,12 @@ const SAMPLE_RATE: u32 = 24_000;
 /// The cloning model `say` asks for when its voice is a cloned one.
 pub const CLONE_MODEL: &str = "qwen3-tts-0.6b-base-mlx";
 
-/// A cloned voice's clip and transcript.
+/// A cloned voice's clip, transcript and the model it was made for.
 #[derive(Debug, PartialEq)]
 pub struct Cloned {
     pub wav: PathBuf,
     pub text: String,
+    pub model: String,
 }
 
 pub fn dir(home: &Path) -> PathBuf {
@@ -76,45 +81,68 @@ pub fn list(home: &Path) -> Vec<String> {
 }
 
 /// The voice `name` in `home`, if it is a valid name with both files.
+/// `model` is `model.txt`'s content, trimmed, or [`CLONE_MODEL`] if the
+/// voice predates it or `model.txt` is empty or blank (as unreadable, not
+/// a model named "").
 pub fn find(home: &Path, name: &str) -> Option<Cloned> {
     check_name(name).ok()?;
     let voice = dir(home).join(name);
     let wav = voice.join(REF_WAV);
     let text = std::fs::read_to_string(voice.join(REF_TXT)).ok()?;
+    let model = std::fs::read_to_string(voice.join(MODEL_TXT))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| CLONE_MODEL.to_string());
     wav.is_file().then(|| Cloned {
         wav,
         text: text.trim().to_string(),
+        model,
     })
 }
 
+/// The model voice `name` in `home` was made for, if it exists at all
+/// (found or not, as [`find`]).
+pub fn model_of(home: &Path, name: &str) -> Option<String> {
+    find(home, name).map(|c| c.model)
+}
+
 /// `manifest`'s voices, then, if it clones, the cloned voices in `home`
-/// that no `[[voice]]` shadows.
+/// made for `manifest`'s model that no `[[voice]]` shadows.
 pub fn of(manifest: &Manifest, home: &Path) -> Vec<Voice> {
     let mut voices = manifest.voices.clone();
     if manifest.clones() {
         for id in list(home) {
-            if !voices.iter().any(|v| v.id == id) {
-                voices.push(Voice {
-                    id,
-                    sid: 0,
-                    reference: None,
-                    accent: None,
-                    gender: None,
-                    default: false,
-                });
+            if voices.iter().any(|v| v.id == id) {
+                continue;
             }
+            if model_of(home, &id).as_deref() != Some(manifest.model.name.as_str()) {
+                continue;
+            }
+            voices.push(Voice {
+                id,
+                sid: 0,
+                reference: None,
+                accent: None,
+                gender: None,
+                default: false,
+            });
         }
     }
     voices
 }
 
-/// The model `say` asks for: `model` if given, else [`CLONE_MODEL`] if
-/// `voice` is a cloned voice in `home`, else the daemon's `default`.
-pub fn say_model<'a>(home: Option<&Path>, model: Option<&'a str>, voice: Option<&str>) -> &'a str {
+/// The model `say` asks for: `model` if given, else the model `voice` was
+/// cloned or designed for if it is a cloned voice in `home` ([`model_of`],
+/// [`CLONE_MODEL`] for one that predates per-model voices), else the
+/// daemon's `default`.
+pub fn say_model(home: Option<&Path>, model: Option<&str>, voice: Option<&str>) -> String {
     match (model, voice) {
-        (Some(model), _) => model,
-        (None, Some(voice)) if home.is_some_and(|h| find(h, voice).is_some()) => CLONE_MODEL,
-        _ => "default",
+        (Some(model), _) => model.to_string(),
+        (None, Some(voice)) => home
+            .and_then(|h| model_of(h, voice))
+            .unwrap_or_else(|| "default".to_string()),
+        _ => "default".to_string(),
     }
 }
 
@@ -162,10 +190,12 @@ pub fn scratch(home: &Path, stem: &str) -> PathBuf {
 
 /// Adds the voice `name` from `clip` (anything `afconvert` reads, such as
 /// WAV or MP3), converted to 24 kHz mono 16-bit WAV, with `text` as its
-/// transcript. Returns the clip's length in seconds, which must be within
-/// `MIN_SECS..=MAX_SECS`. An existing voice is not replaced. Both `voice
-/// add` and `POST /v1/audio/voices` come here.
-pub fn add(home: &Path, name: &str, clip: &Path, text: &str) -> Result<f64, AddError> {
+/// transcript, recorded for `model` (`model.txt`; the caller checks `model`
+/// actually clones — this just writes what it is told). Returns the clip's
+/// length in seconds, which must be within `MIN_SECS..=MAX_SECS`. An
+/// existing voice is not replaced. Both `voice add` (always [`CLONE_MODEL`])
+/// and `POST /v1/audio/voices` come here.
+pub fn add(home: &Path, name: &str, clip: &Path, text: &str, model: &str) -> Result<f64, AddError> {
     check_name(name).map_err(AddError::Name)?;
     let text = text.trim();
     if text.is_empty() {
@@ -191,6 +221,8 @@ pub fn add(home: &Path, name: &str, clip: &Path, text: &str) -> Result<f64, AddE
         }
         std::fs::write(tmp.join(REF_TXT), format!("{text}\n"))
             .map_err(|e| AddError::Io(format!("write {REF_TXT}: {e}")))?;
+        std::fs::write(tmp.join(MODEL_TXT), format!("{model}\n"))
+            .map_err(|e| AddError::Io(format!("write {MODEL_TXT}: {e}")))?;
         std::fs::create_dir_all(dir(home))
             .map_err(|e| AddError::Io(format!("create voices/: {e}")))?;
         // A concurrent add of the same name may have won the rename.
@@ -296,12 +328,43 @@ mod tests {
             Some(Cloned {
                 wav: dir(home.path()).join("amy").join(REF_WAV),
                 text: "hello there".to_string(),
+                // No `model.txt`: predates per-model voices.
+                model: CLONE_MODEL.to_string(),
             })
         );
         // Outside voices/, even where both files exist.
         voice(&home.path().join("models"), "x", &[REF_WAV, REF_TXT]);
         for name in ["no-text", "no-wav", "nope", "../models/voices/x", ".tmp"] {
             assert_eq!(find(home.path(), name), None, "{name}");
+        }
+    }
+
+    /// A blank `model.txt` (empty, or only whitespace) is treated the same
+    /// as a missing one — `CLONE_MODEL` — not as a model literally named
+    /// "", which nothing would ever resolve.
+    #[test]
+    fn a_blank_model_txt_is_clone_model_not_the_empty_string() {
+        let home = tempfile::tempdir().unwrap();
+        voice(home.path(), "empty", &[REF_WAV, REF_TXT]);
+        std::fs::write(dir(home.path()).join("empty").join(MODEL_TXT), "").unwrap();
+        voice(home.path(), "blank", &[REF_WAV, REF_TXT]);
+        std::fs::write(
+            dir(home.path()).join("blank").join(MODEL_TXT),
+            " 
+	",
+        )
+        .unwrap();
+        for name in ["empty", "blank"] {
+            assert_eq!(
+                model_of(home.path(), name),
+                Some(CLONE_MODEL.to_string()),
+                "{name}"
+            );
+            assert_eq!(
+                find(home.path(), name).unwrap().model,
+                CLONE_MODEL,
+                "{name}"
+            );
         }
     }
 
@@ -324,10 +387,15 @@ mod tests {
     }
 
     #[test]
-    fn only_a_cloning_manifest_gets_the_cloned_voices() {
+    fn only_a_cloning_manifest_gets_the_cloned_voices_made_for_it() {
         let home = tempfile::tempdir().unwrap();
         voice(home.path(), "amy", &[REF_WAV, REF_TXT]);
+        // Made for "m", the manifest below: it must show up there.
+        std::fs::write(dir(home.path()).join("amy").join(MODEL_TXT), "m").unwrap();
         voice(home.path(), "ryan", &[REF_WAV, REF_TXT]);
+        // No `model.txt`: attributed to `CLONE_MODEL`, not "m".
+        voice(home.path(), "other", &[REF_WAV, REF_TXT]);
+        std::fs::write(dir(home.path()).join("other").join(MODEL_TXT), "not-m").unwrap();
         let manifest = |clone: bool| {
             Manifest::parse(
                 &format!(
@@ -347,7 +415,9 @@ mod tests {
         };
         let ryan = ("ryan".to_string(), Some("m".to_string()), true);
         assert_eq!(ids(&manifest(false)), std::slice::from_ref(&ryan));
-        // The manifest's `ryan` shadows the cloned one.
+        // The manifest's `ryan` shadows the cloned one; "other", made for a
+        // different model, and "ryan"'s own cloned entry (shadowed) do not
+        // appear, only "amy".
         assert_eq!(
             ids(&manifest(true)),
             [ryan, ("amy".to_string(), None, false)]
@@ -355,16 +425,25 @@ mod tests {
     }
 
     #[test]
-    fn say_asks_for_the_cloning_model_only_for_a_cloned_voice() {
+    fn say_asks_for_the_voice_own_model_only_for_a_cloned_voice() {
         let home = tempfile::tempdir().unwrap();
+        // No `model.txt`: predates per-model voices, so `CLONE_MODEL`.
         voice(home.path(), "elise", &[REF_WAV, REF_TXT]);
+        voice(home.path(), "designed", &[REF_WAV, REF_TXT]);
+        std::fs::write(
+            dir(home.path()).join("designed").join(MODEL_TXT),
+            "breeze-tts-2-mlx",
+        )
+        .unwrap();
         let h = Some(home.path());
         assert_eq!(say_model(h, None, Some("elise")), CLONE_MODEL);
+        // A voice made for a specific model asks for that one.
+        assert_eq!(say_model(h, None, Some("designed")), "breeze-tts-2-mlx");
         // A built-in or unknown voice, or none, is the daemon's default.
         assert_eq!(say_model(h, None, Some("af_heart")), "default");
         assert_eq!(say_model(h, None, None), "default");
         assert_eq!(say_model(None, None, Some("elise")), "default");
-        // An explicit model wins.
+        // An explicit model wins, even over a voice made for another one.
         assert_eq!(say_model(h, Some("kokoro"), Some("elise")), "kokoro");
         assert_eq!(say_model(h, Some("kokoro"), None), "kokoro");
     }
@@ -402,29 +481,43 @@ mod tests {
         clip(&ok, 6.0);
         clip(&long, 31.0);
 
-        let secs = add(home.path(), "amy", &ok, "  Hello there.\n").unwrap();
+        let secs = add(
+            home.path(),
+            "amy",
+            &ok,
+            "  Hello there.\n",
+            "breeze-tts-2-mlx",
+        )
+        .unwrap();
         assert!((secs - 6.0).abs() < 0.05, "{secs}");
         let found = find(home.path(), "amy").unwrap();
         assert_eq!(found.text, "Hello there.");
+        assert_eq!(found.model, "breeze-tts-2-mlx");
         let spec = hound::WavReader::open(&found.wav).unwrap().spec();
         assert_eq!((spec.channels, spec.sample_rate), (1, SAMPLE_RATE));
 
-        let err = add(home.path(), "amy", &ok, "again")
+        let err = add(home.path(), "amy", &ok, "again", CLONE_MODEL)
             .unwrap_err()
             .to_string();
         assert!(err.contains("already exists"), "{err}");
         for (name, path) in [("short", &short), ("long", &long)] {
-            let err = add(home.path(), name, path, "text")
+            let err = add(home.path(), name, path, "text", CLONE_MODEL)
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("it must be 3–30 s"), "{err}");
         }
-        let err = add(home.path(), "junk", &src.path().join("nope.wav"), "t")
-            .unwrap_err()
-            .to_string();
+        let err = add(
+            home.path(),
+            "junk",
+            &src.path().join("nope.wav"),
+            "t",
+            CLONE_MODEL,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("afconvert cannot read"), "{err}");
-        assert!(add(home.path(), "../x", &ok, "t").is_err());
-        assert!(add(home.path(), "blank", &ok, " \n").is_err());
+        assert!(add(home.path(), "../x", &ok, "t", CLONE_MODEL).is_err());
+        assert!(add(home.path(), "blank", &ok, " \n", CLONE_MODEL).is_err());
         // Nothing half-made is left behind.
         assert_eq!(list(home.path()), ["amy"]);
         assert_eq!(

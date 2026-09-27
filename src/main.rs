@@ -359,7 +359,10 @@ fn voice_command(action: VoiceAction) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let VoiceAction::Add { name, clip, text } = action;
-    match voices::add(&home, &name, &clip, &text) {
+    // The CLI has no `--model`; a voice it adds is always for the one
+    // `say -v` without `-m` already asked for (`say_model`'s `CLONE_MODEL`
+    // fallback).
+    match voices::add(&home, &name, &clip, &text, voices::CLONE_MODEL) {
         Ok(secs) => {
             if !(5.0..=15.0).contains(&secs) {
                 eprintln!("naru-audio: warning: the clip is {secs:.1} s; 5–15 s clones best");
@@ -877,7 +880,7 @@ fn say(
     let stream = output == "-";
     let model = voices::say_model(registry::default_home().as_deref(), model, voice);
     let request = speech_request(
-        model,
+        &model,
         &text,
         voice,
         speed,

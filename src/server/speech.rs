@@ -51,6 +51,11 @@ enum Format {
 /// A validated request.
 struct Job {
     model: String,
+    /// `model` was asked for by name, not defaulted from no `"model"` (or
+    /// one of the OpenAI aliases): a cloned voice only picks its own model
+    /// ([`voices::say_model`]) when this is false, and only an explicit
+    /// mismatched `model` is refused (§5.3 "refuse mismatch").
+    explicit_model: bool,
     input: String,
     voice: Option<String>,
     format: Format,
@@ -65,11 +70,46 @@ pub(super) async fn speech(
     body: Bytes,
 ) -> Result<Response, ApiError> {
     let mut job = validate(&body, &st.models.settings().tts_default)?;
+    // §5.3: with no explicit `model`, a cloned voice picks its own model
+    // (`say_model`, generalised from the CLI's) instead of the daemon's
+    // `tts_default`; with an explicit one, a cloned voice made for another
+    // model is refused rather than silently ignored or 404 "unknown_voice".
+    // A voice that is one of `name`'s own built-ins always wins over a
+    // same-named cloned voice made for some other model — Pocket's own
+    // "bria" is not shadowed by a clone somebody happened to also call
+    // "bria" for Qwen3-TTS Base.
     let (manifest, voices) = {
-        let (st, name) = (st.clone(), job.model.clone());
+        let (st, name, voice, explicit) = (
+            st.clone(),
+            job.model.clone(),
+            job.voice.clone(),
+            job.explicit_model,
+        );
         tokio::task::spawn_blocking(move || {
+            let home = st.registry.home();
             let manifest = kind_manifest(&st, &name, Kind::Tts)?;
-            let voices = voices::of(&manifest, st.registry.home());
+            let built_in = voice
+                .as_deref()
+                .is_some_and(|v| manifest.voices.iter().any(|mv| mv.id == v));
+            let manifest = if built_in {
+                manifest
+            } else {
+                let made_for = voice.as_deref().and_then(|v| voices::model_of(home, v));
+                match (&made_for, explicit) {
+                    (Some(made_for), false) if made_for != &name => {
+                        kind_manifest(&st, made_for, Kind::Tts)?
+                    }
+                    (Some(made_for), true) if made_for != &name => {
+                        return Err(voice_model_mismatch(
+                            voice.as_deref().unwrap(),
+                            made_for,
+                            &name,
+                        ));
+                    }
+                    _ => manifest,
+                }
+            };
+            let voices = voices::of(&manifest, home);
             Ok::<_, ApiError>((manifest, voices))
         })
     }
@@ -203,6 +243,19 @@ struct Failure {
     /// The backend went away mid-synthesis (a crashed MLX sidecar, §5.3).
     unavailable: bool,
     message: String,
+}
+
+/// §5.3: 400 `voice_model_mismatch` when a request names both a cloned
+/// voice and, explicitly, a model it was not made for.
+fn voice_model_mismatch(voice: &str, made_for: &str, requested: &str) -> ApiError {
+    ApiError {
+        param: Some("model"),
+        ..ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "voice_model_mismatch",
+            format!("the voice \"{voice}\" was made for \"{made_for}\", not \"{requested}\""),
+        )
+    }
 }
 
 /// A failed synthesis before any audio, logged: 503 `backend_unavailable`,
@@ -396,14 +449,16 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
     .transpose()
     .map_err(|e| bad_request("keep_alive", "invalid_request", e))?;
 
-    let model = match string("model")? {
-        None => default_model,
-        Some(m) if DEFAULT_ALIASES.contains(&m) => default_model,
-        Some(m) => m,
+    let explicit_model = match string("model")? {
+        None => None,
+        Some(m) if DEFAULT_ALIASES.contains(&m) => None,
+        Some(m) => Some(m),
     };
+    let model = explicit_model.unwrap_or(default_model);
     // Anything unknown is ignored (§2.3).
     Ok(Job {
         model: model.to_string(),
+        explicit_model: explicit_model.is_some(),
         input: input.to_string(),
         voice: string("voice")?.map(str::to_string),
         format,
@@ -478,8 +533,11 @@ fn voice(
 }
 
 /// §2.5 `GET /v1/audio/voices?model=`: read from the manifest (the pulled
-/// one, else the catalog's), and the cloned voices if the model clones;
-/// never by loading the model. `cloned` marks the ones from `voices/`.
+/// one, else the catalog's), and the cloned voices made for that model if it
+/// clones; never by loading the model. `cloned` marks the ones from
+/// `voices/`. `?model=clones` is not a real model: it lists every cloned
+/// voice regardless of the model it was made for, same as before per-model
+/// voices, each entry naming its own `model`.
 pub(super) async fn voices(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
@@ -490,6 +548,27 @@ pub(super) async fn voices(
         Some(m) if DEFAULT_ALIASES.contains(&m) => st.models.settings().tts_default.clone(),
         Some(m) => m.to_string(),
     };
+    if name == "clones" {
+        let voices: Vec<Value> = {
+            let st = st.clone();
+            tokio::task::spawn_blocking(move || {
+                let home = st.registry.home();
+                voices::list(home)
+                    .into_iter()
+                    .filter_map(|id| {
+                        let model = voices::model_of(home, &id)?;
+                        Some(
+                            json!({"id": id, "accent": null, "gender": null, "default": false,
+                                     "cloned": true, "model": model}),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        }
+        .await
+        .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+        return Ok(Json(json!({"model": "clones", "voices": voices})));
+    }
     let (manifest, voices) = {
         let st = st.clone();
         tokio::task::spawn_blocking(move || {
@@ -520,9 +599,11 @@ pub(super) async fn voices(
     ))
 }
 
-/// §2.5 `GET /v1/audio/voices/{name}`: a cloned voice's transcript and
-/// its `ref.wav`, base64, byte for byte, so it can be added elsewhere. A
-/// bad name is a 400, as `POST` has it; no such cloned voice a 404.
+/// §2.5 `GET /v1/audio/voices/{name}`: a cloned voice's transcript, the
+/// model it was made for (§5.3 `model_of`, `CLONE_MODEL` if it predates
+/// per-model voices) and its `ref.wav`, base64, byte for byte, so it can be
+/// added elsewhere with that model. A bad name is a 400, as `POST` has it;
+/// no such cloned voice a 404.
 pub(super) async fn voice_export(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
@@ -537,13 +618,13 @@ pub(super) async fn voice_export(
             };
             let wav = std::fs::read(&voice.wav)
                 .map_err(|e| format!("read {}: {e}", voice.wav.display()))?;
-            Ok::<_, String>(Some((voice.text, wav)))
+            Ok::<_, String>(Some((voice.text, voice.model, wav)))
         })
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))?
     .map_err(|m| internal(&st, &req_id, m))?;
-    let (text, wav) = found.ok_or_else(|| ApiError {
+    let (text, model, wav) = found.ok_or_else(|| ApiError {
         param: Some("name"),
         ..ApiError::new(
             StatusCode::NOT_FOUND,
@@ -552,7 +633,7 @@ pub(super) async fn voice_export(
         )
     })?;
     Ok(Json(
-        json!({"name": name, "text": text, "wav_base64": STANDARD.encode(wav)}),
+        json!({"name": name, "text": text, "model": model, "wav_base64": STANDARD.encode(wav)}),
     ))
 }
 
@@ -605,10 +686,14 @@ pub(super) async fn delete_voice(
 }
 
 /// §2.5 `POST /v1/audio/voices`: the multipart fields `name`, `file` (the
-/// clip) and `text` (what it says) add a cloned voice through
-/// [`voices::add`], as `naru-audio voice add` does. The upload lands in
-/// `tmp/` and is removed after. 201 with the voice as the listing shows
-/// it, plus the clip's `duration` in seconds.
+/// clip), `text` (what it says) and `model` (which model it is for; a
+/// cloning model, defaulting to `CLONE_MODEL` as every voice was for
+/// before per-model voices) add a cloned voice through [`voices::add`], as
+/// `naru-audio voice add` does (always `CLONE_MODEL`; it has no `--model`
+/// yet). Recreating an exported voice (`GET /v1/audio/voices/{name}`)
+/// elsewhere is the same request, with its `model` carried over. The
+/// upload lands in `tmp/` and is removed after. 201 with the voice as the
+/// listing shows it, plus its `model` and the clip's `duration` in seconds.
 pub(super) async fn add_voice(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
@@ -621,12 +706,13 @@ pub(super) async fn add_voice(
             format!("the body must be multipart/form-data: {}", e.body_text()),
         )
     })?;
-    let (mut name, mut file, mut text) = (None, None, None);
+    let (mut name, mut file, mut text, mut model) = (None, None, None, None);
     while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
         match field.name().unwrap_or_default().to_owned().as_str() {
             "file" => file = Some(field.bytes().await.map_err(multipart_error)?),
             "name" => name = Some(field.text().await.map_err(multipart_error)?),
             "text" => text = Some(field.text().await.map_err(multipart_error)?),
+            "model" => model = Some(field.text().await.map_err(multipart_error)?),
             _ => {}
         }
     }
@@ -640,15 +726,30 @@ pub(super) async fn add_voice(
     let name = name.ok_or_else(|| required("name"))?;
     let file = file.ok_or_else(|| required("file"))?;
     let text = text.ok_or_else(|| required("text"))?;
+    let model = model.unwrap_or_else(|| voices::CLONE_MODEL.to_string());
+
+    // The model must be one that clones, checked against the catalog (a
+    // model need not be pulled to record a voice for it, as `GET
+    // /v1/audio/voices?model=` does not require it either).
+    {
+        let (st, model) = (st.clone(), model.clone());
+        tokio::task::spawn_blocking(move || clone_manifest(&st, &model))
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))??;
 
     let result = {
-        let (home, name) = (st.registry.home().to_path_buf(), name.clone());
+        let (home, name, model) = (
+            st.registry.home().to_path_buf(),
+            name.clone(),
+            model.clone(),
+        );
         tokio::task::spawn_blocking(move || {
             let upload = voices::scratch(&home, "upload");
             let result = std::fs::create_dir_all(home.join("tmp"))
                 .and_then(|()| std::fs::write(&upload, &file))
                 .map_err(|e| AddError::Io(format!("write {}: {e}", upload.display())))
-                .and_then(|()| voices::add(&home, &name, &upload, &text));
+                .and_then(|()| voices::add(&home, &name, &upload, &text, &model));
             // Also after a write that failed partway.
             let _ = std::fs::remove_file(&upload);
             result
@@ -682,8 +783,38 @@ pub(super) async fn add_voice(
             "gender": null,
             "default": false,
             "cloned": true,
+            "model": model,
             "duration": secs,
         })),
     )
         .into_response())
+}
+
+/// The manifest (pulled, or the catalog's if not) of the TTS model `name`,
+/// as `voices()` reads it: 404 `model_not_found` unknown, 409
+/// `model_not_pulled` never applies here (a catalog model need not be
+/// pulled to record a voice for it), 400 `invalid_request` not TTS, 400
+/// `model_does_not_clone` a TTS model that never speaks in cloned voices.
+/// Used to check a voice's `model` before it is stored, so a name that
+/// will never be usable is refused up front rather than only at
+/// `/v1/audio/speech`.
+fn clone_manifest(st: &AppState, name: &str) -> Result<Manifest, ApiError> {
+    let manifest = match st.registry.catalog().models.get(name) {
+        Some(m) if !st.registry.is_installed(name) => match m.model.kind {
+            Kind::Tts => m.clone(),
+            _ => return Err(not_kind(name, Kind::Tts)),
+        },
+        _ => kind_manifest(st, name, Kind::Tts)?,
+    };
+    if !manifest.clones() {
+        return Err(ApiError {
+            param: Some("model"),
+            ..ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "model_does_not_clone",
+                format!("the model \"{name}\" does not clone voices"),
+            )
+        });
+    }
+    Ok(manifest)
 }

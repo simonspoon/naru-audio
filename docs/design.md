@@ -320,10 +320,10 @@ decode FIFO per loaded model. Health and listing never wait on it (§2.5).
 | Route | Response |
 |---|---|
 | `GET /health` | `200 {"status":"ok","version":"0.1.0","api":1,"pid":123,"uptime_s":4410,"stt":{"default":"parakeet-tdt-0.6b-v2-int8","ready":true,"problem":null},"tts":{"default":"kokoro-v1.0","ready":false,"problem":{"code":"model_not_pulled","message":"run `naru-audio pull kokoro-v1.0`"}},"backends":[{"name":"sherpa-onnx","available":true},{"name":"mlx","available":false,"reason":"requires Apple Silicon"}]}`. It is served from in-memory state and **never blocks behind a decode**, which fixes auris's `status` problem. `ready` means pulled and loadable, not necessarily loaded. |
-| `GET /v1/models` | OpenAI list: `{"object":"list","data":[{"id","object":"model","created","owned_by":"naru-audio","x_kind":"stt\|tts\|vad","x_backend","x_available","x_unavailable_reason","x_pulled","x_loaded","x_size_bytes","x_default","x_license","x_license_url","x_non_commercial"}]}`. It lists pulled models plus catalog models that can run on this machine. `?pulled=true` filters the list. |
-| `GET /v1/audio/voices?model=kokoro-v1.0` | `{"model":"kokoro-v1.0","voices":[{"id":"af_heart","accent":"us","gender":"f","default":true,"cloned":false},…]}`. It is read **from the manifest** and never loads the model, which fixes the kokoro-rs `--list-voices` mistake. `cloned` is true for a cloned voice (§5.3) from `$NARU_AUDIO_HOME/voices/<name>/`, false for the manifest's own. |
-| `GET /v1/audio/voices/{name}` | Exports a cloned voice: `200 {"name":"amy","text":"Hello there.","wav_base64":"UklGR…"}`, where `text` is its `ref.txt` and `wav_base64` is its `ref.wav`, byte for byte, in standard base64. Errors: 400 `invalid_request` for a bad `name` (as `POST`); 404 `voice_not_found` if there is no cloned voice of that name (a built-in voice is not one). |
-| `POST /v1/audio/voices` | Adds a cloned voice (§5.3), the same code path as `naru-audio voice add`. `multipart/form-data` fields: `name` (the voice id: no path separators, no leading `.`), `file` (the clip, WAV or MP3 or anything else macOS `afconvert` reads; 3–30 s accepted, 5–15 s best) and `text` (exactly what the clip says). The clip is converted to 24 kHz mono and written to `$NARU_AUDIO_HOME/voices/<name>/` as `ref.wav` and `ref.txt`, all or nothing. Returns `201 {"id":"amy","accent":null,"gender":null,"default":false,"cloned":true,"duration":6.2}`: the entry `GET /v1/audio/voices` lists for a cloning model, plus the clip's length in seconds. Errors: 400 `invalid_request` for a missing field, a bad `name`, an empty `text` or a clip outside 3–30 s (`param` is the field); 409 `voice_exists` if the name is taken (an existing voice is never replaced); 415 `unsupported_media_type` if `afconvert` cannot read the clip; 413 over the 256 MiB body cap. |
+| `GET /v1/models` | OpenAI list: `{"object":"list","data":[{"id","object":"model","created","owned_by":"naru-audio","x_kind":"stt\|tts\|vad","x_backend","x_available","x_unavailable_reason","x_pulled","x_loaded","x_size_bytes","x_default","x_license","x_license_url","x_non_commercial","x_clone","x_clone_requires_transcript","x_instruct"}]}`. It lists pulled models plus catalog models that can run on this machine. `?pulled=true` filters the list. The three `x_` capability fields are `Manifest::clones`/`clone_requires_transcript`/`instructs` (§3.2, §5.3): whether the model speaks in a cloned reference recording, whether that clone needs the transcript alongside it, and whether it can design a voice from a description — meaningful for a TTS model, always `false` for STT/VAD. |
+| `GET /v1/audio/voices?model=kokoro-v1.0` | `{"model":"kokoro-v1.0","voices":[{"id":"af_heart","accent":"us","gender":"f","default":true,"cloned":false},…]}`. It is read **from the manifest** and never loads the model, which fixes the kokoro-rs `--list-voices` mistake. `cloned` is true for a cloned voice (§5.3) from `$NARU_AUDIO_HOME/voices/<name>/` **made for this model**, false for the manifest's own; a clone made for a different model is not listed here at all. `?model=clones` is not a real model: it lists every cloned voice regardless of the model it was made for, as every listing did before per-model voices, and each entry also carries its own `model`. |
+| `GET /v1/audio/voices/{name}` | Exports a cloned voice: `200 {"name":"amy","text":"Hello there.","model":"qwen3-tts-0.6b-base-mlx","wav_base64":"UklGR…"}`, where `text` is its `ref.txt`, `model` is its `model.txt` (`CLONE_MODEL` for a voice that predates per-model voices), and `wav_base64` is its `ref.wav`, byte for byte, in standard base64. Errors: 400 `invalid_request` for a bad `name` (as `POST`); 404 `voice_not_found` if there is no cloned voice of that name (a built-in voice is not one). |
+| `POST /v1/audio/voices` | Adds a cloned voice (§5.3), the same code path as `naru-audio voice add`. `multipart/form-data` fields: `name` (the voice id: no path separators, no leading `.`), `file` (the clip, WAV or MP3 or anything else macOS `afconvert` reads; 3–30 s accepted, 5–15 s best), `text` (exactly what the clip says) and `model` (which model it is for, a TTS model whose manifest sets `clone = true`; defaults to `CLONE_MODEL` if not given, same as every voice before per-model voices). The clip is converted to 24 kHz mono and written to `$NARU_AUDIO_HOME/voices/<name>/` as `ref.wav`, `ref.txt` and `model.txt`, all or nothing. Returns `201 {"id":"amy","accent":null,"gender":null,"default":false,"cloned":true,"model":"qwen3-tts-0.6b-base-mlx","duration":6.2}`: the entry `GET /v1/audio/voices?model=` lists for that model, plus the clip's length in seconds. Recreating an exported voice (`GET /v1/audio/voices/{name}` above) elsewhere is the same request with its `model` carried over. Errors: 400 `invalid_request` for a missing field, a bad `name`, an empty `text` or a clip outside 3–30 s (`param` is the field); 400 `model_does_not_clone` if `model` is a TTS model that never speaks in cloned voices; 404 `model_not_found` if `model` is not in the catalog; 409 `voice_exists` if the name is taken (an existing voice is never replaced); 415 `unsupported_media_type` if `afconvert` cannot read the clip; 413 over the 256 MiB body cap. |
 | `POST /api/pull` | `{"model":"kokoro-v1.0"}` returns an NDJSON stream of `{"status":"downloading","file","completed","total"}` lines, then `{"status":"verifying"}`, then `{"status":"success"}`. It is idempotent. |
 | `DELETE /api/models/{name}` | 204. Returns 409 `model_in_use` while the model is loaded and busy; an idle loaded model is unloaded first. |
 | `GET /api/ps` | Loaded models: `[{"name","kind","backend","resident_bytes","expires_at","busy"}]`. |
@@ -343,6 +343,8 @@ Every non-2xx HTTP response uses OpenAI's envelope:
 | 403 | `forbidden_origin` / `forbidden_host` | The Host or Origin guard (§2.1) rejected the request. |
 | 404 | `model_not_found` | The name is in neither the catalog nor the user catalog. |
 | 404 | `not_found` | No route for the path. |
+| 400 | `model_does_not_clone` | `POST /v1/audio/voices` with a `model` that is a TTS model but never speaks in cloned voices. |
+| 400 | `voice_model_mismatch` | `POST /v1/audio/speech` names both a cloned voice and, explicitly, a `model` it was not made for. |
 | 404 | `voice_not_found` | `GET /v1/audio/voices/{name}` with no cloned voice of that name. |
 | 405 | `method_not_allowed` | The route exists but not for this method. |
 | 409 | `model_not_pulled` | Known but not downloaded. The message gives the exact `naru-audio pull` command. The daemon **never auto-pulls** on an inference request. |
@@ -421,6 +423,7 @@ size   = 652_184_296                     # auris model.rs pins sizes too
 # [backend.sherpa-onnx] lang="en" lexicon=["lexicon-us-en.txt", …] dict_dir="dict"   (fixed at load)
 # [[voice]] id="af_heart" sid=3 accent="us" gender="f" default=true
 # [backend.mlx] clone=true      speaks in the cloned voices (§5.3)
+# [backend.mlx] clone_requires_transcript=true  clone needs ref_text too (§5.3)
 # [backend.mlx] instruct=true   takes the request's `instructions` (§2.3, §5.3)
 # An archive source: [[archive]] url=… sha256=… strip=1, followed by [[file]] entries whose sha256 is checked after extraction.
 ```
@@ -722,10 +725,23 @@ Sidecar design:
   (`qwen3-tts-0.6b-base-mlx`, `qwen3-tts-1.7b-base-mlx`) have no preset
   voices; each manifest sets `[backend.mlx] clone = true`, and each speaks in the cloned
   voices under `$NARU_AUDIO_HOME/voices/<name>/` (`ref.wav`, 24 kHz mono,
-  and `ref.txt`, its transcript), added with `naru-audio voice add <name>
-  <clip> --text <transcript>` or `POST /v1/audio/voices` (§2.5) and listed by `/v1/audio/voices` after the
+  and `ref.txt`, its transcript — required here, so both manifests also set
+  `clone_requires_transcript = true`: mlx-audio's `qwen3_tts.py` only takes
+  the in-context cloning path, `use_icl`, when both `ref_audio` and
+  `ref_text` are given), added with `naru-audio voice add <name>
+  <clip> --text <transcript>` or `POST /v1/audio/voices` (§2.5) and listed by `/v1/audio/voices?model=` after the
   manifest's. Each goes to mlx-audio as `ref_audio` and `ref_text`. No gap or leveller: the chunks are cut mid-sentence, as
-  with Pocket.
+  with Pocket. **Voices are keyed by model** (task 1454): alongside `ref.wav`
+  and `ref.txt`, a voice's directory holds `model.txt`, the model it was
+  cloned or designed for; `voices::of` (which every listing and `speech`
+  goes through) only offers a manifest the clones made for its own model, a
+  voice with no `model.txt` — everything added before this — is attributed
+  to `CLONE_MODEL` (`qwen3-tts-0.6b-base-mlx`), and `POST /v1/audio/speech`
+  with a cloned voice and an explicit `model` it was not made for is
+  refused (400 `voice_model_mismatch`) rather than silently using the wrong
+  model or answering `unknown_voice` as if the voice did not exist; with no
+  explicit `model`, the voice's own is used, generalising the CLI's
+  `say_model` (still `CLONE_MODEL` for a legacy voice).
 - **Instructions:** a manifest that sets `[backend.mlx] instruct = true`
   gets the request's `instructions` (§2.3) in the `synth` header as
   `instruct`, which the sidecar passes to mlx-audio's `generate`; no other
@@ -738,7 +754,7 @@ Sidecar design:
 - **Chatterbox** (`chatterbox-tts-8bit-mlx`, MIT) is a third cloning model:
   like the Qwen3-TTS Base pair it sets `[backend.mlx] clone = true` and has
   no preset voices, but it needs no transcript (mlx-audio's Chatterbox
-  ignores `ref_text`, sent anyway for a uniform request). It does not
+  ignores `ref_text`, sent anyway for a uniform request; `clone_requires_transcript` is unset, so `false`). It does not
   support `speed` at all; the sidecar shim rejects a non-1.0 `speed` for it
   rather than silently generating at normal speed. It takes the request's
   `exaggeration` (0–1, an emotion-exaggeration dial), gated by
@@ -794,7 +810,9 @@ Sidecar design:
   Unlike VoxCPM2's cloning path, its cloned voice's transcript is not
   ignored — mlx-audio's OmniVoice `generate` takes `ref_text` and prepends
   it to the spoken text before tokenizing — so `--text` is used, not just
-  accepted and dropped. It does not support `speed` either (no `speed`
+  accepted and dropped. It is still optional, though (`ref_text: Optional[str]
+  = None`, cloning gated on `ref_audio` alone), so `clone_requires_transcript`
+  is unset, `false`. It does not support `speed` either (no `speed`
   parameter, only `**kwargs`), rejected the same way as Chatterbox,
   VoxCPM2 and IndexTTS, and does not stream: like IndexTTS, mlx-audio's
   `generate` yields exactly one chunk after the whole utterance has
@@ -812,7 +830,11 @@ Sidecar design:
   Non-Commercial License, **non-commercial**) is a seventh cloning model,
   and the third (after VoxCPM2 and OmniVoice) that also designs a voice
   from a description: `[backend.mlx] clone = true` and `instruct = true`,
-  no preset voices, 24 kHz output. It does not support `speed` either (no
+  no preset voices, 24 kHz output. Unlike the five cloning models above,
+  its `generate` raises outright without a transcript alongside the
+  reference clip (`breeze_tts.py`: `"Breeze voice cloning requires ref_text
+  with ref_audio."`), so its manifest also sets `clone_requires_transcript
+  = true`. It does not support `speed` either (no
   `speed` parameter, swallowed silently by its own `**kwargs`, same
   mechanism as Chatterbox/VoxCPM2/IndexTTS/OmniVoice), rejected the same
   way as those four. Unlike those four, its `generate` does declare a

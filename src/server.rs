@@ -235,6 +235,14 @@ async fn models(
                 "x_license": e.manifest.model.license,
                 "x_license_url": e.manifest.model.license_url,
                 "x_non_commercial": e.manifest.model.non_commercial,
+                // §5.3: what a client picking a TTS model can do with it —
+                // clone a reference recording, whether that clone needs a
+                // transcript alongside it, and design a voice from a
+                // description. Meaningless for STT/VAD, but sent for every
+                // kind rather than only TTS, same as the other `x_` fields.
+                "x_clone": e.manifest.clones(),
+                "x_clone_requires_transcript": e.manifest.clone_requires_transcript(),
+                "x_instruct": e.manifest.instructs(),
             })
         })
         .collect();

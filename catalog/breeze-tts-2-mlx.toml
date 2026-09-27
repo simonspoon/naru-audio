@@ -47,6 +47,10 @@ non_commercial = true                    # see the LICENSE excerpt above
 [backend.mlx]
 # Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
 clone = true
+# Its `generate` raises outright without a transcript alongside the
+# reference clip (breeze_tts.py: "Breeze voice cloning requires ref_text
+# with ref_audio.").
+clone_requires_transcript = true
 # Takes the request's `instructions` as mlx-audio's `instruct`, to make a
 # voice up from a description instead of cloning one.
 instruct = true

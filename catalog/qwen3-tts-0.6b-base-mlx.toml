@@ -24,6 +24,10 @@ resident_bytes = 2_700_000_000
 [backend.mlx]
 # Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
 clone = true
+# In-context cloning needs both the reference clip and its transcript
+# (mlx-audio's qwen3_tts.py: `use_icl = ref_audio is not None and
+# ref_text is not None`).
+clone_requires_transcript = true
 
 [[file]]
 path   = "config.json"

@@ -201,7 +201,10 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         "owned_by",
         "x_available",
         "x_backend",
+        "x_clone",
+        "x_clone_requires_transcript",
         "x_default",
+        "x_instruct",
         "x_kind",
         "x_license",
         "x_license_url",
@@ -219,6 +222,10 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         assert_eq!(m["x_kind"], "stt");
         assert_eq!(m["x_loaded"], false);
         assert_eq!(m["x_default"], false);
+        // None of these STT/VAD test fixtures clone or design a voice.
+        assert_eq!(m["x_clone"], false);
+        assert_eq!(m["x_clone_requires_transcript"], false);
+        assert_eq!(m["x_instruct"], false);
     }
 
     let vad = &data[2];
@@ -387,12 +394,19 @@ async fn unreadable_manifest_json_is_skipped() {
     assert_eq!(delete(dir.path(), "vad").await.0, StatusCode::NO_CONTENT);
 }
 
-/// A cloned voice `name` in `home`, as `voice add` leaves it.
+/// A cloned voice `name` in `home`, as `voice add` leaves it (always
+/// `CLONE_MODEL`, since the CLI has no `--model`).
 fn add_voice(home: &Path, name: &str, wav: &[u8], text: &str) {
+    add_voice_for(home, name, wav, text, naru_audio::voices::CLONE_MODEL);
+}
+
+/// A cloned voice `name` in `home`, made for `model`.
+fn add_voice_for(home: &Path, name: &str, wav: &[u8], text: &str, model: &str) {
     let voice = home.join("voices").join(name);
     std::fs::create_dir_all(&voice).unwrap();
     std::fs::write(voice.join("ref.wav"), wav).unwrap();
     std::fs::write(voice.join("ref.txt"), text).unwrap();
+    std::fs::write(voice.join("model.txt"), model).unwrap();
 }
 
 #[tokio::test]
@@ -406,6 +420,7 @@ async fn a_cloned_voice_exports_its_clip_byte_for_byte() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["name"], "amy");
     assert_eq!(body["text"], "Hello there.");
+    assert_eq!(body["model"], naru_audio::voices::CLONE_MODEL);
     let decoded = STANDARD
         .decode(body["wav_base64"].as_str().unwrap())
         .unwrap();
@@ -413,7 +428,7 @@ async fn a_cloned_voice_exports_its_clip_byte_for_byte() {
         decoded,
         std::fs::read(dir.path().join("voices/amy/ref.wav")).unwrap()
     );
-    assert_eq!(body.as_object().unwrap().len(), 3);
+    assert_eq!(body.as_object().unwrap().len(), 4);
 }
 
 #[tokio::test]
@@ -510,6 +525,47 @@ async fn delete_removes_a_cloned_voice_or_refuses() {
     assert_eq!(error_code(&body), "voice_not_found");
 }
 
+/// §5.3 "per-model voice capabilities": `/v1/models` names each TTS
+/// model's cloning and voice-design capability, so a client can tell
+/// before offering it. Uses the built-in catalog, not a fake manifest,
+/// since it is these three flags' wiring from `Manifest` into the JSON
+/// that is under test, not the catalog values themselves (`registry::manifest`
+/// already covers those per model).
+#[tokio::test]
+async fn v1_models_names_cloning_and_voice_design_capability() {
+    let dir = home(&[]);
+    let (status, body) = get_json(dir.path(), "/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let data = body["data"].as_array().unwrap();
+    let get = |id: &str| data.iter().find(|m| m["id"] == id).unwrap();
+
+    // Kokoro: preset voices only, no cloning or voice design.
+    let kokoro = get("kokoro-v1.0");
+    assert_eq!(kokoro["x_clone"], false);
+    assert_eq!(kokoro["x_clone_requires_transcript"], false);
+    assert_eq!(kokoro["x_instruct"], false);
+
+    // Chatterbox: clones, but its transcript is ignored, so no
+    // `x_clone_requires_transcript`.
+    let chatterbox = get("chatterbox-tts-8bit-mlx");
+    assert_eq!(chatterbox["x_clone"], true);
+    assert_eq!(chatterbox["x_clone_requires_transcript"], false);
+    assert_eq!(chatterbox["x_instruct"], false);
+
+    // Qwen3-TTS Base: clones, and needs the transcript for in-context
+    // cloning.
+    let base = get("qwen3-tts-0.6b-base-mlx");
+    assert_eq!(base["x_clone"], true);
+    assert_eq!(base["x_clone_requires_transcript"], true);
+    assert_eq!(base["x_instruct"], false);
+
+    // VoxCPM2: clones (no transcript needed) and also designs a voice.
+    let voxcpm2 = get("voxcpm2-8bit-mlx");
+    assert_eq!(voxcpm2["x_clone"], true);
+    assert_eq!(voxcpm2["x_clone_requires_transcript"], false);
+    assert_eq!(voxcpm2["x_instruct"], true);
+}
+
 #[tokio::test]
 async fn the_voice_listing_marks_cloned_voices() {
     let dir = home(&[]);
@@ -521,7 +577,7 @@ async fn the_voice_listing_marks_cloned_voices() {
         "voice": [{"id": "af_heart", "sid": 0, "default": true}],
     });
     std::fs::write(model.join("manifest.json"), manifest.to_string()).unwrap();
-    add_voice(dir.path(), "amy", b"RIFF", "Hi.");
+    add_voice_for(dir.path(), "amy", b"RIFF", "Hi.", "fake-clone");
 
     let (status, body) = get_json(dir.path(), "/v1/audio/voices?model=fake-clone").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -531,5 +587,74 @@ async fn the_voice_listing_marks_cloned_voices() {
             {"id": "af_heart", "accent": null, "gender": null, "default": true, "cloned": false},
             {"id": "amy", "accent": null, "gender": null, "default": false, "cloned": true},
         ]})
+    );
+}
+
+/// §5.3 "voices keyed by model": a clone made for one model does not show
+/// up under another cloning model's listing, only its own; `?model=clones`
+/// still lists every clone, each naming its own `model`; a legacy voice
+/// (`add_voice`, no `model.txt`) is attributed to `CLONE_MODEL`.
+#[tokio::test]
+async fn voices_are_listed_only_under_the_model_they_were_made_for() {
+    let dir = home(&[]);
+    for name in ["fake-clone", "other-clone"] {
+        let model = dir.path().join("models").join(name);
+        std::fs::create_dir_all(&model).unwrap();
+        let manifest = json!({
+            "model": {"name": name, "kind": "tts", "backend": "sherpa-onnx"},
+            "backend": {"sherpa-onnx": {"clone": true}},
+        });
+        std::fs::write(model.join("manifest.json"), manifest.to_string()).unwrap();
+    }
+    add_voice_for(dir.path(), "amy", b"RIFF", "Hi.", "fake-clone");
+    add_voice_for(dir.path(), "zed", b"RIFF", "Yo.", "other-clone");
+    // Predates per-model voices: attributed to CLONE_MODEL, not either.
+    add_voice(dir.path(), "legacy", b"RIFF", "Old.");
+
+    let (status, body) = get_json(dir.path(), "/v1/audio/voices?model=fake-clone").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body["voices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["amy"]);
+
+    let (status, body) = get_json(dir.path(), "/v1/audio/voices?model=other-clone").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body["voices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["zed"]);
+
+    let (status, body) = get_json(dir.path(), "/v1/audio/voices?model=clones").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["model"], "clones");
+    let mut got: Vec<(String, String)> = body["voices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["id"].as_str().unwrap().to_string(),
+                v["model"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        [
+            ("amy".to_string(), "fake-clone".to_string()),
+            (
+                "legacy".to_string(),
+                naru_audio::voices::CLONE_MODEL.to_string()
+            ),
+            ("zed".to_string(), "other-clone".to_string()),
+        ]
     );
 }

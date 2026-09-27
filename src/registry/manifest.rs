@@ -246,6 +246,26 @@ impl Manifest {
             .unwrap_or(false)
     }
 
+    /// `backend.<model.backend>.clone_requires_transcript`: a cloning model
+    /// (`clones()`) that will not clone a reference recording without its
+    /// transcript too — Qwen3-TTS Base's in-context cloning needs both
+    /// `ref_audio` and `ref_text` (mlx-audio's `qwen3_tts.py`: `use_icl =
+    /// ref_audio is not None and ref_text is not None`), and Breeze's
+    /// `generate` raises `"Breeze voice cloning requires ref_text with
+    /// ref_audio."` outright (`breeze_tts.py`). Every other cloning model
+    /// (Chatterbox, VoxCPM2, IndexTTS, OmniVoice) either has no `ref_text`
+    /// parameter at all or reads it only if given, so this defaults to
+    /// `false` for them; `naru-audio` still stores a transcript for every
+    /// cloned voice regardless (`voices::add`), since one is cheap to keep
+    /// and this flag is purely informational for a client choosing a model.
+    pub fn clone_requires_transcript(&self) -> bool {
+        self.backend
+            .get(&self.model.backend)
+            .and_then(|t| t.get("clone_requires_transcript"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     fn validate(&mut self) -> Result<(), String> {
         let name = &self.model.name;
         if !is_relative_path(name) || name.contains('/') {
@@ -584,6 +604,7 @@ mod tests {
         assert_eq!(m.model.kind, Kind::Tts);
         assert_eq!(m.model.backend, "mlx");
         assert!(m.clones());
+        assert!(m.clone_requires_transcript());
         assert!(m.voices.is_empty());
         // The same files as CustomVoice's, from the Base repo.
         let custom = &cat.models["qwen3-tts-0.6b-mlx"];
@@ -608,6 +629,7 @@ mod tests {
         assert_eq!(m.model.kind, Kind::Tts);
         assert_eq!(m.model.backend, "mlx");
         assert!(m.clones());
+        assert!(m.clone_requires_transcript());
         assert!(!m.instructs());
         assert!(m.voices.is_empty());
         // The same files as the 0.6B Base's, from the 1.7B Base repo.
@@ -633,6 +655,7 @@ mod tests {
         assert_eq!(m.model.license.as_deref(), Some("MIT"));
         assert!(!m.model.non_commercial);
         assert!(m.clones());
+        assert!(!m.clone_requires_transcript());
         assert!(m.exaggerates());
         assert!(!m.instructs());
         assert!(m.voices.is_empty());
@@ -665,6 +688,7 @@ mod tests {
         assert_eq!(m.model.license.as_deref(), Some("Apache-2.0"));
         assert!(!m.model.non_commercial);
         assert!(m.clones());
+        assert!(!m.clone_requires_transcript());
         assert!(!m.exaggerates());
         assert!(!m.instructs());
         assert!(m.voices.is_empty());
@@ -720,6 +744,7 @@ mod tests {
         assert!(!m.model.non_commercial);
         // The first model that both clones and designs a voice.
         assert!(m.clones());
+        assert!(!m.clone_requires_transcript());
         assert!(m.instructs());
         assert!(!m.exaggerates());
         assert!(m.voices.is_empty());
@@ -747,6 +772,7 @@ mod tests {
         // Naru 1445: k2-fsa/OmniVoice's pre-trained weights are CC-BY-NC.
         assert!(m.model.non_commercial);
         assert!(m.clones());
+        assert!(!m.clone_requires_transcript());
         assert!(m.instructs());
         assert!(!m.exaggerates());
         assert!(m.voices.is_empty());
@@ -781,6 +807,7 @@ mod tests {
         // non-commercial use only.
         assert!(m.model.non_commercial);
         assert!(m.clones());
+        assert!(m.clone_requires_transcript());
         assert!(m.instructs());
         assert!(!m.exaggerates());
         assert!(m.voices.is_empty());

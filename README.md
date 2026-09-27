@@ -168,16 +168,26 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
 - The clip is one speaker, 5–15 s for best results (3–30 s accepted), in WAV,
   MP3 or anything else `afconvert` reads. `--text` must be its exact
   transcript.
-- The voice is stored as `~/.naru-audio/voices/<name>/ref.wav` (24 kHz mono)
-  and `ref.txt`. An existing voice is never replaced; delete its directory
-  to redo it. Voices are read on each request, so a new one works without
-  restarting the daemon.
-- `say` with a cloned voice and no `-m` uses `qwen3-tts-0.6b-base-mlx`;
+- The voice is stored as `~/.naru-audio/voices/<name>/ref.wav` (24 kHz mono),
+  `ref.txt` and `model.txt`, the model it was made for. An existing voice is
+  never replaced; delete its directory to redo it. Voices are read on each
+  request, so a new one works without restarting the daemon.
+- `voice add` (the CLI) always records `qwen3-tts-0.6b-base-mlx`; it has no
+  `--model` yet. `POST /v1/audio/voices` takes one (§2.5 below), for
   `-m qwen3-tts-1.7b-base-mlx`, `-m chatterbox-tts-8bit-mlx`,
   `-m indextts-1.5-mlx`, `-m voxcpm2-8bit-mlx`, `-m omnivoice-bf16-mlx` or
-  `-m breeze-tts-2-mlx` uses another cloning model.
-- Voices can also be added with `POST /v1/audio/voices` and exported with
-  `GET /v1/audio/voices/{name}` ([docs/design.md §2.5](docs/design.md)).
+  `-m breeze-tts-2-mlx` instead. `say` with a cloned voice and no `-m` picks
+  the model it was made for; an explicit `-m` that voice was not made for
+  is refused rather than silently ignored.
+- `GET /v1/models` names each model's cloning and voice-design capability
+  (`x_clone`, `x_clone_requires_transcript`, `x_instruct`), so a client
+  picking a model knows what it can do before offering it. `GET
+  /v1/audio/voices?model=<name>` lists only the clones made for `<name>`,
+  alongside its own preset voices; `?model=clones` still lists every
+  cloned voice regardless of model, each naming which one it is for.
+  Voices can also be added with `POST /v1/audio/voices` and exported,
+  model and all, with `GET /v1/audio/voices/{name}` ([docs/design.md
+  §2.5](docs/design.md)).
 - `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
   entirely — a non-1.0 `--speed` with it fails the request instead of
   quietly synthesising at normal speed. It takes `--exaggeration` (0-1, an

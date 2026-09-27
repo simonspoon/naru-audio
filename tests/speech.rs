@@ -740,6 +740,7 @@ fn a_cloning_model_speaks_the_cloned_voices() {
         std::fs::create_dir_all(&voice).unwrap();
         std::fs::write(voice.join("ref.wav"), b"").unwrap();
         std::fs::write(voice.join("ref.txt"), "Hello.").unwrap();
+        std::fs::write(voice.join("model.txt"), "fake-clone").unwrap();
     };
     add(home.path(), "zed");
     let voices_dir = home.path().to_path_buf();
@@ -771,11 +772,7 @@ fn a_cloning_model_speaks_the_cloned_voices() {
     assert_eq!(reply.status, 200);
     assert_eq!(last(), "amy");
 
-    for (model, voice) in [
-        ("fake-clone", "nope"),
-        ("fake-clone", "../voices/amy"),
-        ("fake-tts", "amy"),
-    ] {
+    for (model, voice) in [("fake-clone", "nope"), ("fake-clone", "../voices/amy")] {
         let reply = server.speech(json!({"model": model, "input": "Hi.", "voice": voice}));
         assert_eq!(reply.status, 400, "{model} {voice}");
         assert_eq!(reply.json()["error"]["code"], "unknown_voice");
@@ -786,6 +783,34 @@ fn a_cloning_model_speaks_the_cloned_voices() {
         .unwrap()
         .to_string();
     assert!(message.ends_with("use one of: amy, zed"), "{message}");
+
+    // §5.3: an explicit model that "amy" (made for "fake-clone") was not
+    // made for is refused by name, not treated as merely unknown.
+    let reply = server.speech(json!({"model": "fake-tts", "input": "Hi.", "voice": "amy"}));
+    assert_eq!(reply.status, 400);
+    let error = &reply.json()["error"];
+    assert_eq!(error["code"], "voice_model_mismatch");
+    assert_eq!(
+        error["message"],
+        "the voice \"amy\" was made for \"fake-clone\", not \"fake-tts\""
+    );
+
+    // With no explicit model, "amy" picks its own ("fake-clone") instead of
+    // the daemon's default ("fake-tts").
+    let reply = server.speech(json!({"input": "Hi.", "voice": "amy"}));
+    assert_eq!(reply.status, 200);
+    assert_eq!(last(), "amy");
+
+    // A clone that happens to share a name with a built-in voice of the
+    // model that would otherwise be used does not shadow it: "af_heart" is
+    // fake-tts's own default voice, even though a clone named "af_heart"
+    // exists for fake-clone. Neither the implicit default nor an explicit
+    // "fake-tts" is redirected to the clone or refused as a mismatch.
+    add(&voices_dir, "af_heart");
+    let reply = server.speech(json!({"input": "Hi.", "voice": "af_heart"}));
+    assert_eq!(reply.status, 200, "{}", reply.json());
+    let reply = server.speech(json!({"model": "fake-tts", "input": "Hi.", "voice": "af_heart"}));
+    assert_eq!(reply.status, 200, "{}", reply.json());
 }
 
 /// A cloning model with no cloned voices and no voice asked for says
@@ -837,6 +862,7 @@ fn a_model_that_both_clones_and_instructs_prefers_a_named_voice() {
     std::fs::create_dir_all(&voice).unwrap();
     std::fs::write(voice.join("ref.wav"), b"").unwrap();
     std::fs::write(voice.join("ref.txt"), "Hello.").unwrap();
+    std::fs::write(voice.join("model.txt"), "fake-both").unwrap();
     let record = Arc::new(Record::default());
     let server = Server::start(
         home,
@@ -914,6 +940,7 @@ fn a_posted_clip_becomes_a_cloned_voice() {
         ("name", b"amy"),
         ("text", b"  Hello there.\n"),
         ("file", &ok),
+        ("model", b"fake-clone"),
     ]);
     assert_eq!(
         reply.status,
@@ -926,7 +953,7 @@ fn a_posted_clip_becomes_a_cloned_voice() {
     assert_eq!(
         body,
         json!({"id": "amy", "accent": null, "gender": null, "default": false,
-               "cloned": true, "duration": body["duration"]})
+               "cloned": true, "model": "fake-clone", "duration": body["duration"]})
     );
     let voice = home_dir.join("voices").join("amy");
     assert_eq!(
