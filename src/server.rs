@@ -89,7 +89,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/voices/{model}/{voice}/sample",
-            get(speech::voice_sample),
+            get(speech::voice_sample).post(speech::generate_voice_sample),
         )
         .route(
             "/api/voices/preview",

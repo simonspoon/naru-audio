@@ -192,8 +192,12 @@ pub struct PromptFormatInline {
     pub example: Option<String>,
 }
 
-/// One generation knob within [`PromptFormat`]. `min`/`max` are set only
-/// where the model or its docs actually give a range.
+/// One generation knob within [`PromptFormat`]. Every knob declares
+/// `min`, `max` and `default` (naru task 1458: `/v1/audio/speech` and
+/// `POST /api/voices/preview` validate a request's `knobs` against them);
+/// `step` is set only for a knob whose kwarg takes an integer (e.g.
+/// mlx-audio's `num_steps`), so a client knows to round rather than send a
+/// fraction.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromptFormatKnob {
@@ -204,6 +208,8 @@ pub struct PromptFormatKnob {
     pub min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1066,8 +1072,9 @@ mod tests {
             [PromptFormatKnob {
                 name: "speed".to_string(),
                 default: Some(1.0),
-                min: None,
-                max: None,
+                min: Some(0.5),
+                max: Some(2.0),
+                step: None,
             }]
         );
 
@@ -1103,6 +1110,28 @@ mod tests {
                 serde_json::json!({}),
                 "{name}"
             );
+        }
+
+        // naru task 1458: every knob is a real range a request can be
+        // checked against, not documentation alone.
+        for name in &tts_models {
+            let pf = cat.models[*name].prompt_format().unwrap();
+            for k in &pf.knobs {
+                let min = k
+                    .min
+                    .unwrap_or_else(|| panic!("{name}'s knob {} has no min", k.name));
+                let max = k
+                    .max
+                    .unwrap_or_else(|| panic!("{name}'s knob {} has no max", k.name));
+                let default = k
+                    .default
+                    .unwrap_or_else(|| panic!("{name}'s knob {} has no default", k.name));
+                assert!(
+                    (min..=max).contains(&default),
+                    "{name}'s knob {} default {default} is not within {min}..={max}",
+                    k.name
+                );
+            }
         }
     }
 

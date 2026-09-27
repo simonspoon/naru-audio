@@ -813,6 +813,25 @@ async fn voice_sample_serves_a_clones_clip_and_refuses_an_uncached_builtin() {
     );
     assert_eq!(error_code(&body), "preview_not_cached");
 
+    // `GET` never generates, even asked to with `?generate=true` (a
+    // cross-site `<audio src>` sends no `Origin` header, naru task 1458
+    // ST2 review): kokoro is not even pulled here, so an attempt to load
+    // and synthesise it would fail as `model_not_pulled` (409), not this
+    // 404 — the same `preview_not_cached` as with no query at all proves
+    // `GET` never tried.
+    let req = Request::get("/api/voices/kokoro-v1.0/af_heart/sample?generate=true")
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(app(dir.path()), req).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(error_code(&body), "preview_not_cached");
+
     // An unknown voice of a real model is `voice_not_found`, not treated
     // as an uncached built-in.
     let req = Request::get("/api/voices/fake-clone/nope/sample")
@@ -827,6 +846,48 @@ async fn voice_sample_serves_a_clones_clip_and_refuses_an_uncached_builtin() {
         String::from_utf8_lossy(&body)
     );
     assert_eq!(error_code(&body), "voice_not_found");
+}
+
+/// naru task 1458 ST2 review: generating moved from `GET
+/// .../sample?generate=true` to `POST .../sample`, which the Host/Origin
+/// guard (§2.1) actually covers. `POST` serves a cloned voice's clip the
+/// same as `GET`; for a built-in voice it really does try to load and
+/// synthesise (kokoro is not pulled here, so that is `model_not_pulled`,
+/// not `preview_not_cached` — the opposite of `GET`, above).
+#[tokio::test]
+async fn post_sample_generates_where_get_refuses() {
+    let dir = home(&[]);
+    fake_clone_manifest(dir.path());
+    let wav: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+    add_voice_for(dir.path(), "amy", &wav, "Hi.", "fake-clone");
+
+    let req = Request::post("/api/voices/fake-clone/amy/sample")
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app(dir.path()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    assert_eq!(body, wav);
+
+    let req = Request::post("/api/voices/kokoro-v1.0/af_heart/sample")
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(app(dir.path()), req).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(error_code(&body), "model_not_pulled");
 }
 
 /// §5.3 "per-model voice capabilities": `/v1/models` names each TTS
@@ -851,7 +912,7 @@ async fn v1_models_names_cloning_and_voice_design_capability() {
     // Speed is the only style control sherpa-onnx's Kokoro takes.
     assert_eq!(
         kokoro["x_prompt_format"],
-        json!({"knobs": [{"name": "speed", "default": 1.0}]})
+        json!({"knobs": [{"name": "speed", "default": 1.0, "min": 0.5, "max": 2.0}]})
     );
 
     // Chatterbox: clones, but its transcript is ignored, so no
@@ -866,7 +927,7 @@ async fn v1_models_names_cloning_and_voice_design_capability() {
         chatterbox["x_prompt_format"]["knobs"],
         json!([
             {"name": "exaggeration", "default": 0.1, "min": 0.0, "max": 1.0},
-            {"name": "cfg_weight", "default": 0.5},
+            {"name": "cfg_weight", "default": 0.5, "min": 0.0, "max": 1.0},
         ])
     );
 
@@ -881,7 +942,7 @@ async fn v1_models_names_cloning_and_voice_design_capability() {
     assert_eq!(
         base["x_prompt_format"]["knobs"],
         json!([
-            {"name": "temperature", "default": 0.9},
+            {"name": "temperature", "default": 0.9, "min": 0.0, "max": 2.0},
             {"name": "top_p", "default": 1.0, "min": 0.0, "max": 1.0},
         ])
     );

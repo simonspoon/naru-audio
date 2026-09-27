@@ -188,6 +188,14 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   Voices can also be added with `POST /v1/audio/voices` and exported,
   model and all, with `GET /v1/audio/voices/{name}` ([docs/design.md
   §2.5](docs/design.md)).
+- `GET /v1/models`' `x_prompt_format.knobs` names each model's own
+  generation knobs beyond `speed`/`exaggeration` — Qwen3-TTS's
+  `temperature`/`top_p`, Chatterbox's `cfg_weight`, VoxCPM2's
+  `cfg_value`/`inference_timesteps`, and so on — each with `min`, `max`,
+  `default` and, for one that takes an integer, `step`. `POST
+  /v1/audio/speech` and `POST /api/voices/preview` take them as
+  `"knobs":{"<name>":<number>}`; a name not in `x_prompt_format.knobs` or a
+  value outside its range is 400 ([docs/design.md §2.7](docs/design.md)).
 - `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
   entirely — a non-1.0 `--speed` with it fails the request instead of
   quietly synthesising at normal speed. It takes `--exaggeration` (0-1, an
@@ -306,7 +314,7 @@ curl http://127.0.0.1:7870/v1/audio/transcriptions -F file=@speech.wav -F model=
 | `GET /v1/audio/transcriptions/stream` | WebSocket streaming STT. |
 | `POST /v1/audio/speech` | Text in, streamed `wav` or `pcm` out. |
 | `GET`/`POST /v1/audio/voices`, `GET`/`PATCH`/`DELETE /v1/audio/voices/{name}` | List, add, export, rename/update and remove cloned and designed voices. |
-| `GET /api/voices/{model}/{voice}/sample`, `POST /api/voices/preview` | A voice's own or a cached/generated sample clip; a one-off preview from an uploaded clip. |
+| `GET`/`POST /api/voices/{model}/{voice}/sample`, `POST /api/voices/preview` | A voice's own or a cached (`GET`) or freshly generated and cached (`POST`) sample clip; a one-off preview from an uploaded clip. |
 | `POST /api/pull`, `DELETE /api/models/{name}` | Pull (NDJSON progress) and remove models. |
 | `GET`/`DELETE /api/pulls/{name}` | List pulls in progress; cancel one. |
 | `GET /api/ps`, `POST /api/load` | Loaded models; warm or unload one. |

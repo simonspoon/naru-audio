@@ -3,7 +3,7 @@
 //! gives fixed samples; one test runs the real Kokoro and skips (eprintln
 //! and return) when `kokoro-v1.0` is not pulled, as tests/tts.rs does.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -561,6 +561,7 @@ fn aliases_defaults_and_options_reach_the_model() {
         instructions: None,
         exaggeration: None,
         reference: None,
+        knobs: BTreeMap::new(),
     };
     assert_eq!(last(), ("bm_george".to_string(), expected));
 }
@@ -611,6 +612,68 @@ fn a_model_that_instructs_gets_the_instructions() {
         let (_, options) = server.record.last.lock().unwrap().clone().unwrap();
         assert_eq!(options.instructions.as_deref(), Some(instructions));
     }
+}
+
+/// naru task 1458: `"knobs"` is checked against the model's declared
+/// `prompt_format.knobs` before it reaches `SynthOptions` — an unknown
+/// name is 400 `unsupported_value`, an out-of-range value is 400
+/// `invalid_request`, and a valid one lands in `options.knobs` (or, for
+/// `exaggeration`/`speed`, in their own fields alongside the top-level
+/// ones).
+#[test]
+fn knobs_are_checked_against_the_manifest_before_reaching_synth_options() {
+    let home = fake_home();
+    let dir = home.path().join("models").join("fake-knobs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-knobs", "kind": "tts", "backend": "sherpa-onnx"},
+        "voice": [{"id": "only", "sid": 1, "default": true}],
+        "backend": {"sherpa-onnx": {"exaggeration": true, "prompt_format": {"knobs": [
+            {"name": "temperature", "default": 0.9, "min": 0.0, "max": 2.0},
+            {"name": "exaggeration", "default": 0.1, "min": 0.0, "max": 1.0},
+        ]}}},
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+    let record = Arc::new(Record::default());
+    let server = Server::start(
+        home,
+        "fake-tts",
+        Arc::new(FakeLoader(record.clone())),
+        record,
+    );
+
+    // An unknown name.
+    let reply = server.speech(json!({
+        "model": "fake-knobs", "input": "Hi.", "knobs": {"nope": 1.0},
+    }));
+    assert_eq!(reply.status, 400);
+    let error = &reply.json()["error"];
+    assert_eq!(error["code"], "unsupported_value");
+    assert_eq!(error["param"], "knobs");
+
+    // Out of range.
+    let reply = server.speech(json!({
+        "model": "fake-knobs", "input": "Hi.", "knobs": {"temperature": 3.0},
+    }));
+    assert_eq!(reply.status, 400);
+    let error = &reply.json()["error"];
+    assert_eq!(error["code"], "invalid_request");
+    assert_eq!(error["param"], "knobs");
+    assert_eq!(server.record.loads.load(Ordering::SeqCst), 0);
+
+    // A valid knob reaches `SynthOptions.knobs`; `exaggeration` reaches
+    // its own field, even though it is sent inside `knobs` too.
+    let reply = server.speech(json!({
+        "model": "fake-knobs", "input": "Hi.",
+        "knobs": {"temperature": 0.5, "exaggeration": 0.8},
+    }));
+    assert_eq!(reply.status, 200);
+    let (_, options) = server.record.last.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        options.knobs,
+        BTreeMap::from([("temperature".to_string(), 0.5)])
+    );
+    assert_eq!(options.exaggeration, Some(0.8));
 }
 
 /// §2.3: an error after the first byte cannot change the 200; the body

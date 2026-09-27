@@ -131,8 +131,8 @@ instruct = true
 style = "attributes"
 inline = { syntax = "[tag]", tags = ["laughter", "sigh", "surprise-ah"], example = "[laughter] That's hilarious!" }
 knobs = [
-    { name = "num_steps", default = 32 },
-    { name = "guidance_scale", default = 2.0 },
+    { name = "num_steps", default = 32, min = 1, max = 64, step = 1 },
+    { name = "guidance_scale", default = 2.0, min = 0.0, max = 10.0 },
 ]
 hint = "female, low pitch, british accent, whisper"
 

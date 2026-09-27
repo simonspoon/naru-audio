@@ -363,12 +363,20 @@ pub fn update(
                 target.display()
             )));
         }
+        // A concurrent rename onto the same new name may have won.
         std::fs::rename(&voice, &target).map_err(|e| {
-            UpdateError::Io(format!(
-                "rename {} to {}: {e}",
-                voice.display(),
-                target.display()
-            ))
+            if target.exists() {
+                UpdateError::Exists(format!(
+                    "voice `{new_name}` already exists; remove {} first",
+                    target.display()
+                ))
+            } else {
+                UpdateError::Io(format!(
+                    "rename {} to {}: {e}",
+                    voice.display(),
+                    target.display()
+                ))
+            }
         })?;
         voice = target;
         final_name = new_name.to_string();

@@ -17,7 +17,10 @@
 //! outright, so a caller gets a clear error instead of normal-speed audio
 //! (`naru_audio_mlx/__main__.py`). A model that exaggerates
 //! (`Manifest::exaggerates`, Chatterbox) is sent the request's
-//! `exaggeration` as mlx-audio's `exaggeration`.
+//! `exaggeration` as mlx-audio's `exaggeration`. Every other knob a
+//! manifest declares (naru task 1458, `Manifest::prompt_format`'s
+//! `knobs`) goes as `request["knobs"]`, a name-to-number object the
+//! sidecar folds straight into `generate`'s kwargs.
 //!
 //! The sidecar is held for a whole synthesis, so `synth` never lets the
 //! sink hold it: chunks go through an unbounded queue to a thread that
@@ -33,7 +36,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::sherpa::check;
 use super::{Sink, SynthOptions, TtsError, TtsModel};
@@ -55,6 +58,11 @@ pub struct MlxTts {
     instructs: bool,
     /// Whether the model takes `exaggeration`.
     exaggerates: bool,
+    /// Names of `Manifest::prompt_format`'s knobs whose kwarg takes an
+    /// int (`step` set, naru task 1458), so `synth` sends the sidecar a
+    /// JSON integer rather than a float mlx-audio's own arg parsing would
+    /// otherwise choke on (e.g. `range(num_steps)`).
+    integer_knobs: std::collections::HashSet<String>,
     /// What the sidecar's `load` reported.
     sample_rate: u32,
     /// What the load added to the sidecar's MLX active memory.
@@ -78,6 +86,16 @@ impl MlxTts {
             cloned: manifest.clones().then(|| home.to_path_buf()),
             instructs: manifest.instructs(),
             exaggerates: manifest.exaggerates(),
+            integer_knobs: manifest
+                .prompt_format()
+                .map(|pf| {
+                    pf.knobs
+                        .into_iter()
+                        .filter(|k| k.step.is_some())
+                        .map(|k| k.name)
+                        .collect()
+                })
+                .unwrap_or_default(),
             sample_rate: 0,
             resident_bytes,
         };
@@ -142,6 +160,27 @@ impl TtsModel for MlxTts {
             && let Some(exaggeration) = options.exaggeration
         {
             request["exaggeration"] = json!(exaggeration);
+        }
+        // Every other manifest-declared knob (naru task 1458), already
+        // checked against its manifest by `apply_knobs`; the sidecar
+        // applies each as a `generate` kwarg, cast to a JSON integer here
+        // where the manifest says the kwarg takes one (`step` set), since
+        // mlx-audio's own arg handling for those (e.g. `range(num_steps)`)
+        // does not accept a float.
+        if !options.knobs.is_empty() {
+            let knobs: serde_json::Map<String, Value> = options
+                .knobs
+                .iter()
+                .map(|(name, value)| {
+                    let v = if self.integer_knobs.contains(name) {
+                        json!(*value as i64)
+                    } else {
+                        json!(*value)
+                    };
+                    (name.clone(), v)
+                })
+                .collect();
+            request["knobs"] = Value::Object(knobs);
         }
         let (tx, rx) = mpsc::channel::<Vec<f32>>();
         std::thread::scope(|scope| {

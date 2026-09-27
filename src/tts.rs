@@ -14,6 +14,7 @@ pub mod level;
 pub(crate) mod mlx;
 pub(crate) mod sherpa;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::registry::manifest::Voice;
@@ -46,6 +47,14 @@ pub struct SynthOptions {
     /// over any named voice in `MlxTts::synth`. The `sherpa-onnx` backend
     /// never clones, so it ignores this.
     pub reference: Option<(PathBuf, String)>,
+    /// Every other manifest-declared knob (`Manifest::prompt_format`'s
+    /// `knobs`, naru task 1458), by name, already checked against its
+    /// `min`/`max`; `speed` and `exaggeration` go through their own fields
+    /// above instead, even though they are also declared knobs. Sent on to
+    /// the MLX sidecar as `generate` kwargs (`MlxTts::synth`); the
+    /// `sherpa-onnx` backend has no knob but `speed` (its own field), so it
+    /// ignores this.
+    pub knobs: BTreeMap<String, f64>,
 }
 
 impl Default for SynthOptions {
@@ -57,6 +66,7 @@ impl Default for SynthOptions {
             instructions: None,
             exaggeration: None,
             reference: None,
+            knobs: BTreeMap::new(),
         }
     }
 }

@@ -132,6 +132,11 @@ def synth(model, header):
     # Chatterbox's emotion-exaggeration dial, 0-1.
     if header.get("exaggeration") is not None:
         kwargs["exaggeration"] = header["exaggeration"]
+    # Every other manifest-declared knob (naru task 1458), already checked
+    # against the manifest's min/max by the daemon and int-cast there where
+    # the kwarg takes one: passed straight through as `generate` kwargs,
+    # e.g. Qwen3-TTS's `temperature`/`top_p` or VoxCPM2's `cfg_value`.
+    kwargs.update(header.get("knobs") or {})
     # Only Qwen3-TTS's cloning models have the streaming decoder `primed`
     # feeds the reference codes to; Chatterbox has no `speech_tokenizer`
     # and does not stream, so priming would only raise.

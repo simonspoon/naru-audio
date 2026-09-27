@@ -92,6 +92,7 @@ class Chatterbox:
 
     def generate(self, text, ref_audio=None, exaggeration=None, **kwargs):
         self.seen_exaggeration = exaggeration
+        self.seen_kwargs = kwargs
         yield type("Result", (), {"audio": mx.full((1,), 2.0)})
 
 
@@ -124,6 +125,16 @@ class ChatterboxSynth(unittest.TestCase):
         model = Chatterbox()
         header = {"model": "chatterbox-tts-8bit-mlx", "speed": 1.0}
         self.assertEqual(audio(model, header), [2.0])
+
+    def test_knobs_reach_generate_as_kwargs(self):
+        model = Chatterbox()
+        header = {
+            "model": "chatterbox-tts-8bit-mlx",
+            "knobs": {"cfg_weight": 0.7, "temperature": 1.1},
+        }
+        audio(model, header)
+        self.assertEqual(model.seen_kwargs["cfg_weight"], 0.7)
+        self.assertEqual(model.seen_kwargs["temperature"], 1.1)
 
 
 class VoxCPM2:

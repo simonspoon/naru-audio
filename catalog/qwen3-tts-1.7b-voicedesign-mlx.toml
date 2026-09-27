@@ -36,7 +36,7 @@ design_voice_model = "qwen3-tts-1.7b-base-mlx"
 [backend.mlx.prompt_format]
 style = "free_text"
 knobs = [
-    { name = "temperature", default = 0.9 },
+    { name = "temperature", default = 0.9, min = 0.0, max = 2.0 },
     { name = "top_p", default = 1.0, min = 0.0, max = 1.0 },
 ]
 hint = "A cheerful young female voice with high pitch"

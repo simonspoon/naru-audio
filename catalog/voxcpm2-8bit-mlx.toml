@@ -51,8 +51,8 @@ instruct = true
 style = "inline_prefix"
 inline = { syntax = "(description)text" }
 knobs = [
-    { name = "cfg_value", default = 2.0 },
-    { name = "inference_timesteps", default = 10 },
+    { name = "cfg_value", default = 2.0, min = 0.0, max = 10.0 },
+    { name = "inference_timesteps", default = 10, min = 1, max = 50, step = 1 },
 ]
 hint = "(cheerful, slightly faster)Hello there."
 

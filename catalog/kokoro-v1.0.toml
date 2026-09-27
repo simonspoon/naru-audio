@@ -27,7 +27,7 @@ lang     = "en-us"
 # No `instruct`, no inline tags — the request's `speed` (§2.3) is the only
 # style control sherpa-onnx's Kokoro takes.
 [backend.sherpa-onnx.prompt_format]
-knobs = [{ name = "speed", default = 1.0 }]
+knobs = [{ name = "speed", default = 1.0, min = 0.5, max = 2.0 }]
 
 [[archive]]
 url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2"

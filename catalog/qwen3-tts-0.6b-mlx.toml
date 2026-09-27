@@ -35,7 +35,7 @@ resident_bytes = 2_600_000_000
 # naru-audio.
 [backend.mlx.prompt_format]
 knobs = [
-    { name = "temperature", default = 0.9 },
+    { name = "temperature", default = 0.9, min = 0.0, max = 2.0 },
     { name = "top_p", default = 1.0, min = 0.0, max = 1.0 },
 ]
 

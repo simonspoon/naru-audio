@@ -63,6 +63,10 @@ struct Job {
     stream: bool,
     options: SynthOptions,
     keep_alive: Option<KeepAlive>,
+    /// `"knobs"` (naru task 1458), parsed as finite numbers but not yet
+    /// checked against a model: `validate` runs before the manifest is
+    /// fetched, so `speech` resolves them once it has one (`apply_knobs`).
+    knobs: HashMap<String, f64>,
 }
 
 pub(super) async fn speech(
@@ -116,6 +120,7 @@ pub(super) async fn speech(
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    apply_knobs(&manifest, job.knobs, &mut job.options)?;
     let default_voice = st.models.default_voice(&manifest.model.name);
     let voice = voice(
         &manifest,
@@ -457,6 +462,7 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
         options.exaggeration = Some(exaggeration as f32);
     }
     let stream = boolean("stream", true)?;
+    let knobs = parse_knobs(field("knobs"))?;
 
     let keep_alive = match field("keep_alive") {
         None => None,
@@ -485,7 +491,81 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
         stream,
         options,
         keep_alive,
+        knobs,
     })
+}
+
+/// `value` (a `"knobs"` field, from a JSON body or a multipart field
+/// decoded the same way) as a name-to-number map, checked only for shape:
+/// an object of finite numbers. Not yet checked against any model, since
+/// neither caller has fetched a manifest at this point.
+fn parse_knobs(value: Option<&Value>) -> Result<HashMap<String, f64>, ApiError> {
+    let Some(value) = value else {
+        return Ok(HashMap::new());
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| bad_request("knobs", "invalid_request", "\"knobs\" must be an object"))?;
+    object
+        .iter()
+        .map(|(name, v)| {
+            let n = v.as_f64().filter(|n| n.is_finite()).ok_or_else(|| {
+                bad_request(
+                    "knobs",
+                    "invalid_request",
+                    format!("knobs.{name} must be a finite number"),
+                )
+            })?;
+            Ok((name.clone(), n))
+        })
+        .collect()
+}
+
+/// Checks `raw` (parsed by [`parse_knobs`]) against `manifest`'s declared
+/// knobs (`PromptFormat::knobs`, naru task 1458): a name that is not one of
+/// them is 400 `unsupported_value`; a value outside its `min`/`max` is 400
+/// `invalid_request`. `exaggeration` and `speed` are also declared knobs
+/// for the models that take them, but go to `options`' own fields rather
+/// than `options.knobs`, alongside the top-level `exaggeration`/`speed`
+/// fields, which run through the same range checks separately.
+fn apply_knobs(
+    manifest: &Manifest,
+    raw: HashMap<String, f64>,
+    options: &mut SynthOptions,
+) -> Result<(), ApiError> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let declared = manifest
+        .prompt_format()
+        .map(|pf| pf.knobs)
+        .unwrap_or_default();
+    for (name, value) in raw {
+        let knob = declared.iter().find(|k| k.name == name).ok_or_else(|| {
+            bad_request(
+                "knobs",
+                "unsupported_value",
+                format!("\"{name}\" is not a knob of \"{}\"", manifest.model.name),
+            )
+        })?;
+        if let (Some(min), Some(max)) = (knob.min, knob.max)
+            && !(min..=max).contains(&value)
+        {
+            return Err(bad_request(
+                "knobs",
+                "invalid_request",
+                format!("knobs.{name} must be between {min} and {max}, got {value}"),
+            ));
+        }
+        match name.as_str() {
+            "exaggeration" => options.exaggeration = Some(value as f32),
+            "speed" => options.speed = value as f32,
+            _ => {
+                options.knobs.insert(name, value);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `voice` if it is one of `voices` (the manifest's, and any cloned ones),
@@ -1049,58 +1129,118 @@ pub(super) async fn patch_voice(
     Ok(Json(listing))
 }
 
-/// §2.6 `GET /api/voices/{model}/{voice}/sample[?generate=true]` (naru task
-/// 1458): a cloned or designed voice's own `ref.wav`, byte for byte; a
-/// built-in voice's cached preview at `state/previews/<model>/<voice>.wav`
-/// under the home, or, with `generate=true`, a fixed line synthesised and
-/// cached there for next time. `DELETE /api/models/{name}` removes a
-/// model's whole preview cache. 404 `voice_not_found` for a `voice` that is
-/// none of the model's own or cloned voices; 404 `preview_not_cached` for a
-/// built-in voice with nothing cached and no `generate=true` — a built-in
-/// voice is never generated unasked.
+/// `model`/`voice`, resolved and checked for `GET`/`POST
+/// /api/voices/{model}/{voice}/sample`: the model's manifest (from the
+/// catalog if not installed, so an uninstalled built-in still answers) and
+/// whether `voice` is a cloned one rather than the manifest's own. 404
+/// `voice_not_found` for a `voice` that is neither.
+async fn sample_lookup(
+    st: &Arc<AppState>,
+    req_id: &str,
+    model: &str,
+    voice: &str,
+) -> Result<(Manifest, bool), ApiError> {
+    voices::check_name(model).map_err(|m| bad_request("model", "invalid_request", m))?;
+    voices::check_name(voice).map_err(|m| bad_request("voice", "invalid_request", m))?;
+    let (blocking, model, voice) = (st.clone(), model.to_string(), voice.to_string());
+    tokio::task::spawn_blocking(move || {
+        let manifest = match blocking.registry.catalog().models.get(&model) {
+            Some(m) if !blocking.registry.is_installed(&model) => match m.model.kind {
+                Kind::Tts => Ok(m.clone()),
+                _ => Err(not_kind(&model, Kind::Tts)),
+            },
+            _ => kind_manifest(&blocking, &model, Kind::Tts),
+        }?;
+        let voices = voices::of(&manifest, blocking.registry.home());
+        if !voices.iter().any(|v| v.id == voice) {
+            return Err(voice_not_found_of(&model, &voice));
+        }
+        let cloned = !manifest.voices.iter().any(|v| v.id == voice);
+        Ok::<_, ApiError>((manifest, cloned))
+    })
+    .await
+    .map_err(|e| internal(st, req_id, e.to_string()))?
+}
+
+/// A cloned voice's own `ref.wav`, byte for byte.
+async fn cloned_sample(
+    st: &Arc<AppState>,
+    req_id: &str,
+    model: &str,
+    voice: &str,
+) -> Result<Response, ApiError> {
+    let (home, voice_id, model_name) = (
+        st.registry.home().to_path_buf(),
+        voice.to_string(),
+        model.to_string(),
+    );
+    let wav = tokio::task::spawn_blocking(move || {
+        voices::find(&home, &voice_id).and_then(|c| std::fs::read(&c.wav).ok())
+    })
+    .await
+    .map_err(|e| internal(st, req_id, e.to_string()))?
+    .ok_or_else(|| voice_not_found_of(&model_name, voice))?;
+    Ok(audio_response(Format::Wav, 0, wav))
+}
+
+/// §2.6 `GET /api/voices/{model}/{voice}/sample` (naru task 1458): a
+/// cloned or designed voice's own `ref.wav`, byte for byte; a built-in
+/// voice's cached preview at `state/previews/<model>/<voice>.wav` under
+/// the home, if there is one. Read-only, so it never loads a model or
+/// synthesises: a cross-site `<audio src>` sends no `Origin` header, which
+/// the Host/Origin guard (§2.1) would otherwise let straight through on a
+/// `GET`, so generating belongs on `POST /api/voices/{model}/{voice}/sample`
+/// instead, covered by that guard like any other mutating request. 404
+/// `voice_not_found` for a `voice` that is none of the model's own or
+/// cloned voices; 404 `preview_not_cached` for a built-in voice with
+/// nothing cached — a built-in voice is never generated unasked, on `GET`
+/// or `POST`.
 pub(super) async fn voice_sample(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
     Path((model, voice)): Path<(String, String)>,
-    Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, ApiError> {
-    voices::check_name(&voice).map_err(|m| bad_request("voice", "invalid_request", m))?;
-    let generate = query.get("generate").map(String::as_str) == Some("true");
-
-    let (manifest, cloned) = {
-        let (st, model, voice) = (st.clone(), model.clone(), voice.clone());
-        tokio::task::spawn_blocking(move || {
-            let manifest = match st.registry.catalog().models.get(&model) {
-                Some(m) if !st.registry.is_installed(&model) => match m.model.kind {
-                    Kind::Tts => Ok(m.clone()),
-                    _ => Err(not_kind(&model, Kind::Tts)),
-                },
-                _ => kind_manifest(&st, &model, Kind::Tts),
-            }?;
-            let voices = voices::of(&manifest, st.registry.home());
-            if !voices.iter().any(|v| v.id == voice) {
-                return Err(voice_not_found_of(&model, &voice));
-            }
-            let cloned = !manifest.voices.iter().any(|v| v.id == voice);
-            Ok::<_, ApiError>((manifest, cloned))
-        })
+    let (_manifest, cloned) = sample_lookup(&st, &req_id, &model, &voice).await?;
+    if cloned {
+        return cloned_sample(&st, &req_id, &model, &voice).await;
+    }
+    let cache = preview_cache_path(st.registry.home(), &model, &voice);
+    let cached = {
+        let cache = cache.clone();
+        tokio::task::spawn_blocking(move || std::fs::read(&cache).ok())
     }
     .await
-    .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+    match cached {
+        Some(bytes) => Ok(audio_response(Format::Wav, 0, bytes)),
+        None => Err(ApiError {
+            param: Some("voice"),
+            ..ApiError::new(
+                StatusCode::NOT_FOUND,
+                "preview_not_cached",
+                format!(
+                    "no cached preview for \"{voice}\" of \"{model}\"; \
+                     POST this same path to generate one"
+                ),
+            )
+        }),
+    }
+}
 
+/// §2.6 `POST /api/voices/{model}/{voice}/sample` (naru task 1458): the
+/// same cached preview `GET` serves if there is one, else synthesises a
+/// fixed line, caches it and returns that — the load-and-synthesise half
+/// of the old `GET ...?generate=true`, moved to `POST` so the Origin guard
+/// covers it (see `voice_sample`). A cloned voice has nothing to
+/// generate, so it answers its own `ref.wav`, same as `GET`.
+pub(super) async fn generate_voice_sample(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    Path((model, voice)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let (manifest, cloned) = sample_lookup(&st, &req_id, &model, &voice).await?;
     if cloned {
-        let (home, voice_id, model_name) = (
-            st.registry.home().to_path_buf(),
-            voice.clone(),
-            model.clone(),
-        );
-        let wav = tokio::task::spawn_blocking(move || {
-            voices::find(&home, &voice_id).and_then(|c| std::fs::read(&c.wav).ok())
-        })
-        .await
-        .map_err(|e| internal(&st, &req_id, e.to_string()))?
-        .ok_or_else(|| voice_not_found_of(&model_name, &voice))?;
-        return Ok(audio_response(Format::Wav, 0, wav));
+        return cloned_sample(&st, &req_id, &model, &voice).await;
     }
 
     let cache = preview_cache_path(st.registry.home(), &model, &voice);
@@ -1112,16 +1252,6 @@ pub(super) async fn voice_sample(
     .map_err(|e| internal(&st, &req_id, e.to_string()))?;
     if let Some(bytes) = cached {
         return Ok(audio_response(Format::Wav, 0, bytes));
-    }
-    if !generate {
-        return Err(ApiError {
-            param: Some("voice"),
-            ..ApiError::new(
-                StatusCode::NOT_FOUND,
-                "preview_not_cached",
-                format!("no cached preview for \"{voice}\" of \"{model}\"; pass ?generate=true"),
-            )
-        });
     }
 
     let guard = st
@@ -1173,8 +1303,19 @@ const PREVIEW_TEXT: &str = "This is a preview of this voice.";
 
 /// Where a built-in voice's generated preview is cached, under `home`'s
 /// `state/`; `DELETE /api/models/{name}` removes the whole `<model>/`
-/// directory here.
+/// directory here. The caller checks `model`/`voice` with
+/// `voices::check_name` first (as `voice_sample` does); the `debug_assert`s
+/// catch a future caller that forgets to, before it ever writes outside
+/// `previews/` in release.
 pub(super) fn preview_cache_path(home: &std::path::Path, model: &str, voice: &str) -> PathBuf {
+    debug_assert!(
+        voices::check_name(model).is_ok(),
+        "bad model name {model:?}"
+    );
+    debug_assert!(
+        voices::check_name(voice).is_ok(),
+        "bad voice name {voice:?}"
+    );
     home.join("state")
         .join("previews")
         .join(model)
@@ -1200,13 +1341,14 @@ pub(super) async fn preview_voice(
             format!("the body must be multipart/form-data: {}", e.body_text()),
         )
     })?;
-    let (mut model, mut file, mut text, mut input) = (None, None, None, None);
+    let (mut model, mut file, mut text, mut input, mut knobs) = (None, None, None, None, None);
     while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
         match field.name().unwrap_or_default().to_owned().as_str() {
             "model" => model = Some(field.text().await.map_err(multipart_error)?),
             "file" => file = Some(field.bytes().await.map_err(multipart_error)?),
             "text" => text = Some(field.text().await.map_err(multipart_error)?),
             "input" => input = Some(field.text().await.map_err(multipart_error)?),
+            "knobs" => knobs = Some(field.text().await.map_err(multipart_error)?),
             _ => {}
         }
     }
@@ -1228,6 +1370,18 @@ pub(super) async fn preview_voice(
         ));
     }
     let text = text.unwrap_or_default();
+    let knobs = knobs
+        .map(|raw| {
+            serde_json::from_str::<Value>(&raw).map_err(|e| {
+                bad_request(
+                    "knobs",
+                    "invalid_request",
+                    format!("\"knobs\" must be JSON: {e}"),
+                )
+            })
+        })
+        .transpose()?;
+    let knobs = parse_knobs(knobs.as_ref())?;
 
     let manifest = {
         let (st, model) = (st.clone(), model.clone());
@@ -1270,6 +1424,14 @@ pub(super) async fn preview_voice(
         }
     };
 
+    let mut options = SynthOptions {
+        reference: Some((wav_path, text)),
+        ..SynthOptions::default()
+    };
+    if let Err(e) = apply_knobs(&manifest, knobs, &mut options) {
+        cleanup(&tmp_dir);
+        return Err(e);
+    }
     let guard = match st.models.acquire(manifest, None).await {
         Ok(guard) => guard,
         Err(e) => {
@@ -1278,10 +1440,6 @@ pub(super) async fn preview_voice(
         }
     };
     let sample_rate = guard.tts().sample_rate();
-    let options = SynthOptions {
-        reference: Some((wav_path, text)),
-        ..SynthOptions::default()
-    };
     let mut rx = synthesise(guard, input, String::new(), options);
     let mut pcm = Vec::new();
     let mut failure = None;
