@@ -193,12 +193,24 @@ pub fn scratch(home: &Path, stem: &str) -> PathBuf {
 /// transcript, recorded for `model` (`model.txt`; the caller checks `model`
 /// actually clones — this just writes what it is told). Returns the clip's
 /// length in seconds, which must be within `MIN_SECS..=MAX_SECS`. An
-/// existing voice is not replaced. Both `voice add` (always [`CLONE_MODEL`])
-/// and `POST /v1/audio/voices` come here.
-pub fn add(home: &Path, name: &str, clip: &Path, text: &str, model: &str) -> Result<f64, AddError> {
+/// existing voice is not replaced. Both `voice add` (always [`CLONE_MODEL`],
+/// which requires a transcript) and `POST /v1/audio/voices` come here;
+/// `require_text` is the caller's `model.clone_requires_transcript()`
+/// (mesa task 1455) — a blank transcript is refused only when the model
+/// actually needs one, though whatever text is given (even blank) is still
+/// stored, so a model with no use for a transcript can still be added from
+/// a clip alone.
+pub fn add(
+    home: &Path,
+    name: &str,
+    clip: &Path,
+    text: &str,
+    model: &str,
+    require_text: bool,
+) -> Result<f64, AddError> {
     check_name(name).map_err(AddError::Name)?;
     let text = text.trim();
-    if text.is_empty() {
+    if require_text && text.is_empty() {
         return Err(AddError::Text);
     }
     let voice = dir(home).join(name);
@@ -487,6 +499,7 @@ mod tests {
             &ok,
             "  Hello there.\n",
             "breeze-tts-2-mlx",
+            true,
         )
         .unwrap();
         assert!((secs - 6.0).abs() < 0.05, "{secs}");
@@ -496,12 +509,12 @@ mod tests {
         let spec = hound::WavReader::open(&found.wav).unwrap().spec();
         assert_eq!((spec.channels, spec.sample_rate), (1, SAMPLE_RATE));
 
-        let err = add(home.path(), "amy", &ok, "again", CLONE_MODEL)
+        let err = add(home.path(), "amy", &ok, "again", CLONE_MODEL, true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("already exists"), "{err}");
         for (name, path) in [("short", &short), ("long", &long)] {
-            let err = add(home.path(), name, path, "text", CLONE_MODEL)
+            let err = add(home.path(), name, path, "text", CLONE_MODEL, true)
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("it must be 3–30 s"), "{err}");
@@ -512,17 +525,37 @@ mod tests {
             &src.path().join("nope.wav"),
             "t",
             CLONE_MODEL,
+            true,
         )
         .unwrap_err()
         .to_string();
         assert!(err.contains("afconvert cannot read"), "{err}");
-        assert!(add(home.path(), "../x", &ok, "t", CLONE_MODEL).is_err());
-        assert!(add(home.path(), "blank", &ok, " \n", CLONE_MODEL).is_err());
+        assert!(add(home.path(), "../x", &ok, "t", CLONE_MODEL, true).is_err());
+        assert!(add(home.path(), "blank", &ok, " \n", CLONE_MODEL, true).is_err());
         // Nothing half-made is left behind.
         assert_eq!(list(home.path()), ["amy"]);
         assert_eq!(
             std::fs::read_dir(home.path().join("tmp")).unwrap().count(),
             0
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn add_allows_a_blank_transcript_when_the_model_does_not_require_one() {
+        // mesa task 1455: a model whose manifest carries no
+        // `clone_requires_transcript` (or sets it false) can be cloned from
+        // audio alone — `require_text: false` must not refuse a blank one,
+        // though the blank transcript is still what gets stored.
+        let home = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let ok = src.path().join("ok.wav");
+        clip(&ok, 6.0);
+
+        let secs = add(home.path(), "silent", &ok, "  \n", "some-model", false).unwrap();
+        assert!((secs - 6.0).abs() < 0.05, "{secs}");
+        let found = find(home.path(), "silent").unwrap();
+        assert_eq!(found.text, "");
+        assert_eq!(found.model, "some-model");
     }
 }

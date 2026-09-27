@@ -725,18 +725,29 @@ pub(super) async fn add_voice(
     };
     let name = name.ok_or_else(|| required("name"))?;
     let file = file.ok_or_else(|| required("file"))?;
-    let text = text.ok_or_else(|| required("text"))?;
     let model = model.unwrap_or_else(|| voices::CLONE_MODEL.to_string());
 
     // The model must be one that clones, checked against the catalog (a
     // model need not be pulled to record a voice for it, as `GET
     // /v1/audio/voices?model=` does not require it either).
-    {
+    let manifest = {
         let (st, model) = (st.clone(), model.clone());
         tokio::task::spawn_blocking(move || clone_manifest(&st, &model))
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    // `text` is required only when the model's manifest actually needs a
+    // transcript alongside the clip (`clone_requires_transcript`, mesa task
+    // 1455): a model that clones from audio alone has no use for one, and a
+    // caller with no transcript to give must not be blocked by a field the
+    // model doesn't read. A *present but blank* transcript still falls
+    // through to `voices::add`'s own check, whose message ("the transcript
+    // is empty") is unchanged for a model that does require one.
+    let require_text = manifest.clone_requires_transcript();
+    if require_text && text.is_none() {
+        return Err(required("text"));
+    }
+    let text = text.unwrap_or_default();
 
     let result = {
         let (home, name, model) = (
@@ -749,7 +760,7 @@ pub(super) async fn add_voice(
             let result = std::fs::create_dir_all(home.join("tmp"))
                 .and_then(|()| std::fs::write(&upload, &file))
                 .map_err(|e| AddError::Io(format!("write {}: {e}", upload.display())))
-                .and_then(|()| voices::add(&home, &name, &upload, &text, &model));
+                .and_then(|()| voices::add(&home, &name, &upload, &text, &model, require_text));
             // Also after a write that failed partway.
             let _ = std::fs::remove_file(&upload);
             result

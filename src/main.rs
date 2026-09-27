@@ -362,7 +362,7 @@ fn voice_command(action: VoiceAction) -> ExitCode {
     // The CLI has no `--model`; a voice it adds is always for the one
     // `say -v` without `-m` already asked for (`say_model`'s `CLONE_MODEL`
     // fallback).
-    match voices::add(&home, &name, &clip, &text, voices::CLONE_MODEL) {
+    match voices::add(&home, &name, &clip, &text, voices::CLONE_MODEL, true) {
         Ok(secs) => {
             if !(5.0..=15.0).contains(&secs) {
                 eprintln!("naru-audio: warning: the clip is {secs:.1} s; 5–15 s clones best");
