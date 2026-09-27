@@ -305,7 +305,8 @@ curl http://127.0.0.1:7870/v1/audio/transcriptions -F file=@speech.wav -F model=
 | `POST /v1/audio/transcriptions` | WAV in, text out (`json`, `text`, `verbose_json`; SSE with `stream=true`). |
 | `GET /v1/audio/transcriptions/stream` | WebSocket streaming STT. |
 | `POST /v1/audio/speech` | Text in, streamed `wav` or `pcm` out. |
-| `GET`/`POST /v1/audio/voices`, `GET /v1/audio/voices/{name}` | List voices; add and export cloned voices. |
+| `GET`/`POST /v1/audio/voices`, `GET`/`PATCH`/`DELETE /v1/audio/voices/{name}` | List, add, export, rename/update and remove cloned and designed voices. |
+| `GET /api/voices/{model}/{voice}/sample`, `POST /api/voices/preview` | A voice's own or a cached/generated sample clip; a one-off preview from an uploaded clip. |
 | `POST /api/pull`, `DELETE /api/models/{name}` | Pull (NDJSON progress) and remove models. |
 | `GET`/`DELETE /api/pulls/{name}` | List pulls in progress; cancel one. |
 | `GET /api/ps`, `POST /api/load` | Loaded models; warm or unload one. |

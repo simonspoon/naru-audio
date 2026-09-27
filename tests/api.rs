@@ -453,6 +453,7 @@ async fn a_cloned_voice_exports_its_clip_byte_for_byte() {
     assert_eq!(body["name"], "amy");
     assert_eq!(body["text"], "Hello there.");
     assert_eq!(body["model"], naru_audio::voices::CLONE_MODEL);
+    assert_eq!(body["description"], Value::Null);
     let decoded = STANDARD
         .decode(body["wav_base64"].as_str().unwrap())
         .unwrap();
@@ -460,7 +461,7 @@ async fn a_cloned_voice_exports_its_clip_byte_for_byte() {
         decoded,
         std::fs::read(dir.path().join("voices/amy/ref.wav")).unwrap()
     );
-    assert_eq!(body.as_object().unwrap().len(), 4);
+    assert_eq!(body.as_object().unwrap().len(), 5);
 }
 
 #[tokio::test]
@@ -554,6 +555,277 @@ async fn delete_removes_a_cloned_voice_or_refuses() {
     // Already gone: a repeat is a 404, not success again.
     let (status, body) = delete_voice(dir.path(), "amy").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "voice_not_found");
+}
+
+async fn patch_voice(home: &Path, name: &str, body: Value) -> (StatusCode, Value) {
+    send_json_router(
+        app(home),
+        "PATCH",
+        &format!("/v1/audio/voices/{name}"),
+        body,
+    )
+    .await
+}
+
+/// A JSON request with `method` and `body` against an already-built
+/// `Router`, sharing its `AppState` — the live `ModelManager` defaults
+/// among them — with whatever else was sent to the same `Router`.
+async fn send_json_router(
+    app: Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(HOST, HOSTPORT)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let (status, _, body) = send(app, req).await;
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+fn fake_clone_manifest(dir: &Path) {
+    let model = dir.join("models/fake-clone");
+    std::fs::create_dir_all(&model).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-clone", "kind": "tts", "backend": "sherpa-onnx"},
+        "backend": {"sherpa-onnx": {"clone": true}},
+    });
+    std::fs::write(model.join("manifest.json"), manifest.to_string()).unwrap();
+}
+
+/// naru task 1458 §2.6: `PATCH` renames a cloned voice's directory and
+/// updates its transcript, 409s on a name already taken, and 409s
+/// `builtin_voice` for a built-in name rather than treating it as unknown
+/// (as `DELETE` does).
+#[tokio::test]
+async fn patch_renames_a_cloned_voice_or_refuses() {
+    let dir = home(&[]);
+    fake_clone_manifest(dir.path());
+    add_voice_for(dir.path(), "amy", b"RIFF", "Hi.", "fake-clone");
+    add_voice_for(dir.path(), "zed", b"RIFF", "Yo.", "fake-clone");
+
+    // The happy path: renamed, its transcript updated, and the listing
+    // shape ("origin" and friends) comes back in the response.
+    let (status, body) = patch_voice(
+        dir.path(),
+        "amy",
+        json!({"name": "amelia", "text": "Hello there."}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "amelia");
+    assert_eq!(body["origin"], "cloned");
+    assert_eq!(body["cloned"], true);
+    assert!(!dir.path().join("voices/amy").exists());
+    assert!(dir.path().join("voices/amelia").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("voices/amelia/ref.txt")).unwrap(),
+        "Hello there.\n"
+    );
+
+    // 409 `voice_exists`: renaming onto a name already taken.
+    let (status, body) = patch_voice(dir.path(), "amelia", json!({"name": "zed"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "voice_exists");
+    assert!(dir.path().join("voices/amelia").is_dir());
+
+    // 404 `voice_not_found`: no such cloned voice.
+    let (status, body) = patch_voice(dir.path(), "nope", json!({"text": "Hi."})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"]["code"], "voice_not_found");
+
+    // 409 `builtin_voice`: a catalog model's own voice, never in `voices/`.
+    let (status, body) = patch_voice(dir.path(), "af_heart", json!({"text": "Hi."})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "builtin_voice");
+}
+
+/// naru task 1458 §2.6: `description` on `POST /v1/audio/voices` writes
+/// `design.txt`, whose mere presence the listing reports as `origin`
+/// `"designed"` rather than `"cloned"`, with the description alongside it.
+#[tokio::test]
+async fn a_designed_voice_is_listed_with_its_description() {
+    let dir = home(&[]);
+    fake_clone_manifest(dir.path());
+    add_voice_for(dir.path(), "amy", b"RIFF", "Hi.", "fake-clone");
+    std::fs::write(
+        dir.path().join("voices/amy/design.txt"),
+        "A warm, husky woman.\n",
+    )
+    .unwrap();
+
+    let (status, body) = get_json(dir.path(), "/v1/audio/voices?model=fake-clone").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let amy = body["voices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == "amy")
+        .unwrap();
+    assert_eq!(amy["origin"], "designed");
+    assert_eq!(amy["description"], "A warm, husky woman.");
+
+    let (status, body) = get_json(dir.path(), "/v1/audio/voices/amy").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["description"], "A warm, husky woman.");
+}
+
+/// naru task 1458 §2.6: a configured default voice (`PUT /api/defaults`)
+/// follows its own rename and is cleared once it is deleted, both in the
+/// live `ModelManager` and in `config.toml [defaults.voices]` (checked
+/// here by a fresh `app` re-reading it after each change).
+#[tokio::test]
+async fn a_configured_default_voice_follows_rename_and_is_cleared_on_delete() {
+    let dir = home(&[]);
+    fake_clone_manifest(dir.path());
+    add_voice_for(dir.path(), "amy", b"RIFF", "Hi.", "fake-clone");
+    // One `Router`/`AppState` for the whole test: the live default voice
+    // lives in the `ModelManager`'s `RwLock`, not only in `config.toml`, so
+    // a fresh `app` per call (as `patch_voice`/`delete_voice` build) would
+    // not see what an earlier call set.
+    let app = app(dir.path());
+
+    let (status, body) = send_json_router(
+        app.clone(),
+        "PUT",
+        "/api/defaults",
+        json!({"voices": {"fake-clone": "amy"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["voices"]["fake-clone"], "amy");
+
+    let (status, body) = send_json_router(
+        app.clone(),
+        "PATCH",
+        "/v1/audio/voices/amy",
+        json!({"name": "amelia"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["default"], true);
+
+    let (status, body) = get_json_router(app.clone(), "/api/defaults").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["voices"]["fake-clone"], "amelia");
+
+    let req = Request::delete("/v1/audio/voices/amelia")
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(app.clone(), req).await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let (status, body) = get_json_router(app, "/api/defaults").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["voices"].get("fake-clone").is_none(), "{body}");
+}
+
+/// naru task 1458: `PUT /api/defaults`, `PATCH /v1/audio/voices/{name}`
+/// (rename) and `DELETE /v1/audio/voices/{name}` all persist to
+/// `config.toml` before touching the live `ModelManager` default, so a
+/// failed write leaves memory exactly as it was rather than ahead of disk.
+/// An unparsable `config.toml` is the cheapest way to make the write fail.
+#[tokio::test]
+async fn a_default_voice_write_failure_never_applies_live() {
+    let dir = home(&[]);
+    fake_clone_manifest(dir.path());
+    add_voice_for(dir.path(), "amy", b"RIFF", "Hi.", "fake-clone");
+    std::fs::write(dir.path().join("config.toml"), "not [ valid toml").unwrap();
+    let app = app(dir.path());
+
+    let (status, body) = send_json_router(
+        app.clone(),
+        "PUT",
+        "/api/defaults",
+        json!({"voices": {"fake-clone": "amy"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let (status, body) = get_json_router(app, "/api/defaults").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["voices"].get("fake-clone").is_none(),
+        "the failed write must not have applied the default live: {body}"
+    );
+}
+
+/// naru task 1458 §2.6 `GET /api/voices/{model}/{voice}/sample`: a cloned
+/// voice's own `ref.wav`, byte for byte; a built-in voice with nothing
+/// cached and no `?generate=true` is 404 `preview_not_cached` rather than
+/// synthesised unasked.
+#[tokio::test]
+async fn voice_sample_serves_a_clones_clip_and_refuses_an_uncached_builtin() {
+    let dir = home(&[]);
+    fake_clone_manifest(dir.path());
+    let wav: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+    add_voice_for(dir.path(), "amy", &wav, "Hi.", "fake-clone");
+
+    let req = Request::get("/api/voices/fake-clone/amy/sample")
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app(dir.path()).oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    // Exactly one `Content-Type`, not `Vec<u8>`'s default
+    // `application/octet-stream` plus an appended `audio/wav` (naru task
+    // 1458): the admin page plays this straight into a browser `<audio>`
+    // tag, which chokes on two.
+    let ctypes: Vec<&str> = resp
+        .headers()
+        .get_all(CONTENT_TYPE)
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(ctypes, ["audio/wav"]);
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    assert_eq!(body, wav);
+
+    // A built-in voice of a model not even pulled here (kokoro's own
+    // catalog manifest answers `GET`/`POST /v1/audio/voices` without a
+    // pull too): nothing cached, and no `generate=true`.
+    let req = Request::get("/api/voices/kokoro-v1.0/af_heart/sample")
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(app(dir.path()), req).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(error_code(&body), "preview_not_cached");
+
+    // An unknown voice of a real model is `voice_not_found`, not treated
+    // as an uncached built-in.
+    let req = Request::get("/api/voices/fake-clone/nope/sample")
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(app(dir.path()), req).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
     assert_eq!(error_code(&body), "voice_not_found");
 }
 
@@ -655,8 +927,10 @@ async fn the_voice_listing_marks_cloned_voices() {
     assert_eq!(
         body,
         json!({"model": "fake-clone", "voices": [
-            {"id": "af_heart", "accent": null, "gender": null, "default": true, "cloned": false},
-            {"id": "amy", "accent": null, "gender": null, "default": false, "cloned": true},
+            {"id": "af_heart", "accent": null, "gender": null, "default": true, "cloned": false,
+             "origin": "builtin", "description": null, "duration": null, "has_transcript": false},
+            {"id": "amy", "accent": null, "gender": null, "default": false, "cloned": true,
+             "origin": "cloned", "description": null, "duration": null, "has_transcript": true},
         ]})
     );
 }

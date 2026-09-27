@@ -14,6 +14,8 @@ pub mod level;
 pub(crate) mod mlx;
 pub(crate) mod sherpa;
 
+use std::path::PathBuf;
+
 use crate::registry::manifest::Voice;
 
 /// Receives each piece of audio in order and returns `false` to cancel the
@@ -39,6 +41,11 @@ pub struct SynthOptions {
     /// (`Manifest::exaggerates`, mlx-audio's Chatterbox); `None` for any
     /// other.
     pub exaggeration: Option<f32>,
+    /// A reference clip and its transcript to clone from directly, without
+    /// a saved voice (`POST /api/voices/preview`, naru task 1458): wins
+    /// over any named voice in `MlxTts::synth`. The `sherpa-onnx` backend
+    /// never clones, so it ignores this.
+    pub reference: Option<(PathBuf, String)>,
 }
 
 impl Default for SynthOptions {
@@ -49,6 +56,7 @@ impl Default for SynthOptions {
             level: true,
             instructions: None,
             exaggeration: None,
+            reference: None,
         }
     }
 }

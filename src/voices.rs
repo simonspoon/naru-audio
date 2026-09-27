@@ -17,6 +17,9 @@ use crate::registry::manifest::{Manifest, Voice};
 pub const REF_WAV: &str = "ref.wav";
 pub const REF_TXT: &str = "ref.txt";
 pub const MODEL_TXT: &str = "model.txt";
+/// A designed voice's description; its mere presence marks the voice as
+/// "designed" rather than "cloned" (naru task 1458 §2.6).
+pub const DESIGN_TXT: &str = "design.txt";
 
 /// Clip lengths `add` accepts, in seconds; 5–15 s is the target.
 pub const MIN_SECS: f64 = 3.0;
@@ -199,7 +202,10 @@ pub fn scratch(home: &Path, stem: &str) -> PathBuf {
 /// (mesa task 1455) — a blank transcript is refused only when the model
 /// actually needs one, though whatever text is given (even blank) is still
 /// stored, so a model with no use for a transcript can still be added from
-/// a clip alone.
+/// a clip alone. `description`, if given and non-blank, is stored as
+/// [`DESIGN_TXT`] (naru task 1458 §2.6): its mere presence, not its
+/// content, is what [`is_designed`] reads as "designed" rather than
+/// "cloned".
 pub fn add(
     home: &Path,
     name: &str,
@@ -207,6 +213,7 @@ pub fn add(
     text: &str,
     model: &str,
     require_text: bool,
+    description: Option<&str>,
 ) -> Result<f64, AddError> {
     check_name(name).map_err(AddError::Name)?;
     let text = text.trim();
@@ -235,6 +242,10 @@ pub fn add(
             .map_err(|e| AddError::Io(format!("write {REF_TXT}: {e}")))?;
         std::fs::write(tmp.join(MODEL_TXT), format!("{model}\n"))
             .map_err(|e| AddError::Io(format!("write {MODEL_TXT}: {e}")))?;
+        if let Some(description) = description.map(str::trim).filter(|d| !d.is_empty()) {
+            std::fs::write(tmp.join(DESIGN_TXT), format!("{description}\n"))
+                .map_err(|e| AddError::Io(format!("write {DESIGN_TXT}: {e}")))?;
+        }
         std::fs::create_dir_all(dir(home))
             .map_err(|e| AddError::Io(format!("create voices/: {e}")))?;
         // A concurrent add of the same name may have won the rename.
@@ -269,6 +280,132 @@ pub fn remove(home: &Path, name: &str) -> Result<bool, String> {
     std::fs::remove_dir_all(&voice)
         .map_err(|e| format!("remove {}: {e}", voice.display()))
         .map(|()| true)
+}
+
+/// Whether `name` in `home` is a designed voice: a cloned voice with a
+/// [`DESIGN_TXT`] alongside its clip, written from `POST
+/// /v1/audio/voices`'s `description` field (naru task 1458 §2.6). A
+/// built-in voice, never in `voices/`, is never designed.
+pub fn is_designed(home: &Path, name: &str) -> bool {
+    check_name(name).is_ok() && dir(home).join(name).join(DESIGN_TXT).is_file()
+}
+
+/// `name`'s description in `home` — [`DESIGN_TXT`], trimmed — if it has one
+/// and it is not blank; `None` for a voice with no description, including
+/// every cloned (not designed) and built-in voice.
+pub fn description(home: &Path, name: &str) -> Option<String> {
+    check_name(name).ok()?;
+    let text = std::fs::read_to_string(dir(home).join(name).join(DESIGN_TXT)).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// `name`'s clip length in `home`, in seconds, read from its `ref.wav`
+/// (§2.6 `GET /v1/audio/voices`'s `duration`); `None` for a voice that does
+/// not exist or whose `ref.wav` cannot be read, and always `None` for a
+/// built-in voice, which has no clip here at all.
+pub fn duration(home: &Path, name: &str) -> Option<f64> {
+    let wav = find(home, name)?.wav;
+    let reader = hound::WavReader::open(&wav).ok()?;
+    let spec = reader.spec();
+    (spec.sample_rate > 0).then(|| f64::from(reader.duration()) / f64::from(spec.sample_rate))
+}
+
+/// Why [`update`] refused a change; its `Display` is the message.
+#[derive(Debug)]
+pub enum UpdateError {
+    /// The new name is not a plain name ([`check_name`]).
+    Name(String),
+    /// `name` is not a cloned voice (the caller checks it is not a
+    /// built-in one first, as its message would be wrong here).
+    NotFound,
+    /// The new name is already taken.
+    Exists(String),
+    /// Anything else: the home's files.
+    Io(String),
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateError::Name(m) | UpdateError::Exists(m) | UpdateError::Io(m) => f.write_str(m),
+            UpdateError::NotFound => f.write_str("no such cloned voice"),
+        }
+    }
+}
+
+/// `PATCH /v1/audio/voices/{name}` (naru task 1458 §2.6): renames the
+/// cloned voice `name` to `new_name` (a no-op if `None` or unchanged),
+/// then overwrites [`REF_TXT`] with `text` and [`DESIGN_TXT`] with
+/// `description` where given (`None` leaves each alone; the caller passes
+/// only the fields the request body actually set). A blank `description`
+/// still writes an empty [`DESIGN_TXT`] rather than removing it — clearing
+/// a design is out of scope here — so once a voice is designed, `PATCH`
+/// cannot make it merely cloned again. Returns the voice's final name.
+pub fn update(
+    home: &Path,
+    name: &str,
+    new_name: Option<&str>,
+    text: Option<&str>,
+    description: Option<&str>,
+) -> Result<String, UpdateError> {
+    if find(home, name).is_none() {
+        return Err(UpdateError::NotFound);
+    }
+    let mut voice = dir(home).join(name);
+    let mut final_name = name.to_string();
+    if let Some(new_name) = new_name.filter(|n| *n != name) {
+        check_name(new_name).map_err(UpdateError::Name)?;
+        let target = dir(home).join(new_name);
+        if target.exists() {
+            return Err(UpdateError::Exists(format!(
+                "voice `{new_name}` already exists; remove {} first",
+                target.display()
+            )));
+        }
+        std::fs::rename(&voice, &target).map_err(|e| {
+            UpdateError::Io(format!(
+                "rename {} to {}: {e}",
+                voice.display(),
+                target.display()
+            ))
+        })?;
+        voice = target;
+        final_name = new_name.to_string();
+    }
+    if let Some(text) = text {
+        std::fs::write(voice.join(REF_TXT), format!("{}\n", text.trim()))
+            .map_err(|e| UpdateError::Io(format!("write {REF_TXT}: {e}")))?;
+    }
+    if let Some(description) = description {
+        std::fs::write(voice.join(DESIGN_TXT), format!("{}\n", description.trim()))
+            .map_err(|e| UpdateError::Io(format!("write {DESIGN_TXT}: {e}")))?;
+    }
+    Ok(final_name)
+}
+
+/// Converts `clip` to a 24 kHz mono WAV at a fresh scratch path under
+/// `home`'s `tmp/`, as [`add`] does, but without creating a voice: `POST
+/// /api/voices/preview` (naru task 1458 §2.6) clones from an upload it
+/// never saves. Returns the temp WAV's path (whose parent directory the
+/// caller must remove once done) and its length in seconds, checked
+/// against `MIN_SECS..=MAX_SECS` the same way `add` does.
+pub fn convert_to_tmp(home: &Path, stem: &str, clip: &Path) -> Result<(PathBuf, f64), AddError> {
+    let tmp = scratch(home, stem);
+    std::fs::create_dir_all(&tmp)
+        .map_err(|e| AddError::Io(format!("create {}: {e}", tmp.display())))?;
+    let wav = tmp.join(REF_WAV);
+    match convert(clip, &wav) {
+        Ok(secs) if (MIN_SECS..=MAX_SECS).contains(&secs) => Ok((wav, secs)),
+        Ok(secs) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            Err(AddError::Length(secs))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// `afconvert`s `clip` to `wav` and returns its length in seconds.
@@ -500,6 +637,7 @@ mod tests {
             "  Hello there.\n",
             "breeze-tts-2-mlx",
             true,
+            None,
         )
         .unwrap();
         assert!((secs - 6.0).abs() < 0.05, "{secs}");
@@ -509,12 +647,12 @@ mod tests {
         let spec = hound::WavReader::open(&found.wav).unwrap().spec();
         assert_eq!((spec.channels, spec.sample_rate), (1, SAMPLE_RATE));
 
-        let err = add(home.path(), "amy", &ok, "again", CLONE_MODEL, true)
+        let err = add(home.path(), "amy", &ok, "again", CLONE_MODEL, true, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("already exists"), "{err}");
         for (name, path) in [("short", &short), ("long", &long)] {
-            let err = add(home.path(), name, path, "text", CLONE_MODEL, true)
+            let err = add(home.path(), name, path, "text", CLONE_MODEL, true, None)
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("it must be 3–30 s"), "{err}");
@@ -526,12 +664,13 @@ mod tests {
             "t",
             CLONE_MODEL,
             true,
+            None,
         )
         .unwrap_err()
         .to_string();
         assert!(err.contains("afconvert cannot read"), "{err}");
-        assert!(add(home.path(), "../x", &ok, "t", CLONE_MODEL, true).is_err());
-        assert!(add(home.path(), "blank", &ok, " \n", CLONE_MODEL, true).is_err());
+        assert!(add(home.path(), "../x", &ok, "t", CLONE_MODEL, true, None).is_err());
+        assert!(add(home.path(), "blank", &ok, " \n", CLONE_MODEL, true, None).is_err());
         // Nothing half-made is left behind.
         assert_eq!(list(home.path()), ["amy"]);
         assert_eq!(
@@ -552,7 +691,16 @@ mod tests {
         let ok = src.path().join("ok.wav");
         clip(&ok, 6.0);
 
-        let secs = add(home.path(), "silent", &ok, "  \n", "some-model", false).unwrap();
+        let secs = add(
+            home.path(),
+            "silent",
+            &ok,
+            "  \n",
+            "some-model",
+            false,
+            None,
+        )
+        .unwrap();
         assert!((secs - 6.0).abs() < 0.05, "{secs}");
         let found = find(home.path(), "silent").unwrap();
         assert_eq!(found.text, "");

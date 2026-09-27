@@ -560,6 +560,7 @@ fn aliases_defaults_and_options_reach_the_model() {
         level: false,
         instructions: None,
         exaggeration: None,
+        reference: None,
     };
     assert_eq!(last(), ("bm_george".to_string(), expected));
 }
@@ -692,8 +693,10 @@ fn voices_answer_without_loading_the_model() {
         assert_eq!(
             reply.json(),
             json!({"model": "fake-tts", "voices": [
-                {"id": "af_heart", "accent": "us", "gender": "f", "default": true, "cloned": false},
-                {"id": "bm_george", "accent": "gb", "gender": "m", "default": false, "cloned": false},
+                {"id": "af_heart", "accent": "us", "gender": "f", "default": true, "cloned": false,
+                 "origin": "builtin", "description": null, "duration": null, "has_transcript": false},
+                {"id": "bm_george", "accent": "gb", "gender": "m", "default": false, "cloned": false,
+                 "origin": "builtin", "description": null, "duration": null, "has_transcript": false},
             ]}),
             "{path}"
         );
@@ -758,7 +761,8 @@ fn a_cloning_model_speaks_the_cloned_voices() {
     assert_eq!(
         reply.json(),
         json!({"model": "fake-clone", "voices": [
-            {"id": "zed", "accent": null, "gender": null, "default": false, "cloned": true},
+            {"id": "zed", "accent": null, "gender": null, "default": false, "cloned": true,
+             "origin": "cloned", "description": null, "duration": null, "has_transcript": true},
         ]})
     );
     // Kokoro-like models are untouched.
@@ -954,7 +958,8 @@ fn a_posted_clip_becomes_a_cloned_voice() {
     assert_eq!(
         body,
         json!({"id": "amy", "accent": null, "gender": null, "default": false,
-               "cloned": true, "model": "fake-clone", "duration": body["duration"]})
+               "cloned": true, "origin": "cloned", "description": null,
+               "model": "fake-clone", "duration": body["duration"]})
     );
     let voice = home_dir.join("voices").join("amy");
     assert_eq!(
@@ -1087,6 +1092,146 @@ fn a_posted_clip_becomes_a_cloned_voice() {
         .filter(|n| !n.ends_with(".lock"))
         .collect();
     assert!(uploads.is_empty(), "{uploads:?}");
+}
+
+/// naru task 1458 §2.6 `POST /api/voices/preview`: field validation before
+/// any clip conversion or model load — a missing field, a model that does
+/// not clone, and an unknown model.
+#[test]
+fn preview_validates_its_fields_before_converting_or_loading() {
+    let server = Server::fake();
+    let ok: &[u8] = b"not real audio, but validation never reads it";
+    let post = |fields: &[(&str, &[u8])]| server.form("/api/voices/preview", fields);
+
+    let field = |name: &'static str, value: &'static [u8]| (name, value);
+    type Fields<'a> = &'a [(&'a str, &'a [u8])];
+    let cases: [(Fields, u16, &str, &str); 6] = [
+        (
+            &[field("file", ok), field("input", b"Hi.")],
+            400,
+            "invalid_request",
+            "model",
+        ),
+        (
+            &[field("model", b"fake-clone"), field("input", b"Hi.")],
+            400,
+            "invalid_request",
+            "file",
+        ),
+        (
+            &[field("model", b"fake-clone"), field("file", ok)],
+            400,
+            "invalid_request",
+            "input",
+        ),
+        (
+            &[
+                field("model", b"fake-clone"),
+                field("file", ok),
+                field("input", b"   "),
+            ],
+            400,
+            "invalid_request",
+            "input",
+        ),
+        (
+            // "fake-tts" clones nothing: refused before any conversion.
+            &[
+                field("model", b"fake-tts"),
+                field("file", ok),
+                field("input", b"Hi."),
+            ],
+            400,
+            "model_does_not_clone",
+            "model",
+        ),
+        (
+            &[
+                field("model", b"nope"),
+                field("file", ok),
+                field("input", b"Hi."),
+            ],
+            404,
+            "model_not_found",
+            "model",
+        ),
+    ];
+    for (fields, status, code, param) in cases {
+        let reply = post(fields);
+        assert_eq!(reply.status, status, "{code}: {}", reply.json());
+        let error = &reply.json()["error"];
+        assert_eq!(error["code"], code, "{code}");
+        assert_eq!(error["param"], param, "{code}");
+    }
+    assert_eq!(server.record.loads.load(Ordering::SeqCst), 0);
+}
+
+/// A cloning model with `[backend.sherpa-onnx] clone = true` for
+/// `POST /api/voices/preview`, alongside the models `fake_home` already
+/// gives `Server::fake`.
+fn fake_clone_home() -> tempfile::TempDir {
+    let home = fake_home();
+    let dir = home.path().join("models").join("fake-clone");
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = json!({
+        "model": {"name": "fake-clone", "kind": "tts", "backend": "sherpa-onnx"},
+        "backend": {"sherpa-onnx": {"clone": true}},
+    });
+    std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+    home
+}
+
+/// `POST /api/voices/preview` synthesises from the uploaded clip directly
+/// (`SynthOptions.reference`), saves nothing under `voices/`, and always
+/// removes its temp files.
+#[cfg(target_os = "macos")]
+#[test]
+fn preview_synthesises_from_a_reference_clip_without_saving_a_voice() {
+    let home = fake_clone_home();
+    let home_dir = home.path().to_path_buf();
+    let record = Arc::new(Record::default());
+    let server = Server::start(
+        home,
+        "fake-tts",
+        Arc::new(FakeLoader(record.clone())),
+        record,
+    );
+    let ok = tone(6.0);
+
+    let reply = server.form(
+        "/api/voices/preview",
+        &[
+            ("model", b"fake-clone"),
+            ("file", &ok),
+            ("text", b"What the clip says."),
+            ("input", b"Preview this."),
+        ],
+    );
+    assert_eq!(
+        reply.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    assert_eq!(reply.header("content-type"), Some("audio/wav"));
+    assert_eq!(&reply.body[0..4], b"RIFF");
+
+    let (voice, options) = server.record.last.lock().unwrap().clone().unwrap();
+    assert_eq!(voice, "");
+    let (wav, text) = options.reference.expect("a reference was passed");
+    assert_eq!(text, "What the clip says.");
+    // The temp clip existed for the synthesis but is gone once it answers.
+    assert!(!wav.exists(), "{}", wav.display());
+    assert!(wav.starts_with(home_dir.join("tmp")), "{}", wav.display());
+
+    // Nothing was saved as a voice.
+    assert!(!home_dir.join("voices").exists());
+    let leftover: Vec<String> = std::fs::read_dir(home_dir.join("tmp"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| !n.ends_with(".lock"))
+        .collect();
+    assert!(leftover.is_empty(), "{leftover:?}");
 }
 
 fn say(url: &str, args: &[&str], stdin: Option<&[u8]>) -> Output {

@@ -83,7 +83,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/audio/voices/{name}",
-            get(speech::voice_export).delete(speech::delete_voice),
+            get(speech::voice_export)
+                .delete(speech::delete_voice)
+                .patch(speech::patch_voice),
+        )
+        .route(
+            "/api/voices/{model}/{voice}/sample",
+            get(speech::voice_sample),
+        )
+        .route(
+            "/api/voices/preview",
+            post(speech::preview_voice)
+                .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
         )
         .route("/api/pull", post(pull))
         .route("/api/pulls", get(pulls_list))
@@ -461,6 +472,15 @@ async fn remove(
             )
         });
     }
+    // §2.6: a removed model's cached previews (`GET
+    // /api/voices/{model}/{voice}/sample`) go with it (naru task 1458).
+    let previews = st
+        .registry
+        .home()
+        .join("state")
+        .join("previews")
+        .join(&name);
+    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(previews)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -669,6 +689,10 @@ async fn put_defaults(
         }
     }
 
+    // Persisted before it is applied live: if the write fails, memory and
+    // `config.toml` must not disagree about which default is in force.
+    crate::manager::write_defaults(st.registry.home(), stt.as_deref(), tts.as_deref(), &voices)
+        .map_err(|e| transcriptions::internal(&st, &req_id, e))?;
     if let Some(name) = &stt {
         st.models.set_stt_default(name.clone());
     }
@@ -678,8 +702,6 @@ async fn put_defaults(
     for (model, voice) in &voices {
         st.models.set_default_voice(model.clone(), voice.clone());
     }
-    crate::manager::write_defaults(st.registry.home(), stt.as_deref(), tts.as_deref(), &voices)
-        .map_err(|e| transcriptions::internal(&st, &req_id, e))?;
 
     Ok(Json(defaults_json(&st)))
 }

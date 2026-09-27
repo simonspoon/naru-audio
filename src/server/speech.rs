@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Json;
@@ -153,7 +154,7 @@ pub(super) async fn speech(
             Format::Pcm => pcm,
         };
         // A full body: axum sets `Content-Length`.
-        return Ok((AppendHeaders(headers(job.format, sample_rate)), body).into_response());
+        return Ok(audio_response(job.format, sample_rate, body));
     }
 
     // Held back until the first sentence is out of the model, so a failure
@@ -285,6 +286,23 @@ fn headers(format: Format, sample_rate: u32) -> Vec<(&'static str, String)> {
             ("x-audio-encoding", "s16le".to_string()),
         ],
     }
+}
+
+/// A full (non-streamed) audio body with `headers()`'s headers, exactly
+/// once each. `AppendHeaders` appends rather than replaces, and `Vec<u8>`'s
+/// own `IntoResponse` already sets a default `Content-Type:
+/// application/octet-stream` (axum-core's `impl IntoResponse for Vec<u8>`);
+/// combining the two the way the streamed responses combine `AppendHeaders`
+/// with `Body::from_stream` (which sets no header of its own) would instead
+/// send `Content-Type` twice — naru task 1458, caught by the admin page's
+/// browser `<audio>` tag choking on it. Wrapping `body` in `Body` first,
+/// which has no default headers of its own, avoids the second one.
+fn audio_response(format: Format, sample_rate: u32, body: Vec<u8>) -> Response {
+    (
+        AppendHeaders(headers(format, sample_rate)),
+        Body::from(body),
+    )
+        .into_response()
 }
 
 /// A 44-byte header for 16-bit mono PCM with `data_size` bytes of samples.
@@ -565,9 +583,19 @@ pub(super) async fn voices(
                     .into_iter()
                     .filter_map(|id| {
                         let model = voices::model_of(home, &id)?;
+                        let origin = if voices::is_designed(home, &id) {
+                            "designed"
+                        } else {
+                            "cloned"
+                        };
+                        let has_transcript =
+                            voices::find(home, &id).is_some_and(|c| !c.text.is_empty());
                         Some(
                             json!({"id": id, "accent": null, "gender": null, "default": false,
-                                     "cloned": true, "model": model}),
+                                     "cloned": true, "model": model, "origin": origin,
+                                     "description": voices::description(home, &id),
+                                     "duration": voices::duration(home, &id),
+                                     "has_transcript": has_transcript}),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -577,8 +605,11 @@ pub(super) async fn voices(
         .map_err(|e| internal(&st, &req_id, e.to_string()))?;
         return Ok(Json(json!({"model": "clones", "voices": voices})));
     }
-    let (manifest, voices) = {
-        let st = st.clone();
+    // `PUT /api/defaults`' live override, if set, wins over the manifest's
+    // own `default` marker.
+    let default_override = st.models.default_voice(&name);
+    let (model_name, voices) = {
+        let (st, default_override) = (st.clone(), default_override);
         tokio::task::spawn_blocking(move || {
             let manifest = match st.registry.catalog().models.get(&name) {
                 Some(m) if !st.registry.is_installed(&name) => match m.model.kind {
@@ -587,31 +618,41 @@ pub(super) async fn voices(
                 },
                 _ => kind_manifest(&st, &name, Kind::Tts),
             }?;
-            let voices = voices::of(&manifest, st.registry.home());
-            Ok::<_, ApiError>((manifest, voices))
+            let home = st.registry.home();
+            let voices: Vec<Value> = voices::of(&manifest, home)
+                .iter()
+                .map(|v| {
+                    // `voices::of` appends the cloned voices no `[[voice]]`
+                    // shadows.
+                    let cloned = !manifest.voices.iter().any(|m| m.id == v.id);
+                    let default = match &default_override {
+                        Some(d) => &v.id == d,
+                        None => v.default,
+                    };
+                    // A built-in voice is never in `voices/`, so it is never
+                    // designed and has no clip or transcript here to report.
+                    let origin = if !cloned {
+                        "builtin"
+                    } else if voices::is_designed(home, &v.id) {
+                        "designed"
+                    } else {
+                        "cloned"
+                    };
+                    let has_transcript =
+                        voices::find(home, &v.id).is_some_and(|c| !c.text.is_empty());
+                    json!({"id": v.id, "accent": v.accent, "gender": v.gender,
+                           "default": default, "cloned": cloned, "origin": origin,
+                           "description": voices::description(home, &v.id),
+                           "duration": voices::duration(home, &v.id),
+                           "has_transcript": has_transcript})
+                })
+                .collect();
+            Ok::<_, ApiError>((manifest.model.name, voices))
         })
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
-    // `PUT /api/defaults`' live override, if set, wins over the manifest's
-    // own `default` marker.
-    let default_override = st.models.default_voice(&manifest.model.name);
-    let voices: Vec<Value> = voices
-        .iter()
-        .map(|v| {
-            // `voices::of` appends the cloned voices no `[[voice]]` shadows.
-            let cloned = !manifest.voices.iter().any(|m| m.id == v.id);
-            let default = match &default_override {
-                Some(d) => &v.id == d,
-                None => v.default,
-            };
-            json!({"id": v.id, "accent": v.accent, "gender": v.gender, "default": default,
-                   "cloned": cloned})
-        })
-        .collect();
-    Ok(Json(
-        json!({"model": manifest.model.name, "voices": voices}),
-    ))
+    Ok(Json(json!({"model": model_name, "voices": voices})))
 }
 
 /// §2.5 `GET /v1/audio/voices/{name}`: a cloned voice's transcript, the
@@ -633,23 +674,18 @@ pub(super) async fn voice_export(
             };
             let wav = std::fs::read(&voice.wav)
                 .map_err(|e| format!("read {}: {e}", voice.wav.display()))?;
-            Ok::<_, String>(Some((voice.text, voice.model, wav)))
+            let description = voices::description(&home, &name);
+            Ok::<_, String>(Some((voice.text, voice.model, wav, description)))
         })
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))?
     .map_err(|m| internal(&st, &req_id, m))?;
-    let (text, model, wav) = found.ok_or_else(|| ApiError {
-        param: Some("name"),
-        ..ApiError::new(
-            StatusCode::NOT_FOUND,
-            "voice_not_found",
-            format!("there is no cloned voice {name:?}"),
-        )
-    })?;
-    Ok(Json(
-        json!({"name": name, "text": text, "model": model, "wav_base64": STANDARD.encode(wav)}),
-    ))
+    let (text, model, wav, description) = found.ok_or_else(|| voice_not_found(&name))?;
+    Ok(Json(json!({
+        "name": name, "text": text, "model": model, "description": description,
+        "wav_base64": STANDARD.encode(wav),
+    })))
 }
 
 /// §2.5 `DELETE /v1/audio/voices/{name}`: removes a cloned voice's
@@ -664,40 +700,71 @@ pub(super) async fn delete_voice(
     Path(name): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     voices::check_name(&name).map_err(|m| bad_request("name", "invalid_request", m))?;
-    if st
-        .registry
+    if is_builtin_voice(&st, &name) {
+        return Err(builtin_voice(&name));
+    }
+    let (model, removed) = {
+        let (home, name) = (st.registry.home().to_path_buf(), name.clone());
+        tokio::task::spawn_blocking(move || {
+            (voices::model_of(&home, &name), voices::remove(&home, &name))
+        })
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+    let removed = removed.map_err(|m| internal(&st, &req_id, m))?;
+    if !removed {
+        return Err(voice_not_found(&name));
+    }
+    // §2.6: a configured default voice does not survive its own deletion
+    // (naru task 1458). Persisted before it is applied live, so a failed
+    // write never leaves memory and `config.toml` disagreeing.
+    if let Some(model) = model
+        && st.models.default_voice(&model).as_deref() == Some(name.as_str())
+    {
+        if let Err(e) =
+            crate::manager::write_defaults(st.registry.home(), None, None, &[(model.clone(), None)])
+        {
+            return Err(internal(&st, &req_id, e));
+        }
+        st.models.set_default_voice(model, None);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether `name` is one of some catalog model's own `[[voice]]`s, never in
+/// `voices/` — the built-in check `DELETE`/`PATCH /v1/audio/voices/{name}`
+/// share (naru task 1458).
+fn is_builtin_voice(st: &AppState, name: &str) -> bool {
+    st.registry
         .catalog()
         .models
         .values()
         .any(|m| m.voices.iter().any(|v| v.id == name))
-    {
-        return Err(ApiError {
-            param: Some("name"),
-            ..ApiError::new(
-                StatusCode::CONFLICT,
-                "builtin_voice",
-                format!("{name:?} is a built-in voice; only cloned voices can be removed"),
-            )
-        });
+}
+
+/// 409: `name` is a built-in voice, not a cloned one `DELETE`/`PATCH` can
+/// touch.
+fn builtin_voice(name: &str) -> ApiError {
+    ApiError {
+        param: Some("name"),
+        ..ApiError::new(
+            StatusCode::CONFLICT,
+            "builtin_voice",
+            format!("{name:?} is a built-in voice; only cloned voices can be changed"),
+        )
     }
-    let removed = {
-        let (home, name) = (st.registry.home().to_path_buf(), name.clone());
-        tokio::task::spawn_blocking(move || voices::remove(&home, &name))
+}
+
+/// 404: there is no cloned voice `name`.
+fn voice_not_found(name: &str) -> ApiError {
+    ApiError {
+        param: Some("name"),
+        ..ApiError::new(
+            StatusCode::NOT_FOUND,
+            "voice_not_found",
+            format!("there is no cloned voice {name:?}"),
+        )
     }
-    .await
-    .map_err(|e| internal(&st, &req_id, e.to_string()))?
-    .map_err(|m| internal(&st, &req_id, m))?;
-    if !removed {
-        return Err(ApiError {
-            param: Some("name"),
-            ..ApiError::new(
-                StatusCode::NOT_FOUND,
-                "voice_not_found",
-                format!("there is no cloned voice {name:?}"),
-            )
-        });
-    }
-    Ok(StatusCode::NO_CONTENT)
 }
 
 /// §2.5 `POST /v1/audio/voices`: the multipart fields `name`, `file` (the
@@ -721,13 +788,17 @@ pub(super) async fn add_voice(
             format!("the body must be multipart/form-data: {}", e.body_text()),
         )
     })?;
-    let (mut name, mut file, mut text, mut model) = (None, None, None, None);
+    let (mut name, mut file, mut text, mut model, mut description) = (None, None, None, None, None);
     while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
         match field.name().unwrap_or_default().to_owned().as_str() {
             "file" => file = Some(field.bytes().await.map_err(multipart_error)?),
             "name" => name = Some(field.text().await.map_err(multipart_error)?),
             "text" => text = Some(field.text().await.map_err(multipart_error)?),
             "model" => model = Some(field.text().await.map_err(multipart_error)?),
+            // §2.6: a designed voice's description (naru task 1458); its
+            // mere presence, once stored, is what marks the voice
+            // "designed" rather than "cloned".
+            "description" => description = Some(field.text().await.map_err(multipart_error)?),
             _ => {}
         }
     }
@@ -765,17 +836,28 @@ pub(super) async fn add_voice(
     let text = text.unwrap_or_default();
 
     let result = {
-        let (home, name, model) = (
+        let (home, name, model, description) = (
             st.registry.home().to_path_buf(),
             name.clone(),
             model.clone(),
+            description.clone(),
         );
         tokio::task::spawn_blocking(move || {
             let upload = voices::scratch(&home, "upload");
             let result = std::fs::create_dir_all(home.join("tmp"))
                 .and_then(|()| std::fs::write(&upload, &file))
                 .map_err(|e| AddError::Io(format!("write {}: {e}", upload.display())))
-                .and_then(|()| voices::add(&home, &name, &upload, &text, &model, require_text));
+                .and_then(|()| {
+                    voices::add(
+                        &home,
+                        &name,
+                        &upload,
+                        &text,
+                        &model,
+                        require_text,
+                        description.as_deref(),
+                    )
+                });
             // Also after a write that failed partway.
             let _ = std::fs::remove_file(&upload);
             result
@@ -801,6 +883,10 @@ pub(super) async fn add_voice(
         AddError::Length(_) => bad_request("file", "invalid_request", e.to_string()),
         AddError::Io(m) => internal(&st, &req_id, m),
     })?;
+    let description = description
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty());
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -809,6 +895,8 @@ pub(super) async fn add_voice(
             "gender": null,
             "default": false,
             "cloned": true,
+            "origin": if description.is_some() { "designed" } else { "cloned" },
+            "description": description,
             "model": model,
             "duration": secs,
         })),
@@ -843,4 +931,374 @@ fn clone_manifest(st: &AppState, name: &str) -> Result<Manifest, ApiError> {
         });
     }
     Ok(manifest)
+}
+
+/// §2.6 `PATCH /v1/audio/voices/{name}` `{"name"?, "text"?, "description"?}`
+/// (naru task 1458): renames a cloned voice and/or overwrites its
+/// transcript or description, each only where the body actually gives it.
+/// A built-in voice is 409 `builtin_voice`, as `DELETE` has it; an unknown
+/// `name` is 404 `voice_not_found`; a taken new name is 409 `voice_exists`.
+/// A configured default voice (`PUT /api/defaults`, `config.toml
+/// [defaults.voices]`) follows the rename. Returns 200 with the voice as
+/// `GET /v1/audio/voices` lists it.
+pub(super) async fn patch_voice(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    voices::check_name(&name).map_err(|m| bad_request("name", "invalid_request", m))?;
+    if is_builtin_voice(&st, &name) {
+        return Err(builtin_voice(&name));
+    }
+    let body: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let string = |key: &'static str| -> Result<Option<&str>, ApiError> {
+        body.get(key)
+            .filter(|v| !v.is_null())
+            .map(|v| {
+                v.as_str().ok_or_else(|| {
+                    bad_request(key, "invalid_request", format!("{key} must be a string"))
+                })
+            })
+            .transpose()
+    };
+    let new_name = string("name")?;
+    let text = string("text")?;
+    let description = string("description")?;
+    if let Some(n) = new_name {
+        voices::check_name(n).map_err(|m| bad_request("name", "invalid_request", m))?;
+    }
+
+    let (home, old_name, new_name_owned, text_owned, description_owned) = (
+        st.registry.home().to_path_buf(),
+        name.clone(),
+        new_name.map(str::to_string),
+        text.map(str::to_string),
+        description.map(str::to_string),
+    );
+    let (model_before, updated) = {
+        let (home, old_name, new_name_owned, text_owned, description_owned) = (
+            home.clone(),
+            old_name.clone(),
+            new_name_owned.clone(),
+            text_owned.clone(),
+            description_owned.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            let model_before = voices::model_of(&home, &old_name);
+            let updated = voices::update(
+                &home,
+                &old_name,
+                new_name_owned.as_deref(),
+                text_owned.as_deref(),
+                description_owned.as_deref(),
+            );
+            (model_before, updated)
+        })
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+    let final_name = updated.map_err(|e| match e {
+        voices::UpdateError::Name(m) => bad_request("name", "invalid_request", m),
+        voices::UpdateError::NotFound => voice_not_found(&name),
+        voices::UpdateError::Exists(m) => ApiError {
+            param: Some("name"),
+            ..ApiError::new(StatusCode::CONFLICT, "voice_exists", m)
+        },
+        voices::UpdateError::Io(m) => internal(&st, &req_id, m),
+    })?;
+
+    // §2.6: a configured default voice follows its own rename, persisted
+    // before it is applied live (as `DELETE` above does too), so a failed
+    // write never leaves memory and `config.toml` disagreeing.
+    if final_name != name
+        && let Some(model) = model_before
+        && st.models.default_voice(&model).as_deref() == Some(name.as_str())
+    {
+        if let Err(e) = crate::manager::write_defaults(
+            st.registry.home(),
+            None,
+            None,
+            &[(model.clone(), Some(final_name.clone()))],
+        ) {
+            return Err(internal(&st, &req_id, e));
+        }
+        st.models.set_default_voice(model, Some(final_name.clone()));
+    }
+
+    let listing = {
+        let (st, final_name) = (st.clone(), final_name.clone());
+        tokio::task::spawn_blocking(move || {
+            let home = st.registry.home();
+            let voice = voices::find(home, &final_name)?;
+            let default = st.models.default_voice(&voice.model).as_deref() == Some(final_name.as_str());
+            let has_transcript = !voice.text.is_empty();
+            Some(json!({
+                "id": final_name, "accent": null, "gender": null, "default": default,
+                "cloned": true, "model": voice.model,
+                "origin": if voices::is_designed(home, &final_name) { "designed" } else { "cloned" },
+                "description": voices::description(home, &final_name),
+                "duration": voices::duration(home, &final_name),
+                "has_transcript": has_transcript,
+            }))
+        })
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?
+    .ok_or_else(|| internal(&st, &req_id, "the voice vanished after its own update".to_string()))?;
+    Ok(Json(listing))
+}
+
+/// §2.6 `GET /api/voices/{model}/{voice}/sample[?generate=true]` (naru task
+/// 1458): a cloned or designed voice's own `ref.wav`, byte for byte; a
+/// built-in voice's cached preview at `state/previews/<model>/<voice>.wav`
+/// under the home, or, with `generate=true`, a fixed line synthesised and
+/// cached there for next time. `DELETE /api/models/{name}` removes a
+/// model's whole preview cache. 404 `voice_not_found` for a `voice` that is
+/// none of the model's own or cloned voices; 404 `preview_not_cached` for a
+/// built-in voice with nothing cached and no `generate=true` — a built-in
+/// voice is never generated unasked.
+pub(super) async fn voice_sample(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    Path((model, voice)): Path<(String, String)>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Response, ApiError> {
+    voices::check_name(&voice).map_err(|m| bad_request("voice", "invalid_request", m))?;
+    let generate = query.get("generate").map(String::as_str) == Some("true");
+
+    let (manifest, cloned) = {
+        let (st, model, voice) = (st.clone(), model.clone(), voice.clone());
+        tokio::task::spawn_blocking(move || {
+            let manifest = match st.registry.catalog().models.get(&model) {
+                Some(m) if !st.registry.is_installed(&model) => match m.model.kind {
+                    Kind::Tts => Ok(m.clone()),
+                    _ => Err(not_kind(&model, Kind::Tts)),
+                },
+                _ => kind_manifest(&st, &model, Kind::Tts),
+            }?;
+            let voices = voices::of(&manifest, st.registry.home());
+            if !voices.iter().any(|v| v.id == voice) {
+                return Err(voice_not_found_of(&model, &voice));
+            }
+            let cloned = !manifest.voices.iter().any(|v| v.id == voice);
+            Ok::<_, ApiError>((manifest, cloned))
+        })
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+
+    if cloned {
+        let (home, voice_id, model_name) = (
+            st.registry.home().to_path_buf(),
+            voice.clone(),
+            model.clone(),
+        );
+        let wav = tokio::task::spawn_blocking(move || {
+            voices::find(&home, &voice_id).and_then(|c| std::fs::read(&c.wav).ok())
+        })
+        .await
+        .map_err(|e| internal(&st, &req_id, e.to_string()))?
+        .ok_or_else(|| voice_not_found_of(&model_name, &voice))?;
+        return Ok(audio_response(Format::Wav, 0, wav));
+    }
+
+    let cache = preview_cache_path(st.registry.home(), &model, &voice);
+    let cached = {
+        let cache = cache.clone();
+        tokio::task::spawn_blocking(move || std::fs::read(&cache).ok())
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+    if let Some(bytes) = cached {
+        return Ok(audio_response(Format::Wav, 0, bytes));
+    }
+    if !generate {
+        return Err(ApiError {
+            param: Some("voice"),
+            ..ApiError::new(
+                StatusCode::NOT_FOUND,
+                "preview_not_cached",
+                format!("no cached preview for \"{voice}\" of \"{model}\"; pass ?generate=true"),
+            )
+        });
+    }
+
+    let guard = st
+        .models
+        .acquire(manifest, None)
+        .await
+        .map_err(|e| manager_error(&st, &req_id, e))?;
+    let sample_rate = guard.tts().sample_rate();
+    let mut rx = synthesise(
+        guard,
+        PREVIEW_TEXT.to_string(),
+        voice.clone(),
+        SynthOptions::default(),
+    );
+    let mut pcm = Vec::new();
+    while let Some(piece) = rx.recv().await {
+        pcm.extend_from_slice(&piece.map_err(|e| failed(&st, &req_id, e))?);
+    }
+    let mut wav = wav_header(sample_rate, pcm.len() as u32).to_vec();
+    wav.extend_from_slice(&pcm);
+    {
+        let (cache, bytes) = (cache, wav.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(parent) = cache.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&cache, &bytes)
+        })
+        .await;
+    }
+    Ok(audio_response(Format::Wav, 0, wav))
+}
+
+/// 404: the model `model` has no voice `voice`, built in or cloned.
+fn voice_not_found_of(model: &str, voice: &str) -> ApiError {
+    ApiError {
+        param: Some("voice"),
+        ..ApiError::new(
+            StatusCode::NOT_FOUND,
+            "voice_not_found",
+            format!("the model {model:?} has no voice {voice:?}"),
+        )
+    }
+}
+
+/// A fixed line synthesised for `GET /api/voices/{model}/{voice}/sample`'s
+/// `generate=true` and cached for next time.
+const PREVIEW_TEXT: &str = "This is a preview of this voice.";
+
+/// Where a built-in voice's generated preview is cached, under `home`'s
+/// `state/`; `DELETE /api/models/{name}` removes the whole `<model>/`
+/// directory here.
+pub(super) fn preview_cache_path(home: &std::path::Path, model: &str, voice: &str) -> PathBuf {
+    home.join("state")
+        .join("previews")
+        .join(model)
+        .join(format!("{voice}.wav"))
+}
+
+/// §2.6 `POST /api/voices/preview` (naru task 1458): `multipart/form-data`
+/// fields `model` (a TTS model that clones), `file` (the reference clip),
+/// `text` (its transcript) and `input` (what to say) synthesise a one-off
+/// clip in `model`'s voice without saving anything to `voices/`. The clip
+/// is converted the same way `POST /v1/audio/voices` converts an upload
+/// ([`voices::convert_to_tmp`]) and always removed once synthesis ends,
+/// whether it succeeds or not. Returns `audio/wav`, not streamed.
+pub(super) async fn preview_voice(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    multipart: Result<Multipart, MultipartRejection>,
+) -> Result<Response, ApiError> {
+    let mut multipart = multipart.map_err(|e| {
+        bad_request(
+            "file",
+            "invalid_request",
+            format!("the body must be multipart/form-data: {}", e.body_text()),
+        )
+    })?;
+    let (mut model, mut file, mut text, mut input) = (None, None, None, None);
+    while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
+        match field.name().unwrap_or_default().to_owned().as_str() {
+            "model" => model = Some(field.text().await.map_err(multipart_error)?),
+            "file" => file = Some(field.bytes().await.map_err(multipart_error)?),
+            "text" => text = Some(field.text().await.map_err(multipart_error)?),
+            "input" => input = Some(field.text().await.map_err(multipart_error)?),
+            _ => {}
+        }
+    }
+    let required = |param: &'static str| {
+        bad_request(
+            param,
+            "invalid_request",
+            format!("the \"{param}\" field is required"),
+        )
+    };
+    let model = model.ok_or_else(|| required("model"))?;
+    let file = file.ok_or_else(|| required("file"))?;
+    let input = input.ok_or_else(|| required("input"))?;
+    if input.trim().is_empty() {
+        return Err(bad_request(
+            "input",
+            "invalid_request",
+            "\"input\" must be a non-empty string",
+        ));
+    }
+    let text = text.unwrap_or_default();
+
+    let manifest = {
+        let (st, model) = (st.clone(), model.clone());
+        tokio::task::spawn_blocking(move || clone_manifest(&st, &model))
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+
+    let converted = {
+        let (home, file) = (st.registry.home().to_path_buf(), file.clone());
+        tokio::task::spawn_blocking(move || {
+            let upload = voices::scratch(&home, "preview-upload");
+            let result = std::fs::create_dir_all(home.join("tmp"))
+                .and_then(|()| std::fs::write(&upload, &file))
+                .map_err(|e| AddError::Io(format!("write {}: {e}", upload.display())))
+                .and_then(|()| voices::convert_to_tmp(&home, "preview", &upload));
+            let _ = std::fs::remove_file(&upload);
+            result
+        })
+    }
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?
+    .map_err(|e| match e {
+        AddError::Clip(_) => ApiError {
+            param: Some("file"),
+            ..ApiError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+                "the clip is not audio afconvert can read, such as WAV or MP3",
+            )
+        },
+        AddError::Length(_) => bad_request("file", "invalid_request", e.to_string()),
+        _ => internal(&st, &req_id, e.to_string()),
+    })?;
+    let (wav_path, _secs) = converted;
+    let tmp_dir = wav_path.parent().map(std::path::Path::to_path_buf);
+    let cleanup = |tmp_dir: &Option<PathBuf>| {
+        if let Some(dir) = tmp_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    };
+
+    let guard = match st.models.acquire(manifest, None).await {
+        Ok(guard) => guard,
+        Err(e) => {
+            cleanup(&tmp_dir);
+            return Err(manager_error(&st, &req_id, e));
+        }
+    };
+    let sample_rate = guard.tts().sample_rate();
+    let options = SynthOptions {
+        reference: Some((wav_path, text)),
+        ..SynthOptions::default()
+    };
+    let mut rx = synthesise(guard, input, String::new(), options);
+    let mut pcm = Vec::new();
+    let mut failure = None;
+    while let Some(piece) = rx.recv().await {
+        match piece {
+            Ok(p) => pcm.extend_from_slice(&p),
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+    }
+    cleanup(&tmp_dir);
+    if let Some(e) = failure {
+        return Err(failed(&st, &req_id, e));
+    }
+    let mut wav = wav_header(sample_rate, pcm.len() as u32).to_vec();
+    wav.extend_from_slice(&pcm);
+    Ok(audio_response(Format::Wav, sample_rate, wav))
 }

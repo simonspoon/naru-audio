@@ -109,7 +109,13 @@ impl TtsModel for MlxTts {
     ) -> Result<(), TtsError> {
         check(text, options)?;
         let mut request = json!({"text": text, "speed": options.speed});
-        if let Some(v) = self.voices.iter().find(|v| v.id == voice) {
+        if let Some((wav, ref_text)) = &options.reference {
+            // §2.6 `POST /api/voices/preview` (naru task 1458): an explicit
+            // reference clip wins over any named voice, including an empty
+            // one the preview endpoint passes since it has no saved voice.
+            request["reference"] = json!(wav);
+            request["reference_text"] = json!(ref_text);
+        } else if let Some(v) = self.voices.iter().find(|v| v.id == voice) {
             request["voice"] = json!(v.id);
             if let Some(reference) = &v.reference {
                 request["reference"] = json!(self.dir.join(reference));
