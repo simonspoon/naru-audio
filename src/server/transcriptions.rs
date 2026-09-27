@@ -357,6 +357,9 @@ pub(super) fn not_kind(name: &str, kind: Kind) -> ApiError {
         Kind::Stt => "speech-to-text",
         Kind::Tts => "text-to-speech",
         Kind::Vad => "voice activity detection",
+        Kind::Diarization => "speaker diarization",
+        Kind::Denoise => "speech denoising",
+        Kind::Separation => "source separation",
     };
     bad_request(
         "model",

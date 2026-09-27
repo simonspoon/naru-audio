@@ -1,0 +1,17 @@
+# GTCRN (Xiaobin-Rong/gtcrn, MIT), sherpa-onnx's ONNX export. Offline
+# speech denoising for voice-prep (naru task 1461 §8). Size and hash
+# computed 2026-09-27 from the upstream release.
+
+[model]
+name        = "speech-denoiser-gtcrn"
+kind        = "denoise"
+backend     = "sherpa-onnx"
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+license     = "MIT"
+license_url = "https://github.com/Xiaobin-Rong/gtcrn/blob/main/LICENSE"
+
+[[file]]
+path   = "gtcrn_simple.onnx"
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/gtcrn_simple.onnx"
+sha256 = "e77603ac0c23dac3227dd2d7135b3a585cbee2679048aecfa886657d3ae1b534"
+size   = 535_638

@@ -1,0 +1,28 @@
+# Deezer's Spleeter 2-stems (MIT; github.com/deezer/spleeter), sherpa-onnx's
+# int8 ONNX export. Source separation for voice-prep (naru task 1461 §8):
+# isolates vocals from music/noise. Size and hash computed 2026-09-27 from
+# the upstream release.
+
+[model]
+name        = "source-separation-spleeter-2stems-int8"
+kind        = "separation"
+backend     = "sherpa-onnx"
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+license     = "MIT"
+license_url = "https://github.com/deezer/spleeter/blob/master/LICENSE"
+
+[[archive]]
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/sherpa-onnx-spleeter-2stems-int8.tar.bz2"
+sha256 = "c5dc8edfa08cc9a6d82670fcca15cfe671e446385e1a28c9da8c1816d238ea17"
+size   = 48_623_481
+strip  = 1                                    # sherpa-onnx-spleeter-2stems-int8/
+
+[[file]]
+path   = "vocals.int8.onnx"
+sha256 = "6e9721864c0c1a6d86eaae92de71637b2daeb3df769c9c536053b46be8dd10aa"
+size   = 26_238_864
+
+[[file]]
+path   = "accompaniment.int8.onnx"
+sha256 = "53a96a0d1520b45b8f3cc53262e3725defb686fc3a17490932f050721f4583f1"
+size   = 26_238_869

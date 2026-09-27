@@ -3,6 +3,7 @@
 //! §2.6 errors, `X-Request-Id`.
 
 mod admin;
+mod prep;
 mod pulls;
 mod speech;
 mod stream;
@@ -97,6 +98,36 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(speech::preview_voice)
                 .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
         )
+        .route(
+            "/v1/audio/prep/clips",
+            get(prep::list_clips)
+                .post(prep::upload_clip)
+                .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/v1/audio/prep/clips/{id}",
+            get(prep::get_clip).delete(prep::delete_clip),
+        )
+        .route("/v1/audio/prep/clips/{id}/audio", get(prep::clip_audio))
+        .route(
+            "/v1/audio/prep/clips/{id}/transcribe",
+            post(prep::transcribe_clip),
+        )
+        .route(
+            "/v1/audio/prep/clips/{id}/transcript",
+            get(prep::get_transcript),
+        )
+        .route(
+            "/v1/audio/samples",
+            get(prep::list_samples).post(prep::create_sample),
+        )
+        .route(
+            "/v1/audio/samples/{id}",
+            get(prep::get_sample)
+                .patch(prep::rename_sample)
+                .delete(prep::delete_sample),
+        )
+        .route("/v1/audio/samples/{id}/audio", get(prep::sample_audio))
         .route("/api/pull", post(pull))
         .route("/api/pulls", get(pulls_list))
         .route("/api/pulls/{name}", delete(pulls_cancel))

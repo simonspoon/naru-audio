@@ -1,0 +1,41 @@
+# pyannote/segmentation-3.0 (MIT; sherpa-onnx's ONNX export, unlisted on
+# Hugging Face without a login, but this GitHub release is not gated) plus
+# 3D-Speaker's English CAM++ speaker embedding (Apache-2.0). Offline speaker
+# diarization for voice-prep (naru task 1461 §8): segmentation splits the
+# clip into single-speaker spans, the embedding vectorises each, and
+# sherpa-onnx clusters them into speakers. Sizes and hashes computed
+# 2026-09-27 from the upstream releases.
+
+[model]
+name        = "speaker-diarization-en"
+kind        = "diarization"
+backend     = "sherpa-onnx"
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+languages   = ["en"]
+license     = "MIT AND Apache-2.0"           # segmentation MIT, embedding Apache-2.0
+license_url = "https://opensource.org/license/mit/"
+
+[[archive]]
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
+sha256 = "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488"
+size   = 6_958_444
+strip  = 1                                    # sherpa-onnx-pyannote-segmentation-3-0/
+
+[[file]]
+path   = "model.onnx"
+sha256 = "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"
+size   = 5_992_913
+
+[[file]]
+path   = "LICENSE"
+sha256 = "14d7016ad68e7394d6e6b78d96cc2ae431c905287b89674cfdf021e79e62b8ba"
+size   = 1_061
+
+# 3D-Speaker (Alibaba DAMO Academy) English speaker embedding, Apache-2.0
+# (github.com/modelscope/3D-Speaker LICENSE); a direct [[file]], not part
+# of the archive above.
+[[file]]
+path   = "embedding.onnx"
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+sha256 = "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b"
+size   = 29_596_978

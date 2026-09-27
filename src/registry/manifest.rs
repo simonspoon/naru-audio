@@ -63,6 +63,18 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/silero-vad.toml"),
     ),
     (
+        "speaker-diarization-en.toml",
+        include_str!("../../catalog/speaker-diarization-en.toml"),
+    ),
+    (
+        "speech-denoiser-gtcrn.toml",
+        include_str!("../../catalog/speech-denoiser-gtcrn.toml"),
+    ),
+    (
+        "source-separation-spleeter-2stems-int8.toml",
+        include_str!("../../catalog/source-separation-spleeter-2stems-int8.toml"),
+    ),
+    (
         "voxcpm2-8bit-mlx.toml",
         include_str!("../../catalog/voxcpm2-8bit-mlx.toml"),
     ),
@@ -77,6 +89,14 @@ pub enum Kind {
     Stt,
     Tts,
     Vad,
+    /// Offline speaker diarization (naru task 1461 §8): segmentation +
+    /// embedding + clustering, bundled as one pull.
+    Diarization,
+    /// Offline speech denoising (naru task 1461 §8).
+    Denoise,
+    /// Offline source separation (naru task 1461 §8): isolates vocals
+    /// from music/noise.
+    Separation,
 }
 
 impl Kind {
@@ -85,6 +105,9 @@ impl Kind {
             Kind::Stt => "stt",
             Kind::Tts => "tts",
             Kind::Vad => "vad",
+            Kind::Diarization => "diarization",
+            Kind::Denoise => "denoise",
+            Kind::Separation => "separation",
         }
     }
 }
@@ -595,6 +618,9 @@ mod tests {
                 "qwen3-tts-1.7b-base-mlx",
                 "qwen3-tts-1.7b-voicedesign-mlx",
                 "silero-vad",
+                "source-separation-spleeter-2stems-int8",
+                "speaker-diarization-en",
+                "speech-denoiser-gtcrn",
                 "voxcpm2-8bit-mlx"
             ]
         );

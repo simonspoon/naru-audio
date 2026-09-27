@@ -1165,3 +1165,120 @@ Each task names its phase and what it depends on ("Deps").
 - A sherpa-onnx export of a ~110M Parakeet exists.
 - tokio-tungstenite is the right WS client crate for Naru's proxy (task 22 decides).
 - Homebrew's `process_type :interactive` meaningfully reduces latency jitter for this daemon.
+
+## 8. Voice prep (naru task 1461)
+
+Cleans a raw uploaded clip into a reusable clone sample: crop to a chosen
+span, denoise, trim silence, normalise level. Transcription (word
+timestamps) and speaker diarization let a caller pick *which* span and
+*whose* voice before cropping. A sample is stored separately from the
+existing voice-preview "sample" (`GET /api/voices/{model}/{voice}/sample`,
+§2.5) and from a cloned `voices/` entry: it is model-agnostic — cloned into
+any TTS model later, never tied to one — and kept distinct in the URL space
+(`/v1/audio/prep/clips` for uploads, `/v1/audio/samples` for the cleaned
+result) so the two "sample" words never collide in one response.
+
+### 8.1 Pipeline
+
+1. **Transcribe** (`POST /v1/audio/prep/clips/{id}/transcribe`): word-level
+   timestamps plus speaker diarization, so a caller can pick a word span or
+   a speaker before cropping. Cached as the clip's `transcript.json`;
+   `GET .../transcript` reads the cache without re-running anything (§2.5:
+   a `GET` never does work), 409 if it has never run.
+2. **Crop** (`POST /v1/audio/samples`, part of building a sample): a
+   `start`/`end` in seconds, or a diarized `speaker` index resolved against
+   the cached transcript's speaker spans.
+3. **Isolate**: source separation, voice from music/noise —
+   `source-separation-spleeter-2stems-int8` (Deezer's Spleeter, MIT),
+   keeping the vocals stem. The `sherpa-onnx` crate (1.13.6) does not wrap
+   this C API, but the prebuilt static lib it links already exports the
+   symbols (`libsherpa-onnx-c-api.a`, checked with `nm -g` on both the
+   macOS arm64 and Linux x64 v1.13.6 static libs); `src/prep/isolate.rs`
+   is a hand-written `extern "C"` binding against `sherpa-onnx/c-api/
+   c-api.h` (tag v1.13.6) plus a safe wrapper, the same shape as
+   `diarize.rs`/`denoise.rs`. **Always pass two input channels, even for
+   mono audio**: the C++ (`offline-source-separation-spleeter-impl.h`'s
+   `ComputeStft`) calls `exit(-1)` on the whole process, not a recoverable
+   error, when `num_channels` is 1 — checked against the real header and
+   confirmed on a real pulled model before this shipped. `isolate`
+   defaults to `true`, the same as `denoise`/`trim_silence`/`normalize`:
+   it is a documented pipeline step, and an unpulled model already gives
+   a clear 409 `model_not_pulled` rather than a silent skip — the same
+   protection the other stages have, so there is no reason to single
+   `isolate` out as off-by-default. `isolate:false` is the explicit skip.
+4. **Clean**: denoise (GTCRN, MIT — `speech-denoiser-gtcrn`), trim silence
+   (reusing the existing Silero VAD gate, `stt::vad`: the span from the
+   first detected speech to the last), normalise (peak, to −1 dBFS).
+
+Pipeline order: crop → isolate → denoise → trim silence → normalise.
+Isolate runs first among the cleaning steps because Spleeter's own output
+is at 44.1 kHz (`Isolator::output_sample_rate()`), not the pipeline's
+16 kHz working rate; `prep::resample_to_16k` brings it back in line
+before denoise (GTCRN, 16 kHz) runs.
+
+Each step has its own request flag (`isolate`, `denoise`, `trim_silence`,
+`normalize`), default `true` for all four. `isolate`/`denoise`/
+`trim_silence` fail with a 409 naming the unpulled model when their flag
+is `true` and the model is not pulled (`registry_error(NotPulled)`, the
+same error `GET /v1/audio/transcriptions` gives for an unpulled STT
+model) — never a silent skip. Setting the flag `false` is the explicit
+skip.
+
+### 8.2 Storage
+
+```
+$NARU_AUDIO_HOME/prep/
+  clips/<id>/
+    raw.<ext>          verbatim upload
+    working.wav        16 kHz mono, afconvert + stt::audio::decode
+    transcript.json     { words, speakers, stt_model, diarization_model }
+    meta.json
+  samples/<id>/
+    clean.wav           denoised, trimmed, normalised
+    cropped.wav          the same span before cleaning, for A/B
+    transcript.txt       the cropped span's words, joined
+    meta.json             source clip, range, speaker, engines + licences, name
+```
+
+`<id>` is a fresh opaque string ([`prep::new_id`]), not a client-chosen
+name — `meta.json`'s `name` is what `PATCH /v1/audio/samples/{id}` renames.
+Both model directories load fresh per request, like the existing Silero
+VAD gate (`stt::vad::Vad`): tens of megabytes, cheap next to decoding a
+whole clip, and voice-prep is not a hot path that needs `ModelManager`'s
+residency, load queue or eviction.
+
+### 8.3 Licence policy
+
+Every default engine here is a clean licence: `speaker-diarization-en`
+(pyannote segmentation, MIT; 3D-Speaker CAM++ embedding, Apache-2.0),
+`speech-denoiser-gtcrn` (GTCRN, MIT) and `source-separation-spleeter-
+2stems-int8` (Deezer's Spleeter, MIT) — three new `catalog/*.toml`
+entries, `[model] kind = "diarization"` / `"denoise"` / `"separation"`
+(new `Kind` variants). A request naming a different, `non_commercial`-
+flagged model for any of the three stages (the catalog's existing flag,
+reused rather than a new one) gets a `warnings` entry in the sample's
+response and `meta.json`, naming the model and its licence — not a
+refusal: naru-audio ships no non-commercial model as a *default*, but
+still supports one, warned.
+
+### 8.4 Word timestamps: sherpa-onnx's own tokens, not a Whisper sidecar
+
+`POST /v1/audio/transcriptions` refuses `timestamp_granularities[]=word`
+(§2.2) because nothing in naru-audio produced word timestamps at all. This
+still holds for the OpenAI-compatible route; voice-prep does not touch it.
+Instead, `SttModel` gained `decode_words` (`src/stt.rs`), giving the same
+utterance gate as `decode_each` but keeping `OfflineRecognizerResult`'s
+per-token `tokens`/`timestamps` (`stt::engine::Recognizer::decode_with_
+tokens`) and merging tokens into words at the SentencePiece `▁` boundary
+marker (`stt::sherpa::merge_words`). `OfflineWhisperModelConfig::
+enable_token_timestamps` does not apply here — that field exists only for
+Whisper's attention-based timestamps; NeMo transducer models (Parakeet
+TDT) report per-token timestamps from the transducer's own frame
+alignment, with nothing to enable. Only `sherpa-onnx`'s Parakeet
+implements `decode_words`; the default is `Err(SttError::
+WordTimestampsUnsupported)`, so an MLX-backed request (the sidecar reports
+no per-token timestamps at all) gets a clear 400 naming a sherpa-onnx
+model to use instead — a deliberate scope cut, not an oversight: a Whisper
+MLX sidecar path (`mlx-whisper`) was the design's first idea, but Parakeet
+already loads through the daemon's one existing STT path and needs no new
+Python dependency, sidecar op or `uv.lock` change.

@@ -164,6 +164,34 @@ impl Recognizer {
             .map(|r| r.text)
             .ok_or(EngineError::DecodeFailed)
     }
+
+    /// [`Self::decode`], keeping the per-token text and timestamps
+    /// (naru task 1461 §8): NeMo transducer models report both without
+    /// needing an `enable_token_timestamps` flag (that config field exists
+    /// only on `OfflineWhisperModelConfig`), so this is a plain decode that
+    /// reads more of the same result.
+    pub fn decode_with_tokens(&self, samples: &[f32]) -> Result<Recognized, EngineError> {
+        let stream = self.inner.create_stream();
+        stream.accept_waveform(TARGET_SAMPLE_RATE as i32, samples);
+        self.inner.decode(&stream);
+        let result = stream.get_result().ok_or(EngineError::DecodeFailed)?;
+        Ok(Recognized {
+            text: result.text,
+            tokens: result.tokens,
+            timestamps: result.timestamps.unwrap_or_default(),
+        })
+    }
+}
+
+/// One utterance's text with its tokens and their start times, from
+/// [`Recognizer::decode_with_tokens`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recognized {
+    pub text: String,
+    pub tokens: Vec<String>,
+    /// Seconds from the start of the utterance, one per `tokens` entry;
+    /// empty when the model reports none.
+    pub timestamps: Vec<f32>,
 }
 
 #[cfg(test)]

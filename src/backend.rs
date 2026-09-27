@@ -1,8 +1,13 @@
 //! §3.6 backends: `available()`, used by `pull` and `/v1/models`, and
-//! loading. `sherpa-onnx` and `mlx` (§5.3) STT and TTS load so far.
+//! loading. `sherpa-onnx` and `mlx` (§5.3) STT and TTS load so far; voice-prep's
+//! diarization and denoise models (naru task 1461 §8) are `sherpa-onnx` only,
+//! so they need no per-backend dispatch, just the `Kind` check.
 
 use std::path::Path;
 
+use crate::prep::denoise::{DenoiseError, Denoiser};
+use crate::prep::diarize::{DiarizeError, Diarizer};
+use crate::prep::isolate::{IsolateError, Isolator};
 use crate::registry::manifest::{Kind, Manifest};
 use crate::stt::{SttError, SttModel, sherpa::SherpaStt};
 use crate::tts::{TtsError, TtsModel, sherpa::SherpaTts};
@@ -47,6 +52,29 @@ pub fn load_stt(manifest: &Manifest, dir: &Path) -> Result<Box<dyn SttModel>, St
             "cannot load speech-to-text models yet".to_string(),
         )),
     }
+}
+
+/// Loads the diarization model described by `manifest` from its pulled
+/// `dir`. Every `[model] kind = "diarization"` manifest is `sherpa-onnx`
+/// (the only backend that implements it), so unlike [`load_stt`]/[`load_tts`]
+/// there is nothing to dispatch on.
+pub fn load_diarizer(manifest: &Manifest, dir: &Path) -> Result<Diarizer, DiarizeError> {
+    debug_assert_eq!(manifest.model.kind, Kind::Diarization);
+    Diarizer::load(dir)
+}
+
+/// Loads the denoise model described by `manifest` from its pulled `dir`,
+/// as [`load_diarizer`].
+pub fn load_denoiser(manifest: &Manifest, dir: &Path) -> Result<Denoiser, DenoiseError> {
+    debug_assert_eq!(manifest.model.kind, Kind::Denoise);
+    Denoiser::load(dir)
+}
+
+/// Loads the source-separation model described by `manifest` from its
+/// pulled `dir`, as [`load_diarizer`].
+pub fn load_isolator(manifest: &Manifest, dir: &Path) -> Result<Isolator, IsolateError> {
+    debug_assert_eq!(manifest.model.kind, Kind::Separation);
+    Isolator::load(dir)
 }
 
 /// Loads the TTS model described by `manifest` from its pulled `dir`.

@@ -654,12 +654,14 @@ impl ModelManager {
         }
     }
 
-    /// The configured default for `kind`; VAD models have none.
+    /// The configured default for `kind`; VAD, diarization and denoise
+    /// models have none (naru task 1461: loaded per request, not via
+    /// `/api/defaults`).
     pub fn default_for(&self, kind: Kind) -> Option<String> {
         match kind {
             Kind::Stt => Some(self.stt_default()),
             Kind::Tts => Some(self.tts_default()),
-            Kind::Vad => None,
+            Kind::Vad | Kind::Diarization | Kind::Denoise | Kind::Separation => None,
         }
     }
 

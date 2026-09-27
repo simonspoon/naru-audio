@@ -28,6 +28,16 @@ pub struct Segment {
     pub text: String,
 }
 
+/// One word within a [`Segment`], for voice-prep's crop-by-word-span
+/// (naru task 1461 §8). `start`/`end` are seconds from the start of the
+/// audio, like `Segment`'s.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Word {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
 pub trait SttModel: Send + Sync {
     /// Transcribes `pcm16k`, biased towards `hotwords` when given and
     /// non-empty. `vad: None` skips the Silero gate and decodes the whole
@@ -51,6 +61,18 @@ pub trait SttModel: Send + Sync {
         let mut segments = Vec::new();
         self.decode_each(pcm16k, hotwords, vad, &mut |s| segments.push(s))?;
         Ok(segments)
+    }
+
+    /// [`Segment`]s split into [`Word`]s with their own timestamps
+    /// (naru task 1461 §8: voice-prep's transcript step). `Err(SttError::
+    /// WordTimestampsUnsupported)` by default; only a backend that reports
+    /// per-token timestamps (`sherpa-onnx`'s Parakeet) overrides it.
+    fn decode_words(
+        &self,
+        _pcm16k: &[f32],
+        _vad: Option<&VadConfig>,
+    ) -> Result<Vec<Word>, SttError> {
+        Err(SttError::WordTimestampsUnsupported)
     }
 
     /// The Silero model streaming sessions segment with (§2.4); `None`
@@ -81,6 +103,9 @@ pub enum SttError {
     Vad(vad::VadError),
     /// The MLX sidecar answered a request with an error (§5.3).
     Sidecar(String),
+    /// [`SttModel::decode_words`]'s default: this backend reports no
+    /// per-token timestamps.
+    WordTimestampsUnsupported,
 }
 
 impl std::fmt::Display for SttError {
@@ -100,6 +125,9 @@ impl std::fmt::Display for SttError {
             SttError::Engine(e) => e.fmt(f),
             SttError::Vad(e) => e.fmt(f),
             SttError::Sidecar(message) => write!(f, "the MLX sidecar failed: {message}"),
+            SttError::WordTimestampsUnsupported => {
+                write!(f, "this model does not report word timestamps")
+            }
         }
     }
 }
