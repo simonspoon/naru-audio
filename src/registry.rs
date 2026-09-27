@@ -77,6 +77,10 @@ pub enum RegistryError {
         context: String,
         error: std::io::Error,
     },
+    /// `pull_cancellable`'s `cancel` fired mid-download (§2.5 `DELETE
+    /// /api/pulls/{name}`); the staging directory is removed same as any
+    /// other failed pull.
+    Cancelled,
 }
 
 impl RegistryError {
@@ -130,6 +134,7 @@ impl std::fmt::Display for RegistryError {
                 write!(f, "{file}: not found after extracting the archives")
             }
             RegistryError::Io { context, error } => write!(f, "{context}: {error}"),
+            RegistryError::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -145,6 +150,13 @@ pub enum Pulled {
 /// Pull progress, the §2.5 `/api/pull` NDJSON lines before `success`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Progress<'a> {
+    /// A model in the plan (`name` plus its `requires`) is starting;
+    /// `index` counts from 0, `total` is the plan's length.
+    Model {
+        name: &'a str,
+        index: usize,
+        total: usize,
+    },
     /// `file` is a `[[file]]` path or an archive's base name; `total` is the
     /// pinned size, if any.
     Downloading {
@@ -239,9 +251,26 @@ impl Registry {
         force: bool,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<Pulled, RegistryError> {
+        self.pull_cancellable(name, force, progress, &|| false)
+    }
+
+    /// `pull_with`, checking `cancel` as each download's bytes are hashed
+    /// (§2.5 `DELETE /api/pulls/{name}`); a `cancel` that returns `true`
+    /// fails the current file with [`RegistryError::Cancelled`], which
+    /// unwinds the same way any other failure does — the staging directory
+    /// is removed, nothing under `models/` changes.
+    pub fn pull_cancellable(
+        &self,
+        name: &str,
+        force: bool,
+        progress: &mut dyn FnMut(Progress),
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<Pulled, RegistryError> {
+        let plan = self.plan(name, force)?;
+        let total = plan.len();
         let mut pulled = Pulled::AlreadyInstalled;
-        for m in self.plan(name, force)? {
-            pulled = self.install(m, progress)?;
+        for (index, m) in plan.into_iter().enumerate() {
+            pulled = self.install(m, index, total, progress, cancel)?;
         }
         Ok(pulled)
     }
@@ -460,7 +489,7 @@ impl Registry {
                 }
                 Err(e) => return Err(RegistryError::io(format!("open {}", path.display()))(e)),
             };
-            let got = hash_copy(file, std::io::sink(), &mut |_| {})
+            let got = hash_copy(file, std::io::sink(), &mut |_| Ok(()))
                 .map_err(RegistryError::io(format!("read {}", path.display())))?;
             check(&f.path, f.size, sha(&f.sha256), got)?;
         }
@@ -532,7 +561,10 @@ impl Registry {
     fn install(
         &self,
         m: &Manifest,
+        index: usize,
+        total: usize,
         progress: &mut dyn FnMut(Progress),
+        cancel: &dyn Fn() -> bool,
     ) -> Result<Pulled, RegistryError> {
         let name = &m.model.name;
         if self.is_installed(name) {
@@ -546,6 +578,12 @@ impl Registry {
         if self.is_installed(name) {
             return Ok(Pulled::AlreadyInstalled);
         }
+        // Only announced once staging is actually about to start: an
+        // already-installed model in the plan (already checked above) never
+        // reaches here, so a progress callback that reacts to `Progress::Model`
+        // (removing a requirement mid-pull, say) only ever sees models this
+        // call really stages.
+        progress(Progress::Model { name, index, total });
 
         // Anything here is left from a crashed pull: we hold the lock.
         let staging = tmp.join(name);
@@ -558,7 +596,7 @@ impl Registry {
         std::fs::create_dir_all(&staging)
             .map_err(RegistryError::io(format!("create {}", staging.display())))?;
 
-        let result = stage(m, &staging, progress).and_then(|()| {
+        let result = stage(m, &staging, progress, cancel).and_then(|()| {
             // A `rm` of a requirement may have run while we staged; its locks
             // are held until `promote` is done (see the module doc).
             let _requires = m
@@ -582,11 +620,20 @@ fn stage(
     m: &Manifest,
     staging: &Path,
     progress: &mut dyn FnMut(Progress),
+    cancel: &dyn Fn() -> bool,
 ) -> Result<(), RegistryError> {
     for a in &m.archives {
         let base = a.url.rsplit('/').next().unwrap_or("archive");
         let part = staging.join(format!("{base}.part"));
-        download(&a.url, base, &part, a.size, sha(&a.sha256), progress)?;
+        download(
+            &a.url,
+            base,
+            &part,
+            a.size,
+            sha(&a.sha256),
+            progress,
+            cancel,
+        )?;
         extract(&part, &a.url, staging, a.strip)?;
         std::fs::remove_file(&part)
             .map_err(RegistryError::io(format!("remove {}", part.display())))?;
@@ -601,7 +648,15 @@ fn stage(
                         .map_err(RegistryError::io(format!("create {}", parent.display())))?;
                 }
                 let part = staging.join(format!("{}.part", f.path));
-                download(url, &f.path, &part, f.size, sha(&f.sha256), progress)?;
+                download(
+                    url,
+                    &f.path,
+                    &part,
+                    f.size,
+                    sha(&f.sha256),
+                    progress,
+                    cancel,
+                )?;
                 std::fs::rename(&part, &dest).map_err(RegistryError::io(format!(
                     "rename {} into place",
                     part.display()
@@ -615,7 +670,7 @@ fn stage(
                     }
                     Err(e) => return Err(RegistryError::io(format!("open {}", dest.display()))(e)),
                 };
-                let got = hash_copy(file, std::io::sink(), &mut |_| {})
+                let got = hash_copy(file, std::io::sink(), &mut |_| Ok(()))
                     .map_err(RegistryError::io(format!("read {}", dest.display())))?;
                 check(&f.path, f.size, sha(&f.sha256), got)?;
             }
@@ -661,6 +716,7 @@ fn download(
     size: Option<u64>,
     sha256: &str,
     progress: &mut dyn FnMut(Progress),
+    cancel: &dyn Fn() -> bool,
 ) -> Result<(), RegistryError> {
     let result = (|| {
         let reader = open_url(url)?;
@@ -679,15 +735,30 @@ fn download(
         };
         progress(report(0));
         let mut reported = 0;
+        let mut cancelled = false;
         let got = hash_copy(reader, out, &mut |n| {
+            if cancel() {
+                cancelled = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancelled",
+                ));
+            }
             if n - reported >= PROGRESS_STEP {
                 reported = n;
                 progress(report(n));
             }
+            Ok(())
         })
-        .map_err(|e| RegistryError::Download {
-            url: url.to_string(),
-            message: e.to_string(),
+        .map_err(|e| {
+            if cancelled {
+                RegistryError::Cancelled
+            } else {
+                RegistryError::Download {
+                    url: url.to_string(),
+                    message: e.to_string(),
+                }
+            }
         })?;
         if got.0 != reported {
             progress(report(got.0));
@@ -714,12 +785,14 @@ fn open_url(url: &str) -> Result<Box<dyn Read>, RegistryError> {
     Ok(Box::new(resp.into_body().into_reader()))
 }
 
-/// Copies `r` into `w`, returning the byte count and the lowercase hex sha256.
-/// `on_chunk` gets the running byte count after each chunk.
+/// Copies `r` into `w`, returning the byte count and the lowercase hex
+/// sha256. `on_chunk` gets the running byte count after each chunk, and can
+/// abort the copy by returning `Err` (used to cancel a pull, §2.5 `DELETE
+/// /api/pulls/{name}`).
 fn hash_copy(
     mut r: impl Read,
     mut w: impl Write,
-    on_chunk: &mut dyn FnMut(u64),
+    on_chunk: &mut dyn FnMut(u64) -> std::io::Result<()>,
 ) -> std::io::Result<(u64, String)> {
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK_SIZE];
@@ -732,7 +805,7 @@ fn hash_copy(
         hasher.update(&buf[..n]);
         w.write_all(&buf[..n])?;
         n_total += n as u64;
-        on_chunk(n_total);
+        on_chunk(n_total)?;
     }
     w.flush()?;
     let hex: String = hasher

@@ -96,6 +96,7 @@ impl Server {
             log,
             registry,
             models: Arc::new(models),
+            pulls: Arc::new(naru_audio::server::PullTracker::new()),
         }));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.spawn(async move {

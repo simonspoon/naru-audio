@@ -2,9 +2,12 @@
 //! streaming transcriptions, §2.5 `/health`, voices and registry routes,
 //! §2.6 errors, `X-Request-Id`.
 
+mod pulls;
 mod speech;
 mod stream;
 mod transcriptions;
+
+pub use pulls::PullTracker;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -41,6 +44,9 @@ pub struct AppState {
     pub log: Arc<Logger>,
     pub registry: Arc<Registry>,
     pub models: Arc<ModelManager>,
+    /// §2.5 `POST /api/pull` in-flight tracking, for `GET /api/pulls` and
+    /// `DELETE /api/pulls/{name}`.
+    pub pulls: Arc<PullTracker>,
 }
 
 /// The request's `X-Request-Id`, for handlers' log lines.
@@ -80,9 +86,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(speech::voice_export).delete(speech::delete_voice),
         )
         .route("/api/pull", post(pull))
+        .route("/api/pulls", get(pulls_list))
+        .route("/api/pulls/{name}", delete(pulls_cancel))
         .route("/api/models/{name}", delete(remove))
         .route("/api/ps", get(ps))
         .route("/api/load", post(load))
+        .route("/api/defaults", get(get_defaults).put(put_defaults))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware::from_fn_with_state(state.clone(), guard))
@@ -97,9 +106,10 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
     let settings = st.models.settings();
     let profile = &settings.profile;
     let ps = st.models.ps();
-    let stt = &settings.stt_default;
+    let live = st.models.defaults();
+    let stt = &live.stt;
     let state = ps.iter().find(|m| &m.name == stt);
-    let tts = &settings.tts_default;
+    let tts = &live.tts;
     let tts_state = ps.iter().find(|m| &m.name == tts);
     let backends: Vec<Value> = ["sherpa-onnx", "mlx"]
         .iter()
@@ -204,58 +214,88 @@ async fn models(
         }
     };
     let registry = st.registry.clone();
-    let loaded: Vec<String> = st
-        .models
-        .ps()
-        .into_iter()
+    let models = st.models.clone();
+    let ps = models.ps();
+    let loaded: Vec<String> = ps
+        .iter()
         .filter(|m| !m.loading)
-        .map(|m| m.name)
+        .map(|m| m.name.clone())
         .collect();
-    let data: Vec<Value> = tokio::task::spawn_blocking(move || registry.list())
-        .await
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
-        .map_err(registry_error)?
-        .into_iter()
-        .filter(|e| pulled.is_none_or(|p| p == e.pulled))
-        .map(|e| {
-            let name = &e.manifest.model.name;
-            json!({
-                "id": e.manifest.model.name,
-                "object": "model",
-                "created": e.created,
-                "owned_by": "naru-audio",
-                "x_kind": e.manifest.model.kind.as_str(),
-                "x_backend": e.manifest.model.backend,
-                "x_available": e.available.is_ok(),
-                "x_unavailable_reason": e.available.err(),
-                "x_pulled": e.pulled,
-                "x_loaded": loaded.contains(name),
-                "x_size_bytes": e.size_bytes,
-                "x_default": st.models.default_for(e.manifest.model.kind) == Some(name.as_str()),
-                "x_license": e.manifest.model.license,
-                "x_license_url": e.manifest.model.license_url,
-                "x_non_commercial": e.manifest.model.non_commercial,
-                // §5.3: what a client picking a TTS model can do with it —
-                // clone a reference recording, whether that clone needs a
-                // transcript alongside it, and design a voice from a
-                // description. Meaningless for STT/VAD, but sent for every
-                // kind rather than only TTS, same as the other `x_` fields.
-                "x_clone": e.manifest.clones(),
-                "x_clone_requires_transcript": e.manifest.clone_requires_transcript(),
-                "x_instruct": e.manifest.instructs(),
-                // §5.3 extra: how a model that takes `instructions` or its
-                // own knobs (e.g. Chatterbox's `exaggeration`) reads style
-                // guidance; `null` when there is nothing to declare.
-                "x_prompt_format": e.manifest.prompt_format(),
-            })
-        })
-        .collect();
+    let home = st.registry.home().to_path_buf();
+    let data: Vec<Value> = tokio::task::spawn_blocking(move || {
+        let entries = registry.list()?;
+        Ok::<_, RegistryError>(
+            entries
+                .into_iter()
+                .filter(|e| pulled.is_none_or(|p| p == e.pulled))
+                .map(|e| {
+                    let name = &e.manifest.model.name;
+                    let loaded_at = ps
+                        .iter()
+                        .find(|m| &m.name == name)
+                        .and_then(|m| m.loaded_at)
+                        .map(|t| humantime::format_rfc3339_seconds(t).to_string());
+                    let voices = crate::voices::of(&e.manifest, &home);
+                    let cloned_voice_count = voices
+                        .iter()
+                        .filter(|v| !e.manifest.voices.iter().any(|mv| mv.id == v.id))
+                        .count();
+                    json!({
+                        "id": e.manifest.model.name,
+                        "object": "model",
+                        "created": e.created,
+                        "owned_by": "naru-audio",
+                        "x_kind": e.manifest.model.kind.as_str(),
+                        "x_backend": e.manifest.model.backend,
+                        "x_available": e.available.is_ok(),
+                        "x_unavailable_reason": e.available.err(),
+                        "x_pulled": e.pulled,
+                        "x_loaded": loaded.contains(name),
+                        "x_loaded_at": loaded_at,
+                        "x_size_bytes": e.size_bytes,
+                        "x_default": models.default_for(e.manifest.model.kind).as_deref()
+                            == Some(name.as_str()),
+                        "x_license": e.manifest.model.license,
+                        "x_license_url": e.manifest.model.license_url,
+                        "x_non_commercial": e.manifest.model.non_commercial,
+                        // §5.3: what a client picking a TTS model can do with
+                        // it — clone a reference recording, whether that
+                        // clone needs a transcript alongside it, and design
+                        // a voice from a description. Meaningless for
+                        // STT/VAD, but sent for every kind rather than only
+                        // TTS, same as the other `x_` fields.
+                        "x_clone": e.manifest.clones(),
+                        "x_clone_requires_transcript": e.manifest.clone_requires_transcript(),
+                        "x_instruct": e.manifest.instructs(),
+                        "x_design": e.manifest.instructs(),
+                        "x_design_voice_model": e.manifest.design_voice_model(),
+                        "x_languages": e.manifest.languages(),
+                        "x_source": e.manifest.source(),
+                        "x_voice_count": voices.len(),
+                        "x_cloned_voice_count": cloned_voice_count,
+                        // §5.3 extra: how a model that takes `instructions`
+                        // or its own knobs (e.g. Chatterbox's
+                        // `exaggeration`) reads style guidance; `null` when
+                        // there is nothing to declare.
+                        "x_prompt_format": e.manifest.prompt_format(),
+                    })
+                })
+                .collect(),
+        )
+    })
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
+    .map_err(registry_error)?;
     Ok(Json(json!({"object": "list", "data": data})))
 }
 
 /// §2.5 `POST /api/pull`: NDJSON progress, then `success`. Unknown models
 /// and unavailable backends fail before the stream starts; a later failure
-/// ends the stream with an `{"error":…}` line.
+/// ends the stream with an `{"error":…}` line. A second pull of the same
+/// model while one is already running is a 409 `pull_in_progress`; the
+/// running one is tracked in `st.pulls` for `GET /api/pulls` and can be
+/// cancelled with `DELETE /api/pulls/{name}`, which ends the stream with
+/// `pull_cancelled` instead of `success`.
 async fn pull(State(st): State<Arc<AppState>>, body: Bytes) -> Result<Response, ApiError> {
     let name = serde_json::from_slice::<Value>(&body)
         .ok()
@@ -271,26 +311,67 @@ async fn pull(State(st): State<Arc<AppState>>, body: Bytes) -> Result<Response, 
     st.registry
         .check_pull(&name, false)
         .map_err(registry_error)?;
+    let entry = st.pulls.start(&name).map_err(|_| ApiError {
+        param: Some("model"),
+        ..ApiError::new(
+            StatusCode::CONFLICT,
+            "pull_in_progress",
+            format!("a pull of \"{name}\" is already running"),
+        )
+    })?;
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let registry = st.registry.clone();
+    let pulls = st.pulls.clone();
+    let pull_name = name.clone();
     tokio::task::spawn_blocking(move || {
         // A send fails only once the client has gone; the pull still finishes.
         let send = |v: Value| {
             let _ = tx.send(format!("{v}\n"));
         };
-        let result = registry.pull_with(&name, false, &mut |p| {
-            send(match p {
+        let mut model_completed = 0usize;
+        let mut model_total = 1usize;
+        let cancel = entry.cancel.clone();
+        let result = registry.pull_cancellable(
+            &pull_name,
+            false,
+            &mut |p| match p {
+                Progress::Model { index, total, .. } => {
+                    model_completed = index;
+                    model_total = total;
+                    entry.set_model_progress(index, total);
+                }
                 Progress::Downloading {
                     file,
                     completed,
                     total,
-                } => json!({"status": "downloading", "file": file, "completed": completed, "total": total}),
-                Progress::Verifying => json!({"status": "verifying"}),
-            })
-        });
+                } => {
+                    entry.set_file_progress(file, completed, total);
+                    send(json!({
+                        "status": "downloading",
+                        "file": file,
+                        "completed": completed,
+                        "total": total,
+                        "model_completed": model_completed,
+                        "model_total": model_total,
+                    }));
+                }
+                Progress::Verifying => send(json!({
+                    "status": "verifying",
+                    "model_completed": model_completed,
+                    "model_total": model_total,
+                })),
+            },
+            &|| cancel.load(std::sync::atomic::Ordering::Relaxed),
+        );
         match result {
             Ok(_) => send(json!({"status": "success"})),
+            Err(RegistryError::Cancelled) => send(json!({"error": {
+                "message": "the pull was cancelled",
+                "type": "server_error",
+                "code": "pull_cancelled",
+                "param": null,
+            }})),
             Err(e) => send(json!({"error": {
                 "message": e.to_string(),
                 "type": "server_error",
@@ -298,6 +379,7 @@ async fn pull(State(st): State<Arc<AppState>>, body: Bytes) -> Result<Response, 
                 "param": null,
             }})),
         }
+        pulls.finish(&pull_name);
     });
     let lines = futures_util::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|line| (Ok::<_, Infallible>(line), rx))
@@ -307,6 +389,31 @@ async fn pull(State(st): State<Arc<AppState>>, body: Bytes) -> Result<Response, 
         Body::from_stream(lines),
     )
         .into_response())
+}
+
+/// §2.5 `GET /api/pulls`: live progress of every pull still streaming.
+async fn pulls_list(State(st): State<Arc<AppState>>) -> Json<Value> {
+    Json(Value::Array(st.pulls.list()))
+}
+
+/// §2.5 `DELETE /api/pulls/{name}`: signals cancellation of a running pull;
+/// its `POST /api/pull` stream ends with `pull_cancelled`. 404
+/// `pull_not_found` if no pull of `name` is running.
+async fn pulls_cancel(
+    State(st): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    st.pulls
+        .cancel(&name)
+        .map(|()| StatusCode::ACCEPTED)
+        .map_err(|_| ApiError {
+            param: Some("model"),
+            ..ApiError::new(
+                StatusCode::NOT_FOUND,
+                "pull_not_found",
+                format!("no pull of \"{name}\" is running"),
+            )
+        })
 }
 
 /// §2.5 `DELETE /api/models/{name}`: 409 `model_in_use` while the model is
@@ -372,6 +479,7 @@ async fn ps(State(st): State<Arc<AppState>>) -> Json<Value> {
                     "expires_at": m.expires_at.map(|t| humantime::format_rfc3339_seconds(t).to_string()),
                     "busy": m.busy,
                     "loading": m.loading,
+                    "loaded_at": m.loaded_at.map(|t| humantime::format_rfc3339_seconds(t).to_string()),
                 })
             })
             .collect(),
@@ -408,9 +516,10 @@ async fn load(
     .transpose()
     .map_err(|e| bad("keep_alive", "invalid_request", e))?;
 
+    let body_kind = body["kind"].as_str().and_then(parse_kind);
     let (name, kind) = match (model, body["kind"].as_str()) {
-        ("default", Some("stt")) => (st.models.settings().stt_default.clone(), Kind::Stt),
-        ("default", Some("tts")) => (st.models.settings().tts_default.clone(), Kind::Tts),
+        ("default", Some("stt")) => (st.models.stt_default(), Kind::Stt),
+        ("default", Some("tts")) => (st.models.tts_default(), Kind::Tts),
         ("default", None) => {
             return Err(bad(
                 "kind",
@@ -425,7 +534,34 @@ async fn load(
                 format!("kind {other:?} has no default; use stt or tts"),
             ));
         }
-        (name, _) => (name.to_string(), Kind::Stt),
+        (name, _) => {
+            // The model's own kind, not a fixed guess (naru task 1458):
+            // requesting `keep_alive: 0` to unload a TTS model by name
+            // used to 400 here, since `kind_manifest` below would reject
+            // it against a hardcoded `Kind::Stt` before the unload branch
+            // ever ran.
+            let name = name.to_string();
+            let derived = st
+                .registry
+                .pulled_manifest(&name)
+                .map_err(registry_error)?
+                .model
+                .kind;
+            if let Some(wanted) = body_kind
+                && wanted != derived
+            {
+                return Err(bad(
+                    "kind",
+                    "kind_mismatch",
+                    format!(
+                        "\"{name}\" is a {} model, not {}",
+                        derived.as_str(),
+                        wanted.as_str()
+                    ),
+                ));
+            }
+            (name, derived)
+        }
     };
 
     let manifest = {
@@ -445,6 +581,107 @@ async fn load(
             .map_err(|e| manager_error(&st, &req_id, e))?,
     );
     Ok(Json(json!({"model": name, "loaded": true})))
+}
+
+fn parse_kind(s: &str) -> Option<Kind> {
+    match s {
+        "stt" => Some(Kind::Stt),
+        "tts" => Some(Kind::Tts),
+        "vad" => Some(Kind::Vad),
+        _ => None,
+    }
+}
+
+/// §2.5 `GET /api/defaults`: the live defaults `PUT /api/defaults` sets,
+/// `env_override` reporting whether `NARU_AUDIO_STT_MODEL`/
+/// `NARU_AUDIO_TTS_MODEL` forces `stt`/`tts` regardless.
+async fn get_defaults(State(st): State<Arc<AppState>>) -> Json<Value> {
+    Json(defaults_json(&st))
+}
+
+fn defaults_json(st: &AppState) -> Value {
+    let d = st.models.defaults();
+    let (stt_env, tts_env) = st.models.env_override();
+    json!({
+        "stt": d.stt,
+        "tts": d.tts,
+        "voices": d.voices,
+        "env_override": {"stt": stt_env, "tts": tts_env},
+    })
+}
+
+/// §2.5 `PUT /api/defaults` `{"stt"?, "tts"?, "voices"?: {"<tts
+/// model>": "<voice>"|null}}`: `stt`/`tts` must be a pulled model of that
+/// kind (the same 404/409/400 `kind_manifest` gives other routes); each
+/// `voices` key must be a pulled TTS model and its value one of that
+/// model's voices, else 404 `voice_not_found`. Applied live at once and
+/// persisted to `config.toml`'s `[defaults]`/`[defaults.voices]`, keeping
+/// every other table (e.g. `[mlx]`). An active env override
+/// (`env_override` in the response) still wins over what this sets, for
+/// as long as this process runs.
+async fn put_defaults(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let body: Value = serde_json::from_slice(&body).unwrap_or_default();
+    let stt = body.get("stt").and_then(|v| v.as_str()).map(str::to_string);
+    let tts = body.get("tts").and_then(|v| v.as_str()).map(str::to_string);
+    let voices: Vec<(String, Option<String>)> = match body.get("voices") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Object(map)) => map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string)))
+            .collect(),
+        Some(_) => {
+            return Err(ApiError {
+                param: Some("voices"),
+                ..ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "\"voices\" must be an object of model to voice or null".to_string(),
+                )
+            });
+        }
+    };
+
+    if let Some(name) = &stt {
+        transcriptions::kind_manifest(&st, name, Kind::Stt)?;
+    }
+    if let Some(name) = &tts {
+        transcriptions::kind_manifest(&st, name, Kind::Tts)?;
+    }
+    for (model, voice) in &voices {
+        let manifest = transcriptions::kind_manifest(&st, model, Kind::Tts)?;
+        if let Some(v) = voice
+            && !crate::voices::of(&manifest, st.registry.home())
+                .iter()
+                .any(|x| &x.id == v)
+        {
+            return Err(ApiError {
+                param: Some("voices"),
+                ..ApiError::new(
+                    StatusCode::NOT_FOUND,
+                    "voice_not_found",
+                    format!("the model \"{model}\" has no voice \"{v}\""),
+                )
+            });
+        }
+    }
+
+    if let Some(name) = &stt {
+        st.models.set_stt_default(name.clone());
+    }
+    if let Some(name) = &tts {
+        st.models.set_tts_default(name.clone());
+    }
+    for (model, voice) in &voices {
+        st.models.set_default_voice(model.clone(), voice.clone());
+    }
+    crate::manager::write_defaults(st.registry.home(), stt.as_deref(), tts.as_deref(), &voices)
+        .map_err(|e| transcriptions::internal(&st, &req_id, e))?;
+
+    Ok(Json(defaults_json(&st)))
 }
 
 /// §2.6 codes for model manager failures; a 500 is logged with the
@@ -640,6 +877,7 @@ mod tests {
             log,
             registry,
             models: Arc::new(models),
+            pulls: Arc::new(PullTracker::new()),
         }))
     }
 

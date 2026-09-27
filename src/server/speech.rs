@@ -69,7 +69,7 @@ pub(super) async fn speech(
     Extension(RequestId(req_id)): Extension<RequestId>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let mut job = validate(&body, &st.models.settings().tts_default)?;
+    let mut job = validate(&body, &st.models.tts_default())?;
     // §5.3: with no explicit `model`, a cloned voice picks its own model
     // (`say_model`, generalised from the CLI's) instead of the daemon's
     // `tts_default`; with an explicit one, a cloned voice made for another
@@ -115,11 +115,13 @@ pub(super) async fn speech(
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    let default_voice = st.models.default_voice(&manifest.model.name);
     let voice = voice(
         &manifest,
         &voices,
         job.voice.as_deref(),
         job.options.instructions.as_deref(),
+        default_voice.as_deref(),
     )?;
     // Only a model that takes `instructions` sees them.
     if !manifest.instructs() {
@@ -469,21 +471,24 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
 }
 
 /// `voice` if it is one of `voices` (the manifest's, and any cloned ones),
-/// else 400 `unknown_voice` with the valid ids; no voice is the default
-/// one, else the first. A cloning model with no cloned voices and no
-/// voice asked for is a 400 that says how to add one. A model that
-/// instructs (VoiceDesign, and VoxCPM2 alongside cloning) makes its voice
-/// up from `instructions` whenever a named voice was not asked for or does
-/// not match one of `voices`: any `voice` is taken and ignored, and, if
-/// `voices` is empty too (nothing else it could speak in), no
-/// `instructions` is a 400. A named voice that does match — VoxCPM2
-/// cloning a voice under $NARU_AUDIO_HOME/voices/ — wins over
-/// `instructions` even though the model also instructs.
+/// else 400 `unknown_voice` with the valid ids; no voice is `default_voice`
+/// (`ModelManager::default_voice`, `PUT /api/defaults`' live override) if
+/// it names one of `voices`, else the manifest's own `default`, else the
+/// first. A cloning model with no cloned voices and no voice asked for is a
+/// 400 that says how to add one. A model that instructs (VoiceDesign, and
+/// VoxCPM2 alongside cloning) makes its voice up from `instructions`
+/// whenever a named voice was not asked for or does not match one of
+/// `voices`: any `voice` is taken and ignored, and, if `voices` is empty
+/// too (nothing else it could speak in), no `instructions` is a 400. A
+/// named voice that does match — VoxCPM2 cloning a voice under
+/// $NARU_AUDIO_HOME/voices/ — wins over `instructions` even though the
+/// model also instructs.
 fn voice(
     manifest: &Manifest,
     voices: &[Voice],
     voice: Option<&str>,
     instructions: Option<&str>,
+    default_voice: Option<&str>,
 ) -> Result<String, ApiError> {
     let named_match = voice.is_some_and(|id| voices.iter().any(|v| v.id == id));
     if manifest.instructs() && !named_match {
@@ -514,7 +519,10 @@ fn voice(
     }
     let found = match voice {
         Some(id) => voices.iter().find(|v| v.id == id),
-        None => voices.iter().find(|v| v.default).or(voices.first()),
+        None => default_voice
+            .and_then(|d| voices.iter().find(|v| v.id == d))
+            .or_else(|| voices.iter().find(|v| v.default))
+            .or_else(|| voices.first()),
     };
     if let Some(v) = found {
         return Ok(v.id.clone());
@@ -544,8 +552,8 @@ pub(super) async fn voices(
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
     let name = match query.get("model").map(String::as_str) {
-        None => st.models.settings().tts_default.clone(),
-        Some(m) if DEFAULT_ALIASES.contains(&m) => st.models.settings().tts_default.clone(),
+        None => st.models.tts_default(),
+        Some(m) if DEFAULT_ALIASES.contains(&m) => st.models.tts_default(),
         Some(m) => m.to_string(),
     };
     if name == "clones" {
@@ -585,12 +593,19 @@ pub(super) async fn voices(
     }
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    // `PUT /api/defaults`' live override, if set, wins over the manifest's
+    // own `default` marker.
+    let default_override = st.models.default_voice(&manifest.model.name);
     let voices: Vec<Value> = voices
         .iter()
         .map(|v| {
             // `voices::of` appends the cloned voices no `[[voice]]` shadows.
             let cloned = !manifest.voices.iter().any(|m| m.id == v.id);
-            json!({"id": v.id, "accent": v.accent, "gender": v.gender, "default": v.default,
+            let default = match &default_override {
+                Some(d) => &v.id == d,
+                None => v.default,
+            };
+            json!({"id": v.id, "accent": v.accent, "gender": v.gender, "default": default,
                    "cloned": cloned})
         })
         .collect();

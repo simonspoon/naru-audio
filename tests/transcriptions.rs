@@ -52,6 +52,7 @@ fn app(home: &Path) -> Router {
         log,
         registry,
         models: Arc::new(models),
+        pulls: Arc::new(naru_audio::server::PullTracker::new()),
     }))
 }
 

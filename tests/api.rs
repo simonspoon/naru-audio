@@ -56,6 +56,7 @@ fn app(home: &Path) -> Router {
         log,
         registry,
         models: Arc::new(models),
+        pulls: Arc::new(naru_audio::server::PullTracker::new()),
     }))
 }
 
@@ -77,6 +78,17 @@ async fn get_json(home: &Path, uri: &str) -> (StatusCode, Value) {
         .body(Body::empty())
         .unwrap();
     let (status, _, body) = send(app(home), req).await;
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+/// `get_json`, but against an already-built `Router` (sharing its
+/// `AppState`, and so its `pulls` tracker) rather than a fresh one per call.
+async fn get_json_router(app: Router, uri: &str) -> (StatusCode, Value) {
+    let req = Request::get(uri)
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(app, req).await;
     (status, serde_json::from_slice(&body).unwrap())
 }
 
@@ -203,17 +215,24 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         "x_backend",
         "x_clone",
         "x_clone_requires_transcript",
+        "x_cloned_voice_count",
         "x_default",
+        "x_design",
+        "x_design_voice_model",
         "x_instruct",
         "x_kind",
+        "x_languages",
         "x_license",
         "x_license_url",
         "x_loaded",
+        "x_loaded_at",
         "x_non_commercial",
         "x_prompt_format",
         "x_pulled",
         "x_size_bytes",
+        "x_source",
         "x_unavailable_reason",
+        "x_voice_count",
     ];
     for m in &data {
         let keys: Vec<&str> = m.as_object().unwrap().keys().map(String::as_str).collect();
@@ -227,6 +246,13 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         assert_eq!(m["x_clone"], false);
         assert_eq!(m["x_clone_requires_transcript"], false);
         assert_eq!(m["x_instruct"], false);
+        assert_eq!(m["x_design"], false);
+        assert_eq!(m["x_design_voice_model"], Value::Null);
+        assert_eq!(m["x_voice_count"], 0);
+        assert_eq!(m["x_cloned_voice_count"], 0);
+        assert_eq!(m["x_languages"], Value::Null);
+        assert_eq!(m["x_source"], Value::Null);
+        assert_eq!(m["x_loaded_at"], Value::Null);
         assert_eq!(m["x_prompt_format"], Value::Null);
     }
 
@@ -276,16 +302,20 @@ async fn api_pull_streams_ndjson_then_is_idempotent() {
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    let download = |file: &str, completed: u64, total: u64| json!({"status": "downloading", "file": file, "completed": completed, "total": total});
+    let download = |file: &str, completed: u64, total: u64, model_completed: u64| {
+        json!({"status": "downloading", "file": file, "completed": completed, "total": total,
+               "model_completed": model_completed, "model_total": 2})
+    };
+    let verifying = |model_completed: u64| json!({"status": "verifying", "model_completed": model_completed, "model_total": 2});
     assert_eq!(
         lines,
         [
-            download("vad.onnx", 0, 6),
-            download("vad.onnx", 6, 6),
-            json!({"status": "verifying"}),
-            download("enc.onnx", 0, 8),
-            download("enc.onnx", 8, 8),
-            json!({"status": "verifying"}),
+            download("vad.onnx", 0, 6, 0),
+            download("vad.onnx", 6, 6, 0),
+            verifying(0),
+            download("enc.onnx", 0, 8, 1),
+            download("enc.onnx", 8, 8, 1),
+            verifying(1),
             json!({"status": "success"}),
         ]
     );
@@ -698,4 +728,174 @@ async fn voices_are_listed_only_under_the_model_they_were_made_for() {
             ("zed".to_string(), "other-clone".to_string()),
         ]
     );
+}
+
+/// Serves one `GET` request's body in `chunk`-sized pieces, pausing `delay`
+/// between them, so a pull's download loop has time to be observed (or
+/// cancelled) mid-transfer. Never touches the network: a plain loopback
+/// TCP listener, torn down when the test's `home` (and so the pull) is
+/// done with it.
+fn slow_server(total: usize, chunk: usize, delay: Duration) -> (String, Vec<u8>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bytes: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+    let body = bytes.clone();
+    std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            for piece in body.chunks(chunk) {
+                if s.write_all(piece).is_err() {
+                    break;
+                }
+                let _ = s.flush();
+                std::thread::sleep(delay);
+            }
+        }
+    });
+    (format!("http://{addr}/big.bin"), bytes)
+}
+
+/// naru task 1458: `DELETE /api/pulls/{name}` cancels a running pull; its
+/// `POST /api/pull` stream ends with `pull_cancelled` instead of `success`,
+/// and no staging directory is left under `tmp/`.
+#[tokio::test]
+async fn cancelling_a_pull_ends_the_stream_with_pull_cancelled_and_leaves_no_staging_dir() {
+    let (url, bytes) = slow_server(2_000_000, 100_000, Duration::from_millis(30));
+    let dir = home(&[model_header("slow", &[]) + &file_entry("big.bin", &url, &bytes)]);
+    let router = app(dir.path());
+
+    let post = {
+        let router = router.clone();
+        tokio::spawn(async move {
+            let req = Request::post("/api/pull")
+                .header(HOST, HOSTPORT)
+                .body(Body::from(r#"{"model":"slow"}"#))
+                .unwrap();
+            send(router, req).await
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, list) = get_json_router(router.clone(), "/api/pulls").await;
+        assert_eq!(status, StatusCode::OK);
+        if list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["model"] == "slow")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pull never showed up in /api/pulls"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let req = Request::delete("/api/pulls/slow")
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, _) = send(router.clone(), req).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (status, ctype, body) = post.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ctype, "application/x-ndjson");
+    let body = String::from_utf8(body).unwrap();
+    let last: Value = serde_json::from_str(body.lines().last().unwrap()).unwrap();
+    assert_eq!(last["error"]["code"], "pull_cancelled", "{body}");
+    assert!(!body.contains("success"), "{body}");
+
+    assert!(!dir.path().join("tmp/slow").exists(), "staging left behind");
+    assert!(!dir.path().join("models/slow").exists());
+
+    let (_, list) = get_json_router(router.clone(), "/api/pulls").await;
+    assert_eq!(list, json!([]), "{list}");
+
+    // Cancelling again (or any other unknown pull) is a 404, not a repeat 202.
+    let req = Request::delete("/api/pulls/slow")
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, body) = send(router.clone(), req).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error_code(&body), "pull_not_found");
+}
+
+/// naru task 1458: `GET /api/pulls` lists a pull while it is streaming, with
+/// its live progress; a second `POST /api/pull` for the same model while
+/// one is running is a 409 `pull_in_progress`.
+#[tokio::test]
+async fn api_pulls_lists_an_in_flight_pull() {
+    let (url, bytes) = slow_server(2_000_000, 100_000, Duration::from_millis(30));
+    let dir = home(&[model_header("slow2", &[]) + &file_entry("big.bin", &url, &bytes)]);
+    let router = app(dir.path());
+
+    let post = {
+        let router = router.clone();
+        tokio::spawn(async move {
+            let req = Request::post("/api/pull")
+                .header(HOST, HOSTPORT)
+                .body(Body::from(r#"{"model":"slow2"}"#))
+                .unwrap();
+            send(router, req).await
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let entry = loop {
+        let (status, list) = get_json_router(router.clone(), "/api/pulls").await;
+        assert_eq!(status, StatusCode::OK);
+        let found = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["model"] == "slow2")
+            .cloned();
+        if let Some(entry) = found {
+            break entry;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pull never showed up in /api/pulls"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(entry["model"], "slow2");
+    assert_eq!(entry["status"], "running");
+    assert_eq!(entry["model_total"], 1);
+    assert!(entry["started_at"].is_string(), "{entry}");
+
+    // A second pull of the same model while one is running is refused.
+    let req = Request::post("/api/pull")
+        .header(HOST, HOSTPORT)
+        .body(Body::from(r#"{"model":"slow2"}"#))
+        .unwrap();
+    let (status, _, body) = send(router.clone(), req).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(error_code(&body), "pull_in_progress");
+
+    let (status, ctype, body) = post.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ctype, "application/x-ndjson");
+    let body = String::from_utf8(body).unwrap();
+    assert!(body.lines().last().unwrap().contains("success"), "{body}");
+
+    let (_, list) = get_json_router(router.clone(), "/api/pulls").await;
+    assert_eq!(list, json!([]), "{list}");
 }

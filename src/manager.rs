@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{Notify, watch};
@@ -80,6 +80,24 @@ pub struct Settings {
     pub keep_alive: KeepAlive,
     pub stt_default: String,
     pub tts_default: String,
+    /// `[defaults.voices]`: TTS model name to its default voice id.
+    pub default_voices: HashMap<String, String>,
+    /// `NARU_AUDIO_STT_MODEL`/`NARU_AUDIO_TTS_MODEL` is set (§2.5
+    /// `/api/defaults` `env_override`): the env var wins over anything
+    /// `PUT /api/defaults` sets, for as long as this process runs.
+    pub stt_env_override: bool,
+    pub tts_env_override: bool,
+}
+
+/// Live, `PUT`-able values behind `/api/defaults` (§2.5): the default
+/// model per kind and each TTS model's default voice. Seeded from
+/// [`Settings`] at startup; [`ModelManager::defaults`] applies the env
+/// override on top when reading it back.
+#[derive(Debug, Clone, Default)]
+pub struct Defaults {
+    pub stt: String,
+    pub tts: String,
+    pub voices: HashMap<String, String>,
 }
 
 impl Settings {
@@ -125,6 +143,9 @@ impl Settings {
             keep_alive,
             stt_default: default("NARU_AUDIO_STT_MODEL", &config.stt, profile.default_stt()),
             tts_default: default("NARU_AUDIO_TTS_MODEL", &config.tts, profile.default_tts()),
+            default_voices: config.voices.clone(),
+            stt_env_override: env("NARU_AUDIO_STT_MODEL").is_some(),
+            tts_env_override: env("NARU_AUDIO_TTS_MODEL").is_some(),
             profile,
         })
     }
@@ -143,6 +164,8 @@ struct Config {
     tts: Option<String>,
     keep_alive: Option<KeepAlive>,
     max_resident: Option<u64>,
+    /// `[defaults.voices]`.
+    voices: HashMap<String, String>,
 }
 
 impl Config {
@@ -175,11 +198,28 @@ impl Config {
         }
         .transpose()
         .map_err(|e| format!("[memory] max_resident: {e}"))?;
+        let voices = match key("defaults", "voices")? {
+            None => HashMap::new(),
+            Some(toml::Value::Table(t)) => {
+                let mut voices = HashMap::new();
+                for (k, v) in t {
+                    match v.as_str() {
+                        Some(s) => {
+                            voices.insert(k.clone(), s.to_string());
+                        }
+                        None => return Err(format!("[defaults.voices] {k}: not a string")),
+                    }
+                }
+                voices
+            }
+            Some(_) => return Err("[defaults.voices] is not a table".to_string()),
+        };
         Ok(Self {
             stt: string("defaults", "stt")?,
             tts: string("defaults", "tts")?,
             keep_alive,
             max_resident,
+            voices,
         })
     }
 }
@@ -210,6 +250,67 @@ fn parse_size(s: &str) -> Result<u64, String> {
         return Err(format!("{s:?} is too large"));
     }
     Ok(bytes as u64)
+}
+
+/// Persists `PUT /api/defaults` to `home`'s `config.toml`: `[defaults]
+/// stt`/`tts` (only those given) and `[defaults.voices]` (only the pairs
+/// given; `None` removes that model's key). Every other table and key —
+/// `[mlx]`, `[memory]`, an untouched `[defaults]` key — is kept, following
+/// the same read-modify-write shape as `crate::mlx`'s `write_python`.
+pub fn write_defaults(
+    home: &Path,
+    stt: Option<&str>,
+    tts: Option<&str>,
+    voices: &[(String, Option<String>)],
+) -> Result<(), String> {
+    let path = crate::registry::config_path(home);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let mut config: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let defaults = config
+        .entry("defaults")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(defaults) = defaults.as_table_like_mut() else {
+        return Err("config.toml: `defaults` is not a table".to_string());
+    };
+    if let Some(stt) = stt {
+        defaults.insert("stt", toml_edit::value(stt));
+    }
+    if let Some(tts) = tts {
+        defaults.insert("tts", toml_edit::value(tts));
+    }
+    if !voices.is_empty() {
+        let table = defaults
+            .entry("voices")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(table) = table.as_table_like_mut() else {
+            return Err("config.toml: `defaults.voices` is not a table".to_string());
+        };
+        for (model, voice) in voices {
+            match voice {
+                Some(v) => {
+                    table.insert(model, toml_edit::value(v.as_str()));
+                }
+                None => {
+                    table.remove(model);
+                }
+            }
+        }
+    }
+    let path = match std::fs::canonicalize(&path) {
+        Ok(target) => target,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => path,
+        Err(e) => return Err(format!("cannot resolve {}: {e}", path.display())),
+    };
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, config.to_string())
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// A loaded model.
@@ -333,6 +434,8 @@ pub struct Status {
     pub expires_at: Option<SystemTime>,
     pub busy: bool,
     pub loading: bool,
+    /// When the model finished loading; `None` while still loading.
+    pub loaded_at: Option<SystemTime>,
 }
 
 pub struct ModelManager {
@@ -346,6 +449,8 @@ pub struct ModelManager {
     measured_write: Mutex<()>,
     /// Signalled when `disposing` drops to 0.
     disposed: Notify,
+    /// `/api/defaults`' live values, seeded from `settings` at startup.
+    defaults: RwLock<Defaults>,
 }
 
 struct Inner {
@@ -371,6 +476,8 @@ struct Slot {
     expires_at: Option<SystemTime>,
     /// Bumped on every acquire and release, so a stale idle timer does nothing.
     generation: u64,
+    /// Set once the load finishes ([`ModelManager::finish_load`]).
+    loaded_at: Option<SystemTime>,
 }
 
 enum State {
@@ -447,6 +554,11 @@ impl ModelManager {
             }),
             Err(_) => BTreeMap::new(),
         };
+        let defaults = RwLock::new(Defaults {
+            stt: settings.stt_default.clone(),
+            tts: settings.tts_default.clone(),
+            voices: settings.default_voices.clone(),
+        });
         Self {
             registry,
             log,
@@ -461,6 +573,7 @@ impl ModelManager {
             }),
             measured_write: Mutex::new(()),
             disposed: Notify::new(),
+            defaults,
         }
     }
 
@@ -468,11 +581,84 @@ impl ModelManager {
         &self.settings
     }
 
+    /// `/api/defaults`' live values (§2.5): a `PUT`-set default, unless
+    /// `NARU_AUDIO_STT_MODEL`/`NARU_AUDIO_TTS_MODEL` overrides it for this
+    /// process (`env_override`).
+    pub fn defaults(&self) -> Defaults {
+        let d = self.defaults.read().unwrap_or_else(|e| e.into_inner());
+        Defaults {
+            stt: if self.settings.stt_env_override {
+                self.settings.stt_default.clone()
+            } else {
+                d.stt.clone()
+            },
+            tts: if self.settings.tts_env_override {
+                self.settings.tts_default.clone()
+            } else {
+                d.tts.clone()
+            },
+            voices: d.voices.clone(),
+        }
+    }
+
+    /// Whether the live `stt`/`tts` default above is env-forced rather
+    /// than the settable one.
+    pub fn env_override(&self) -> (bool, bool) {
+        (
+            self.settings.stt_env_override,
+            self.settings.tts_env_override,
+        )
+    }
+
+    /// The live default STT model.
+    pub fn stt_default(&self) -> String {
+        self.defaults().stt
+    }
+
+    /// The live default TTS model.
+    pub fn tts_default(&self) -> String {
+        self.defaults().tts
+    }
+
+    /// The live default voice for `tts_model`, if `PUT /api/defaults` set one.
+    pub fn default_voice(&self, tts_model: &str) -> Option<String> {
+        self.defaults
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .voices
+            .get(tts_model)
+            .cloned()
+    }
+
+    /// Sets the live default STT model; the caller persists it.
+    pub fn set_stt_default(&self, name: String) {
+        self.defaults.write().unwrap_or_else(|e| e.into_inner()).stt = name;
+    }
+
+    /// Sets the live default TTS model; the caller persists it.
+    pub fn set_tts_default(&self, name: String) {
+        self.defaults.write().unwrap_or_else(|e| e.into_inner()).tts = name;
+    }
+
+    /// Sets (`Some`) or clears (`None`) `model`'s live default voice; the
+    /// caller persists it.
+    pub fn set_default_voice(&self, model: String, voice: Option<String>) {
+        let mut d = self.defaults.write().unwrap_or_else(|e| e.into_inner());
+        match voice {
+            Some(v) => {
+                d.voices.insert(model, v);
+            }
+            None => {
+                d.voices.remove(&model);
+            }
+        }
+    }
+
     /// The configured default for `kind`; VAD models have none.
-    pub fn default_for(&self, kind: Kind) -> Option<&str> {
+    pub fn default_for(&self, kind: Kind) -> Option<String> {
         match kind {
-            Kind::Stt => Some(&self.settings.stt_default),
-            Kind::Tts => Some(&self.settings.tts_default),
+            Kind::Stt => Some(self.stt_default()),
+            Kind::Tts => Some(self.tts_default()),
             Kind::Vad => None,
         }
     }
@@ -495,6 +681,7 @@ impl ModelManager {
                 expires_at: s.expires_at,
                 busy: s.in_flight > 0,
                 loading: matches!(s.state, State::Loading(_)),
+                loaded_at: s.loaded_at,
             })
             .collect();
         drop(inner);
@@ -616,6 +803,7 @@ impl ModelManager {
                 keep_alive,
                 expires_at: None,
                 generation: 0,
+                loaded_at: None,
             },
         );
         Ok(Step::Load { tx, need, evicted })
@@ -649,6 +837,7 @@ impl ModelManager {
         slot.state = State::Ready(loaded.model.clone());
         slot.generation += 1;
         slot.resident_bytes = measured.unwrap_or(need);
+        slot.loaded_at = Some(SystemTime::now());
         let backend = slot.backend.clone();
         if let Some(bytes) = measured {
             inner
@@ -1091,6 +1280,7 @@ mod tests {
             keep_alive: KeepAlive::Forever,
             expires_at: None,
             generation: 0,
+            loaded_at: None,
         }
     }
 

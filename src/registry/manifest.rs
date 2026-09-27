@@ -346,6 +346,66 @@ impl Manifest {
             .unwrap_or(false)
     }
 
+    /// The model that a voice designed with this model (`instructs()`)
+    /// ends up usable with: itself, for a model that both clones and
+    /// instructs (VoxCPM2), so its own designed voice can be re-cloned;
+    /// otherwise `backend.<backend>.design_voice_model`, the cloning model
+    /// a design-only model (Qwen3-TTS VoiceDesign) saves its designed
+    /// voices for; `None` if the model does not design at all, or design's
+    /// not wired to any cloning model.
+    pub fn design_voice_model(&self) -> Option<String> {
+        if !self.instructs() {
+            return None;
+        }
+        if self.clones() {
+            return Some(self.model.name.clone());
+        }
+        self.backend
+            .get(&self.model.backend)
+            .and_then(|t| t.get("design_voice_model"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    /// `[model] languages`, if the manifest declares any.
+    pub fn languages(&self) -> Option<Vec<String>> {
+        self.raw
+            .get("model")?
+            .get("languages")?
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+    }
+
+    /// `[model] source`, if set explicitly, else the Hugging Face repo
+    /// (`owner/repo`) derived from the first `huggingface.co` file or
+    /// archive URL; `None` for a model with neither (e.g. sherpa-onnx's
+    /// GitHub releases).
+    pub fn source(&self) -> Option<String> {
+        if let Some(s) = self
+            .raw
+            .get("model")
+            .and_then(|v| v.get("source"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(s.to_string());
+        }
+        let url = self
+            .archives
+            .iter()
+            .map(|a| a.url.as_str())
+            .chain(self.files.iter().filter_map(|f| f.url.as_deref()))
+            .next()?;
+        let after = url.split_once("huggingface.co/")?.1;
+        let mut parts = after.splitn(3, '/');
+        let owner = parts.next()?;
+        let repo = parts.next()?;
+        Some(format!("{owner}/{repo}"))
+    }
+
     fn validate(&mut self) -> Result<(), String> {
         let name = &self.model.name;
         if !is_relative_path(name) || name.contains('/') {

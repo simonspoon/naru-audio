@@ -156,17 +156,23 @@ impl Server {
     }
 
     fn with_budget(home: &Path, loader: Arc<FakeLoader>, budget: u64) -> Self {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let log = Arc::new(Logger::stderr());
-        let registry = Arc::new(Registry::open(home).unwrap());
         let mut settings = Settings::from_env(Profile::detect().unwrap()).unwrap();
         settings.budget_bytes = budget;
         settings.stt_default = "a".to_string();
         settings.tts_default = "t".to_string();
         // Not `NARU_AUDIO_KEEP_ALIVE`, whatever the environment says.
         settings.keep_alive = KeepAlive::For(Duration::from_secs(300));
+        Self::with_settings(home, loader, settings)
+    }
+
+    /// A server over a fully caller-built `Settings` (defaults, env
+    /// overrides, `config.toml`-loaded ones, whatever the test needs).
+    fn with_settings(home: &Path, loader: Arc<FakeLoader>, settings: Settings) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let log = Arc::new(Logger::stderr());
+        let registry = Arc::new(Registry::open(home).unwrap());
         let models = ModelManager::new(registry.clone(), log.clone(), settings, loader);
         let app = router(Arc::new(AppState {
             port,
@@ -175,6 +181,7 @@ impl Server {
             log,
             registry,
             models: Arc::new(models),
+            pulls: Arc::new(naru_audio::server::PullTracker::new()),
         }));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.spawn(async move {
@@ -213,6 +220,15 @@ impl Server {
         self.request(
             "POST",
             "/api/load",
+            "application/json",
+            body.to_string().as_bytes(),
+        )
+    }
+
+    fn put_defaults(&self, body: Value) -> (u16, Value) {
+        self.request(
+            "PUT",
+            "/api/defaults",
             "application/json",
             body.to_string().as_bytes(),
         )
@@ -712,4 +728,160 @@ fn health_and_load_follow_the_tts_default() {
     let (_, health) = server.get("/health");
     assert_eq!(health["tts"]["loaded"], true, "{health}");
     assert_eq!(health["stt"]["loaded"], false, "{health}");
+}
+
+/// naru task 1458: `/api/load` used to guess every named model's kind was
+/// `stt`, so loading a TTS model by name 400ed against its own manifest
+/// before `keep_alive: 0` could ever reach the unload branch. The kind is
+/// now derived from the pulled manifest instead.
+#[test]
+fn load_and_unload_a_tts_model_by_name() {
+    let home = home();
+    let model_dir = home.path().join("models/t");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let manifest = json!({"model": {
+        "name": "t", "kind": "tts", "backend": "sherpa-onnx", "resident_bytes": MODEL_BYTES,
+    }});
+    std::fs::write(model_dir.join("manifest.json"), manifest.to_string()).unwrap();
+    let server = Server::start(
+        home.path(),
+        FakeLoader::new(Gate::new(false), Gate::new(false)),
+    );
+
+    // Loading "t" by name, with no explicit `kind`, resolves its own kind.
+    let (status, body) = server.load(json!({"model": "t"}));
+    assert_eq!(
+        (status, &body),
+        (200, &json!({"model": "t", "loaded": true}))
+    );
+    assert_eq!(server.loaded(), ["t"]);
+
+    // `keep_alive: 0` unloads it, the same as it does for an STT model.
+    let (status, body) = server.load(json!({"model": "t", "keep_alive": 0}));
+    assert_eq!(
+        (status, &body),
+        (200, &json!({"model": "t", "loaded": false}))
+    );
+    assert!(server.loaded().is_empty());
+
+    // A `kind` that disagrees with the manifest is a 400, not a silent guess.
+    let (status, body) = server.load(json!({"model": "t", "kind": "stt"}));
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["code"], "kind_mismatch");
+    assert_eq!(body["error"]["param"], "kind");
+}
+
+/// naru task 1458: `PUT /api/defaults` changes what `/health` and
+/// `/v1/models`' `x_default` report, live, without a restart.
+#[test]
+fn put_defaults_changes_health_and_x_default() {
+    let home = home();
+    let server = Server::start(
+        home.path(),
+        FakeLoader::new(Gate::new(false), Gate::new(false)),
+    );
+    let (_, health) = server.get("/health");
+    assert_eq!(health["stt"]["default"], "a");
+
+    let (status, body) = server.put_defaults(json!({"stt": "b"}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["stt"], "b");
+    assert_eq!(body["tts"], "t");
+    assert_eq!(body["env_override"], json!({"stt": false, "tts": false}));
+
+    let (_, health) = server.get("/health");
+    assert_eq!(health["stt"]["default"], "b");
+
+    let (_, models) = server.get("/v1/models");
+    let entry = |id: &str| {
+        models["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(entry("a")["x_default"], false);
+    assert_eq!(entry("b")["x_default"], true);
+
+    let (_, defaults) = server.get("/api/defaults");
+    assert_eq!(defaults["stt"], "b");
+
+    // Unknown or wrong-kind models are refused, not silently accepted.
+    let (status, body) = server.put_defaults(json!({"stt": "nope"}));
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "model_not_found");
+
+    let model_dir = home.path().join("models/t");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    std::fs::write(
+        model_dir.join("manifest.json"),
+        json!({"model": {"name": "t", "kind": "tts", "backend": "sherpa-onnx"}}).to_string(),
+    )
+    .unwrap();
+    let (status, body) = server.put_defaults(json!({"stt": "t"}));
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+/// naru task 1458: `PUT /api/defaults` persists `[defaults]` to
+/// `config.toml` without disturbing an `[mlx]` section already there.
+#[test]
+fn put_defaults_persists_config_without_disturbing_mlx() {
+    let home = home();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[mlx]\npython = \"/usr/bin/python3\"\n",
+    )
+    .unwrap();
+    let settings = Settings::load(Profile::detect().unwrap(), home.path()).unwrap();
+    let mut settings = settings;
+    settings.stt_default = "a".to_string();
+    settings.tts_default = "t".to_string();
+    let server = Server::with_settings(
+        home.path(),
+        FakeLoader::new(Gate::new(false), Gate::new(false)),
+        settings,
+    );
+
+    let (status, body) = server.put_defaults(json!({"stt": "b"}));
+    assert_eq!(status, 200, "{body}");
+
+    let written = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+    let table: toml::Table = written.parse().unwrap();
+    assert_eq!(table["mlx"]["python"].as_str(), Some("/usr/bin/python3"));
+    assert_eq!(table["defaults"]["stt"].as_str(), Some("b"));
+}
+
+/// naru task 1458: an active `NARU_AUDIO_STT_MODEL`/`NARU_AUDIO_TTS_MODEL`
+/// still wins over what `PUT /api/defaults` sets, and `env_override`
+/// reports which of `stt`/`tts` is currently env-forced.
+#[test]
+fn env_override_wins_and_is_reported() {
+    let home = home();
+    let mut settings = Settings::from_env(Profile::detect().unwrap()).unwrap();
+    settings.stt_default = "a".to_string();
+    settings.tts_default = "t".to_string();
+    // Simulates an active `NARU_AUDIO_STT_MODEL=a` without touching the
+    // real environment (parallel tests would race on it otherwise).
+    settings.stt_env_override = true;
+    let server = Server::with_settings(
+        home.path(),
+        FakeLoader::new(Gate::new(false), Gate::new(false)),
+        settings,
+    );
+
+    let (_, defaults) = server.get("/api/defaults");
+    assert_eq!(defaults["env_override"], json!({"stt": true, "tts": false}));
+
+    // Setting "b" is accepted and persisted, but the live default stays
+    // env-forced at "a" while this process runs.
+    let (status, body) = server.put_defaults(json!({"stt": "b"}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["stt"], "a");
+    assert_eq!(body["tts"], "t");
+
+    let (_, health) = server.get("/health");
+    assert_eq!(health["stt"]["default"], "a");
 }

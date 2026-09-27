@@ -320,7 +320,7 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
             ));
         }
     };
-    let cfg = validate(start, &st.models.settings().stt_default)?;
+    let cfg = validate(start, &st.models.stt_default())?;
     if let Some(v) = &cfg.hotwords {
         warn_truncated(st, req_id, v);
     }

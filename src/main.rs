@@ -293,6 +293,7 @@ async fn main() -> ExitCode {
         log,
         registry,
         models: Arc::new(models),
+        pulls: Arc::new(naru_audio::server::PullTracker::new()),
     }));
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("naru-audio: server error: {e}");

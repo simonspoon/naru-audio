@@ -25,6 +25,9 @@ resident_bytes = 3_800_000_000
 # Takes the request's `instructions` as mlx-audio's `instruct`: here the
 # voice's description, required.
 instruct = true
+# VoiceDesign clones nothing itself; a voice it designs is saved as a
+# cloned voice for this model instead, so a client can re-speak with it.
+design_voice_model = "qwen3-tts-1.7b-base-mlx"
 
 # One free-text description, no inline tags (mlx-audio's `qwen3_tts.py`
 # `generate_voice_design` takes `instruct` as a single string and has no

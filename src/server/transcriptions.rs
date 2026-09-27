@@ -101,10 +101,7 @@ pub(super) async fn transcriptions(
             format!("the body must be multipart/form-data: {}", e.body_text()),
         )
     })?;
-    let job = validate(
-        read_form(multipart).await?,
-        &st.models.settings().stt_default,
-    )?;
+    let job = validate(read_form(multipart).await?, &st.models.stt_default())?;
     if let Some(v) = &job.hotwords
         && v.terms_dropped > 0
     {
