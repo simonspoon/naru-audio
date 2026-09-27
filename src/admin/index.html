@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>naru-audio admin</title>
+<link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+<div id="app">
+  <div class="top" id="topbar">
+    <span class="logo">NARU·AUDIO</span>
+    <span class="pill" id="online-pill">connecting…</span>
+    <span class="pill" id="tts-pill"></span>
+    <span class="pill" id="stt-pill"></span>
+    <span class="pill" id="mem-pill"></span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <a href="#overview" data-tab="overview">OVERVIEW</a>
+    <a href="#models" data-tab="models">MODELS</a>
+    <a href="#voices" data-tab="voices">VOICES</a>
+    <a href="#clone" data-tab="clone">CLONE</a>
+    <a href="#design" data-tab="design">DESIGN</a>
+    <a href="#playground" data-tab="playground">PLAYGROUND</a>
+  </nav>
+  <main id="view"></main>
+</div>
+<div id="toasts"></div>
+<script type="module" src="/admin/js/app.mjs"></script>
+</body>
+</html>

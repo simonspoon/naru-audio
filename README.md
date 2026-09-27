@@ -285,8 +285,12 @@ there.
 **Network access.** The daemon listens on loopback only. `serve --listen
 0.0.0.0:7870 --allow-remote` exposes it to the network and turns off the
 `Host` header check; there is no authentication, so only do this on a
-network you trust. Any request with an `Origin` header (a browser page) is
-refused with 403.
+network you trust. A request with an `Origin` header (a browser fetch or
+WebSocket) is allowed only when it names exactly the `Host` the request came
+in on — same-origin — and that `Host` is itself allowed; `--allow-remote`
+still requires the Origin/Host match. This is what lets the built-in
+`/admin` UI (served by this daemon, same origin) call the API from the
+browser; a page on any other site gets 403.
 
 ## HTTP API
 
