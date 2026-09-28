@@ -927,55 +927,66 @@ async fn v1_models_names_cloning_and_voice_design_capability() {
         json!({"knobs": [{"name": "speed", "default": 1.0, "min": 0.5, "max": 2.0}]})
     );
 
-    // Chatterbox: clones, but its transcript is ignored, so no
-    // `x_clone_requires_transcript`. No `instruct`, but it still declares
-    // its own knobs.
-    let chatterbox = get("chatterbox-tts-8bit-mlx");
-    assert_eq!(chatterbox["x_clone"], true);
-    assert_eq!(chatterbox["x_clone_requires_transcript"], false);
-    assert_eq!(chatterbox["x_instruct"], false);
-    assert_eq!(chatterbox["x_prompt_format"]["style"], Value::Null);
-    assert_eq!(
-        chatterbox["x_prompt_format"]["knobs"],
-        json!([
-            {"name": "exaggeration", "default": 0.1, "min": 0.0, "max": 1.0},
-            {"name": "cfg_weight", "default": 0.5, "min": 0.0, "max": 1.0},
-        ])
-    );
+    // Chatterbox, Qwen3-TTS Base, VoxCPM2 and IndexTTS are all
+    // `platforms = ["macos-arm64", "macos-x86_64"]` in their catalog
+    // entries (mlx-audio only runs on Apple silicon or macOS x86_64), so
+    // `Registry::list`'s `runs_here()` filter (registry.rs) drops them from
+    // an unpulled `/v1/models` off macOS — e.g. on the Linux CI runner.
+    // Gate on the same condition so macOS still asserts them.
+    if cfg!(target_os = "macos") {
+        // Chatterbox: clones, but its transcript is ignored, so no
+        // `x_clone_requires_transcript`. No `instruct`, but it still
+        // declares its own knobs.
+        let chatterbox = get("chatterbox-tts-8bit-mlx");
+        assert_eq!(chatterbox["x_clone"], true);
+        assert_eq!(chatterbox["x_clone_requires_transcript"], false);
+        assert_eq!(chatterbox["x_instruct"], false);
+        assert_eq!(chatterbox["x_prompt_format"]["style"], Value::Null);
+        assert_eq!(
+            chatterbox["x_prompt_format"]["knobs"],
+            json!([
+                {"name": "exaggeration", "default": 0.1, "min": 0.0, "max": 1.0},
+                {"name": "cfg_weight", "default": 0.5, "min": 0.0, "max": 1.0},
+            ])
+        );
 
-    // Qwen3-TTS Base: clones, and needs the transcript for in-context
-    // cloning. No `instruct`, but `Model.generate`'s own sampling knobs
-    // are still declared.
-    let base = get("qwen3-tts-0.6b-base-mlx");
-    assert_eq!(base["x_clone"], true);
-    assert_eq!(base["x_clone_requires_transcript"], true);
-    assert_eq!(base["x_instruct"], false);
-    assert_eq!(base["x_prompt_format"]["style"], Value::Null);
-    assert_eq!(
-        base["x_prompt_format"]["knobs"],
-        json!([
-            {"name": "temperature", "default": 0.9, "min": 0.0, "max": 2.0},
-            {"name": "top_p", "default": 1.0, "min": 0.0, "max": 1.0},
-        ])
-    );
+        // Qwen3-TTS Base: clones, and needs the transcript for in-context
+        // cloning. No `instruct`, but `Model.generate`'s own sampling knobs
+        // are still declared.
+        let base = get("qwen3-tts-0.6b-base-mlx");
+        assert_eq!(base["x_clone"], true);
+        assert_eq!(base["x_clone_requires_transcript"], true);
+        assert_eq!(base["x_instruct"], false);
+        assert_eq!(base["x_prompt_format"]["style"], Value::Null);
+        assert_eq!(
+            base["x_prompt_format"]["knobs"],
+            json!([
+                {"name": "temperature", "default": 0.9, "min": 0.0, "max": 2.0},
+                {"name": "top_p", "default": 1.0, "min": 0.0, "max": 1.0},
+            ])
+        );
 
-    // VoxCPM2: clones (no transcript needed) and also designs a voice —
-    // inline, as a `(description)` prefix mlx-audio's own `generate`
-    // prepends onto the text (naru_1457).
-    let voxcpm2 = get("voxcpm2-8bit-mlx");
-    assert_eq!(voxcpm2["x_clone"], true);
-    assert_eq!(voxcpm2["x_clone_requires_transcript"], false);
-    assert_eq!(voxcpm2["x_instruct"], true);
-    assert_eq!(voxcpm2["x_prompt_format"]["style"], "inline_prefix");
-    assert_eq!(
-        voxcpm2["x_prompt_format"]["inline"],
-        json!({"syntax": "(description)text"})
-    );
+        // VoxCPM2: clones (no transcript needed) and also designs a voice —
+        // inline, as a `(description)` prefix mlx-audio's own `generate`
+        // prepends onto the text (naru_1457).
+        let voxcpm2 = get("voxcpm2-8bit-mlx");
+        assert_eq!(voxcpm2["x_clone"], true);
+        assert_eq!(voxcpm2["x_clone_requires_transcript"], false);
+        assert_eq!(voxcpm2["x_instruct"], true);
+        assert_eq!(voxcpm2["x_prompt_format"]["style"], "inline_prefix");
+        assert_eq!(
+            voxcpm2["x_prompt_format"]["inline"],
+            json!({"syntax": "(description)text"})
+        );
 
-    // IndexTTS and Pocket TTS have no style control at all, but declare
-    // that explicitly as an empty object — distinct from `null`, which is
-    // reserved for a non-TTS model (asserted below).
-    assert_eq!(get("indextts-1.5-mlx")["x_prompt_format"], json!({}));
+        // IndexTTS has no style control at all, but declares that
+        // explicitly as an empty object — distinct from `null`, which is
+        // reserved for a non-TTS model (asserted below).
+        assert_eq!(get("indextts-1.5-mlx")["x_prompt_format"], json!({}));
+    }
+
+    // Pocket TTS runs on Linux too (`platforms` includes `linux-*`), so it
+    // stays unconditional. Same "no style control" shape as IndexTTS, above.
     assert_eq!(get("pocket-tts-int8")["x_prompt_format"], json!({}));
 
     // A non-TTS model has no `prompt_format` table at all: `null`.
