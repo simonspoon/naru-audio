@@ -186,7 +186,7 @@ mod tests {
             Some(PathBuf::from("/opt/homebrew/var/log/naru-audio.log"))
         );
         assert_eq!(
-            brew_log_path(Path::new("/Users/x/naru-audio/target/debug/naru-audio")),
+            brew_log_path(Path::new("/home/x/naru-audio/target/debug/naru-audio")),
             None
         );
     }

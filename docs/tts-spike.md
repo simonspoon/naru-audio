@@ -169,7 +169,7 @@ order proven above. Note em_santa is 53, not in alphabetical position.
 
 ## A/B pack
 
-`/Users/simonspoon/naru-audio-spike-ab/`: `voice1..5-{A,B}.wav`, corpus
+A local scratch directory (not checked in): `voice1..5-{A,B}.wav`, corpus
 sentences 3 and 7 per voice (order af_heart, af_bella, am_michael, bf_emma,
 bm_george), both engines, peak-normalised, 24 kHz, random letter per pair.
 The key is in that directory only. sherpa output is raw (no leveller);

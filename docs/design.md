@@ -5,12 +5,10 @@ Status: design, task 1356. Date: 2026-09-24. Nothing here is built yet.
 naru-audio is one local daemon that does both speech-to-text (STT) and
 text-to-speech (TTS). It works like Ollama: a long-running process, models
 pulled by name, loaded on demand and unloaded when idle, and an HTTP API
-that other apps can call. It replaces **auris**
-(`/Users/simonspoon/naru-projects/projects/tools/auris`) and **kokoro-rs**
-(`/Users/simonspoon/naru-projects/projects/experiments/kokoro-rust`).
+that other apps can call. It replaces **auris** and **kokoro-rs**.
 
 Paths below are relative to the repo named in each section. `naru/` means
-`/Users/simonspoon/naru-projects/projects/tools/naru`. Claims we could not
+the naru repo. Claims we could not
 verify are marked **[assumption]**, and all of them are collected in §7.
 
 ## 1. Inventory
