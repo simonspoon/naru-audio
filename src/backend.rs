@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::prep::denoise::{DenoiseError, Denoiser};
-use crate::prep::diarize::{DiarizeError, Diarizer};
+use crate::prep::diarize::{ClusterOptions, DiarizeError, Diarizer};
 use crate::prep::isolate::{IsolateError, Isolator};
 use crate::registry::manifest::{Kind, Manifest};
 use crate::stt::{SttError, SttModel, sherpa::SherpaStt};
@@ -55,12 +55,16 @@ pub fn load_stt(manifest: &Manifest, dir: &Path) -> Result<Box<dyn SttModel>, St
 }
 
 /// Loads the diarization model described by `manifest` from its pulled
-/// `dir`. Every `[model] kind = "diarization"` manifest is `sherpa-onnx`
-/// (the only backend that implements it), so unlike [`load_stt`]/[`load_tts`]
-/// there is nothing to dispatch on.
-pub fn load_diarizer(manifest: &Manifest, dir: &Path) -> Result<Diarizer, DiarizeError> {
+/// `dir`, clustered per `options`. Every `[model] kind = "diarization"`
+/// manifest is `sherpa-onnx` (the only backend that implements it), so
+/// unlike [`load_stt`]/[`load_tts`] there is nothing to dispatch on.
+pub fn load_diarizer(
+    manifest: &Manifest,
+    dir: &Path,
+    options: ClusterOptions,
+) -> Result<Diarizer, DiarizeError> {
     debug_assert_eq!(manifest.model.kind, Kind::Diarization);
-    Diarizer::load(dir)
+    Diarizer::load(dir, options)
 }
 
 /// Loads the denoise model described by `manifest` from its pulled `dir`,

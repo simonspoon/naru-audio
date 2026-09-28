@@ -259,6 +259,92 @@ async fn transcribe_unknown_clip_is_404() {
     assert_eq!(body["error"]["code"], "clip_not_found");
 }
 
+/// `num_speakers` must be validated before the clip lookup (like
+/// `transcribe_unknown_clip_is_404`'s clip id), so a bad body never
+/// reaches model load.
+#[tokio::test]
+async fn transcribe_num_speakers_zero_is_400() {
+    let home = home();
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/prep/clips/nonexistent/transcribe",
+        json!({"num_speakers": 0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["param"], "num_speakers");
+}
+
+#[tokio::test]
+async fn transcribe_num_speakers_negative_is_400() {
+    let home = home();
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/prep/clips/nonexistent/transcribe",
+        json!({"num_speakers": -1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["param"], "num_speakers");
+}
+
+#[tokio::test]
+async fn transcribe_num_speakers_overflow_is_400() {
+    let home = home();
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/prep/clips/nonexistent/transcribe",
+        json!({"num_speakers": 3000000000i64}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["param"], "num_speakers");
+}
+
+#[tokio::test]
+async fn transcribe_cluster_threshold_out_of_range_is_400() {
+    let home = home();
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/prep/clips/nonexistent/transcribe",
+        json!({"cluster_threshold": 0.0}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["param"], "cluster_threshold");
+
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/prep/clips/nonexistent/transcribe",
+        json!({"cluster_threshold": 2.5}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["param"], "cluster_threshold");
+}
+
+/// JSON has no `NaN`/`Infinity` literal, but a number too large for `f32`
+/// (still valid JSON, still fits `f64`) parses to `f32::INFINITY` — that's
+/// the non-finite case the handler's `is_finite()` check is for.
+#[tokio::test]
+async fn transcribe_cluster_threshold_non_finite_is_400() {
+    let home = home();
+    let req = Request::post("/v1/audio/prep/clips/nonexistent/transcribe")
+        .header(HOST, HOSTPORT)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"cluster_threshold": 1e300}"#))
+        .unwrap();
+    let (status, body) = send(app(home.path()), req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(body["error"]["param"], "cluster_threshold");
+}
+
 #[tokio::test]
 async fn transcript_before_transcribe_is_409() {
     let home = home();

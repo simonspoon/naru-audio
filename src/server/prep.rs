@@ -22,6 +22,7 @@ use super::transcriptions::{bad_request, internal, kind_manifest, multipart_erro
 use super::{AppState, RequestId, manager_error, registry_error};
 use crate::backend;
 use crate::error::ApiError;
+use crate::prep::diarize::ClusterOptions;
 use crate::prep::{
     self, ClipMeta, EngineUsed, PrepError, SampleMeta, SampleRange, SpeakerSpan, Transcript,
     TranscriptWord,
@@ -341,6 +342,13 @@ struct TranscribeRequest {
     stt_model: Option<String>,
     diarize: bool,
     diarization_model: Option<String>,
+    /// Exact speaker count, when the caller knows it; fixes real speakers
+    /// getting merged by the clustering threshold. Overrides
+    /// `cluster_threshold` when set.
+    num_speakers: Option<u32>,
+    /// Cosine-distance clustering threshold; ignored when `num_speakers`
+    /// is set. Sherpa-onnx's own default is 0.5.
+    cluster_threshold: Option<f32>,
 }
 
 fn word_json(w: &TranscriptWord) -> Value {
@@ -379,6 +387,8 @@ pub(super) async fn transcribe_clip(
             stt_model: None,
             diarize: true,
             diarization_model: None,
+            num_speakers: None,
+            cluster_threshold: None,
         }
     } else {
         #[derive(Deserialize, Default)]
@@ -387,13 +397,37 @@ pub(super) async fn transcribe_clip(
             stt_model: Option<String>,
             diarize: Option<bool>,
             diarization_model: Option<String>,
+            num_speakers: Option<i64>,
+            cluster_threshold: Option<f32>,
         }
         let raw: Raw = serde_json::from_slice(&body)
             .map_err(|e| bad_request("body", "invalid_request", e.to_string()))?;
+        let num_speakers = match raw.num_speakers {
+            Some(n) if n < 1 || n > i32::MAX as i64 => {
+                return Err(bad_request(
+                    "num_speakers",
+                    "invalid_request",
+                    format!("\"num_speakers\" must be a positive integer, got {n}"),
+                ));
+            }
+            Some(n) => Some(n as u32),
+            None => None,
+        };
+        if let Some(t) = raw.cluster_threshold
+            && (!t.is_finite() || t <= 0.0 || t > 2.0)
+        {
+            return Err(bad_request(
+                "cluster_threshold",
+                "invalid_request",
+                format!("\"cluster_threshold\" must be in (0, 2], got {t}"),
+            ));
+        }
         TranscribeRequest {
             stt_model: raw.stt_model,
             diarize: raw.diarize.unwrap_or(true),
             diarization_model: raw.diarization_model,
+            num_speakers,
+            cluster_threshold: raw.cluster_threshold,
         }
     };
 
@@ -448,10 +482,14 @@ pub(super) async fn transcribe_clip(
             (st.clone(), req_id.clone(), diarization_model.clone());
         let home = st.registry.home().to_path_buf();
         let pcm_for_diarize = pcm.clone();
+        let cluster_options = ClusterOptions {
+            num_speakers: req.num_speakers,
+            threshold: req.cluster_threshold,
+        };
         tokio::task::spawn_blocking(move || -> Result<Vec<_>, ApiError> {
             let manifest = kind_manifest(&st2, &diarization_model2, Kind::Diarization)?;
             let dir = home.join("models").join(&diarization_model2);
-            backend::load_diarizer(&manifest, &dir)
+            backend::load_diarizer(&manifest, &dir, cluster_options)
                 .and_then(|d| d.diarize(&pcm_for_diarize))
                 .map_err(|e| internal(&st2, &req_id2, e.to_string()))
         })

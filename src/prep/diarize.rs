@@ -49,13 +49,28 @@ pub struct DiarizedSpan {
     pub speaker: i32,
 }
 
+/// Clustering knobs for [`Diarizer::load`], threaded from the transcribe
+/// request body (`num_speakers`/`cluster_threshold`) so a caller who knows
+/// a clip's speaker count, or wants a different merge threshold, can avoid
+/// two real speakers being clustered into one. Both fields must be set at
+/// load: the upstream C API has no post-creation setter for clustering.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClusterOptions {
+    /// Exact speaker count, overriding `threshold` when this is set; same
+    /// as `FastClusteringConfig::num_clusters >= 0`.
+    pub num_speakers: Option<u32>,
+    /// Cosine-distance merge threshold; ignored when `num_speakers` is
+    /// set. Sherpa-onnx's own default, used when this is `None`, is 0.5.
+    pub threshold: Option<f32>,
+}
+
 pub struct Diarizer {
     inner: OfflineSpeakerDiarization,
 }
 
 impl Diarizer {
     /// `dir` is the pulled `speaker-diarization-en` model directory.
-    pub fn load(dir: &Path) -> Result<Self, DiarizeError> {
+    pub fn load(dir: &Path, options: ClusterOptions) -> Result<Self, DiarizeError> {
         let segmentation = dir.join(SEGMENTATION_FILENAME);
         if !segmentation.is_file() {
             return Err(DiarizeError::MissingModel(segmentation));
@@ -76,11 +91,12 @@ impl Diarizer {
                 model: Some(embedding.to_string_lossy().into_owned()),
                 ..Default::default()
             },
-            // Cluster by similarity, not a fixed speaker count: a clip's
-            // speaker count is what this is for.
+            // Cluster by similarity, not a fixed speaker count, unless the
+            // caller told us the count: a clip's speaker count is normally
+            // what this is for.
             clustering: FastClusteringConfig {
-                num_clusters: -1,
-                ..Default::default()
+                num_clusters: options.num_speakers.map_or(-1, |n| n as i32),
+                threshold: options.threshold.unwrap_or(0.5),
             },
             ..Default::default()
         };
