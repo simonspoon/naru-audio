@@ -203,12 +203,6 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
                 "parakeet-tdt-0.6b-v2-int8",
                 "pocket-tts-int8",
                 "silero-vad",
-                // The diarization/denoise/separation kinds are not "stt",
-                // so they would fail this loop's `x_kind == "stt"` check
-                // (naru task 1461 review).
-                "source-separation-spleeter-2stems-int8",
-                "speaker-diarization-en",
-                "speech-denoiser-gtcrn",
             ]
             .contains(&id)
                 && !MLX.contains(&id)
@@ -248,7 +242,16 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         assert_eq!(keys, fields, "{m}");
         assert_eq!(m["object"], "model");
         assert_eq!(m["owned_by"], "naru-audio");
-        assert_eq!(m["x_kind"], "stt");
+        // The diarization/denoise/separation catalog entries carry their own
+        // kinds (`Kind::as_str`, src/registry/manifest.rs); the fixtures are
+        // all "stt".
+        let kind = match m["id"].as_str().unwrap() {
+            "source-separation-spleeter-2stems-int8" => "separation",
+            "speaker-diarization-en" => "diarization",
+            "speech-denoiser-gtcrn" => "denoise",
+            _ => "stt",
+        };
+        assert_eq!(m["x_kind"], kind);
         assert_eq!(m["x_loaded"], false);
         assert_eq!(m["x_default"], false);
         // None of these STT/VAD test fixtures clone or design a voice.
@@ -259,13 +262,18 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         assert_eq!(m["x_design_voice_model"], Value::Null);
         assert_eq!(m["x_voice_count"], 0);
         assert_eq!(m["x_cloned_voice_count"], 0);
-        assert_eq!(m["x_languages"], Value::Null);
-        assert_eq!(m["x_source"], Value::Null);
+        // Some catalog entries declare languages or a source; the fixtures
+        // declare neither.
+        if kind == "stt" {
+            assert_eq!(m["x_languages"], Value::Null);
+            assert_eq!(m["x_source"], Value::Null);
+        }
         assert_eq!(m["x_loaded_at"], Value::Null);
         assert_eq!(m["x_prompt_format"], Value::Null);
     }
 
-    let vad = &data[2];
+    let by_id = |id: &str| *data.iter().find(|m| m["id"] == id).unwrap();
+    let vad = by_id("vad");
     assert_eq!(vad["x_pulled"], true);
     assert_eq!(vad["x_available"], true);
     assert_eq!(vad["x_unavailable_reason"], Value::Null);
@@ -274,12 +282,12 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     // vad.onnx plus manifest.json.
     assert!(vad["x_size_bytes"].as_u64().unwrap() > 6, "{vad}");
 
-    let stt = &data[1];
+    let stt = by_id("stt");
     assert_eq!(stt["x_pulled"], false);
     assert_eq!(stt["created"], 0);
     assert_eq!(stt["x_size_bytes"], 8);
 
-    let odd = &data[0];
+    let odd = by_id("odd");
     assert_eq!(odd["x_available"], false);
     assert_eq!(odd["x_unavailable_reason"], "unknown backend `nope`");
 
