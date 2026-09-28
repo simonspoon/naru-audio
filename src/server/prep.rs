@@ -349,6 +349,8 @@ struct TranscribeRequest {
     /// Cosine-distance clustering threshold; ignored when `num_speakers`
     /// is set. Sherpa-onnx's own default is 0.5.
     cluster_threshold: Option<f32>,
+    /// A multilingual `stt_model`'s language, else it detects one.
+    language: Option<String>,
 }
 
 fn word_json(w: &TranscriptWord) -> Value {
@@ -372,10 +374,12 @@ fn transcript_json(t: &Transcript) -> Value {
 /// `POST /v1/audio/prep/clips/{id}/transcribe` (naru task 1461 §8
 /// pipeline step 1): word timestamps from the default (or requested)
 /// speech-to-text model, plus speaker diarization unless `diarize:false`.
-/// Only a `sherpa-onnx` Parakeet model reports word timestamps
-/// ([`crate::stt::SttModel::decode_words`]'s default is "unsupported"); the
-/// MLX Parakeet does not, so the daemon's default `stt_model` may need
-/// overriding here even where it serves `/v1/audio/transcriptions` fine.
+/// Only a `sherpa-onnx` Parakeet model and the MLX Whisper model report
+/// word timestamps ([`crate::stt::SttModel::decode_words`]'s default is
+/// "unsupported"); the MLX Parakeet does not, so the daemon's default
+/// `stt_model` may need overriding here even where it serves
+/// `/v1/audio/transcriptions` fine. The optional `language` is passed to a
+/// multilingual model; the transcript's `language` is the one used.
 pub(super) async fn transcribe_clip(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
@@ -389,6 +393,7 @@ pub(super) async fn transcribe_clip(
             diarization_model: None,
             num_speakers: None,
             cluster_threshold: None,
+            language: None,
         }
     } else {
         #[derive(Deserialize, Default)]
@@ -399,6 +404,7 @@ pub(super) async fn transcribe_clip(
             diarization_model: Option<String>,
             num_speakers: Option<i64>,
             cluster_threshold: Option<f32>,
+            language: Option<String>,
         }
         let raw: Raw = serde_json::from_slice(&body)
             .map_err(|e| bad_request("body", "invalid_request", e.to_string()))?;
@@ -428,6 +434,7 @@ pub(super) async fn transcribe_clip(
             diarization_model: raw.diarization_model,
             num_speakers,
             cluster_threshold: raw.cluster_threshold,
+            language: raw.language,
         }
     };
 
@@ -448,7 +455,21 @@ pub(super) async fn transcribe_clip(
             .await
             .map_err(|e| internal(&st, &req_id, e.to_string()))?
     }?;
-    let language = stt_manifest.languages().and_then(|v| v.first().cloned());
+    let languages = stt_manifest.languages().unwrap_or_default();
+    if let Some(l) = &req.language
+        && !languages.contains(l)
+    {
+        return Err(bad_request(
+            "language",
+            "unsupported_value",
+            format!(
+                "the model \"{stt_model}\" does not support language {l:?}; it supports: {}",
+                languages.join(", ")
+            ),
+        ));
+    }
+    let requested = req.language.clone();
+    let default_language = languages.first().cloned();
     let guard = st
         .models
         .acquire(stt_manifest, None)
@@ -456,10 +477,12 @@ pub(super) async fn transcribe_clip(
         .map_err(|e| manager_error(&st, &req_id, e))?;
 
     let pcm_for_decode = pcm.clone();
-    let words = tokio::task::spawn_blocking(move || {
-        guard
-            .stt()
-            .decode_words(&pcm_for_decode, Some(&VadConfig::default()))
+    let (words, used_language) = tokio::task::spawn_blocking(move || {
+        guard.stt().decode_words_in(
+            &pcm_for_decode,
+            Some(&VadConfig::default()),
+            requested.as_deref(),
+        )
     })
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))?
@@ -468,7 +491,7 @@ pub(super) async fn transcribe_clip(
             "stt_model",
             "word_timestamps_unsupported",
             format!(
-                "\"{stt_model}\" does not report word timestamps; use a sherpa-onnx Parakeet model, e.g. \"parakeet-tdt-0.6b-v2-int8\""
+                "\"{stt_model}\" does not report word timestamps; use a sherpa-onnx Parakeet model, e.g. \"parakeet-tdt-0.6b-v2-int8\", or \"whisper-large-v3-turbo-mlx\" on Apple Silicon"
             ),
         ),
         other => super::transcriptions::decode_error(&st, &req_id, other),
@@ -517,7 +540,9 @@ pub(super) async fn transcribe_clip(
             .collect(),
         speakers,
         stt_model,
-        language,
+        // The language the model used (the request's, else the one it
+        // detected), or for a model with no notion of one, the manifest's.
+        language: used_language.or(default_language),
         diarization_model: req_diarize_model_or_none(req.diarize, &diarization_model),
     };
 

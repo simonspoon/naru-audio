@@ -134,13 +134,13 @@ pub struct TranscriptWord {
 pub struct Transcript {
     pub words: Vec<TranscriptWord>,
     pub speakers: Vec<SpeakerSpan>,
-    /// The STT model that produced `words` (an "engine" field, so a future
-    /// Whisper-backed engine is a value here, not a schema change).
+    /// The STT model that produced `words` (an "engine" field: Parakeet or
+    /// the MLX Whisper, a value here, not a schema change).
     pub stt_model: String,
-    /// `stt_model`'s manifest `[model] languages`, first entry, if it
-    /// declares any (Parakeet's catalog entries are English-only, so this
-    /// is always `Some("en")` today; a future multilingual Whisper engine
-    /// would vary it per request, same field). `#[serde(default)]` so a
+    /// The language `words` were transcribed in: the request's, else the
+    /// one a multilingual model (Whisper) detected; for a model with no
+    /// notion of one (Parakeet, English-only), its manifest `[model]
+    /// languages` first entry, if it declares any. `#[serde(default)]` so a
     /// `transcript.json` cached before this field existed still loads.
     #[serde(default)]
     pub language: Option<String>,

@@ -13,7 +13,9 @@ Requests, one at a time, each answered before the next is sent:
 
     {"op": "load", "model": NAME, "kind": "stt"|"tts", "dir": PATH}
     {"op": "unload", "model": NAME}
-    {"op": "transcribe", "model": NAME, "samples": S} + S samples at 16 kHz
+    {"op": "transcribe", "model": NAME, "samples": S, "language": CODE
+     (optional, a language hint), "words": true (optional, word
+     timestamps)} + S samples at 16 kHz
     {"op": "synth", "model": NAME, "text": TEXT, "voice": ID (optional),
      "speed": X, "reference": PATH (optional), "reference_text": TEXT
      (optional, the reference's transcript), "instruct": TEXT (optional,
@@ -24,7 +26,11 @@ Requests, one at a time, each answered before the next is sent:
 Answers are {"ok": true, ...} or {"ok": false, "error": MESSAGE}. A `load`
 of a "tts" model adds "sample_rate"; a `transcribe` answer adds
 "segments": [{"start", "end", "text"}] (seconds into the samples sent); a
-`stats` answer adds "active_bytes".
+Whisper `transcribe` answer also has "language", the language it decoded in
+(the request's, else the detected one), and, with "words", "words": true
+and each segment's "words": [{"start", "end", "text"}] (possibly empty).
+Parakeet ignores "language" and "words" and answers neither; the daemon
+reads a missing "words": true as no word-timestamp support. A `stats` answer adds "active_bytes".
 
 A `synth` answer is a stream: zero or more {"samples": S} frames, each
 with S samples at the load's sample_rate, as they are generated, then the

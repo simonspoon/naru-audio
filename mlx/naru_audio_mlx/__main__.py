@@ -1,5 +1,5 @@
-"""`python -m naru_audio_mlx --socket PATH`: parakeet-mlx and mlx-audio
-behind the framed protocol (`protocol.py`). For speech-to-text the daemon
+"""`python -m naru_audio_mlx --socket PATH`: parakeet-mlx, mlx-whisper and
+mlx-audio behind the framed protocol (`protocol.py`). For speech-to-text the daemon
 does the energy and VAD gating and sends one utterance per `transcribe`,
 already at 16 kHz; for text-to-speech `synth` streams mlx-audio's chunks
 as they are generated. Each library is imported by the first load that
@@ -49,6 +49,12 @@ def handle(header, samples):
                 ):
                     model = load_model(Path(header["dir"]))
             answer = {"sample_rate": model.sample_rate}
+        elif header.get("model", "").startswith("whisper"):
+            from mlx_whisper.load_models import load_model
+
+            # float16, the dtype `mlx_whisper.transcribe` decodes in.
+            model = load_model(header["dir"], dtype=mx.float16)
+            answer = {}
         else:
             from parakeet_mlx import from_pretrained
 
@@ -65,9 +71,11 @@ def handle(header, samples):
         mx.clear_cache()
         return {}
     if op == "transcribe":
+        model = loaded(header)
+        if header["model"].startswith("whisper"):
+            return transcribe_whisper(model, header, samples)
         from parakeet_mlx.audio import get_logmel
 
-        model = loaded(header)
         audio = mx.array(np.frombuffer(samples or b"", dtype="<f4"))
         # Shorter than one hop, there is no frame to decode.
         if audio.size < model.preprocessor_config.hop_length:
@@ -91,6 +99,53 @@ def loaded(header):
     if model is None:
         raise KeyError(f"{header['model']} is not loaded")
     return model
+
+
+def transcribe_whisper(model, header, samples):
+    """One utterance through mlx-whisper: `header["language"]` when given,
+    else Whisper detects it; word timestamps when `header["words"]`."""
+    import mlx_whisper
+    from mlx_whisper.transcribe import ModelHolder
+
+    audio = np.frombuffer(samples or b"", dtype="<f4")
+    # `transcribe` takes a path, not a model, and looks it up in a
+    # one-slot cache: fill the slot with the loaded model under its name
+    # for the call, and empty it after, so an unload frees the weights.
+    name = header["model"]
+    ModelHolder.model, ModelHolder.model_path = model, name
+    try:
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=name,
+            word_timestamps=bool(header.get("words")),
+            language=header.get("language"),
+        )
+    finally:
+        ModelHolder.model, ModelHolder.model_path = None, None
+    return whisper_answer(result, bool(header.get("words")))
+
+
+def whisper_answer(result, words):
+    """mlx-whisper's `transcribe` result as a `transcribe` answer
+    (`protocol.py`): its non-empty segments, each with its words when
+    asked for, and the language it decoded in."""
+    segments = []
+    for s in result["segments"]:
+        text = s["text"].strip()
+        if not text:
+            continue
+        segment = {"start": s["start"], "end": s["end"], "text": text}
+        if words:
+            segment["words"] = [
+                {"start": w["start"], "end": w["end"], "text": w["word"].strip()}
+                for w in s.get("words", [])
+                if w["word"].strip()
+            ]
+        segments.append(segment)
+    answer = {"segments": segments, "language": result.get("language")}
+    if words:
+        answer["words"] = True
+    return answer
 
 
 def synth(model, header):

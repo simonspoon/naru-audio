@@ -66,13 +66,42 @@ pub trait SttModel: Send + Sync {
     /// [`Segment`]s split into [`Word`]s with their own timestamps
     /// (naru task 1461 §8: voice-prep's transcript step). `Err(SttError::
     /// WordTimestampsUnsupported)` by default; only a backend that reports
-    /// per-token timestamps (`sherpa-onnx`'s Parakeet) overrides it.
+    /// per-token timestamps (`sherpa-onnx`'s Parakeet, the MLX Whisper via
+    /// [`SttModel::decode_words_in`]) overrides it.
     fn decode_words(
         &self,
         _pcm16k: &[f32],
         _vad: Option<&VadConfig>,
     ) -> Result<Vec<Word>, SttError> {
         Err(SttError::WordTimestampsUnsupported)
+    }
+
+    /// [`SttModel::decode_each`] for a multilingual model (naru task 1466):
+    /// `language` is the caller's requested language, `None` to let the
+    /// model detect it. Returns the language the decode used (the request's,
+    /// else the one detected), `None` when the backend has no notion of one;
+    /// the default ignores `language` and returns `None`.
+    fn decode_each_in(
+        &self,
+        pcm16k: &[f32],
+        hotwords: Option<&Vocabulary>,
+        vad: Option<&VadConfig>,
+        _language: Option<&str>,
+        on_segment: &mut dyn FnMut(Segment),
+    ) -> Result<Option<String>, SttError> {
+        self.decode_each(pcm16k, hotwords, vad, on_segment)
+            .map(|()| None)
+    }
+
+    /// [`SttModel::decode_words`] with [`SttModel::decode_each_in`]'s
+    /// `language` in and language used out.
+    fn decode_words_in(
+        &self,
+        pcm16k: &[f32],
+        vad: Option<&VadConfig>,
+        _language: Option<&str>,
+    ) -> Result<(Vec<Word>, Option<String>), SttError> {
+        self.decode_words(pcm16k, vad).map(|words| (words, None))
     }
 
     /// The Silero model streaming sessions segment with (§2.4); `None`

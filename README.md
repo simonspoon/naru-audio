@@ -36,7 +36,7 @@ For developers: [Building from source](#building-from-source) ·
   built-in sherpa-onnx backend (ONNX Runtime, statically linked), on every
   platform, with no Python and no GPU.
 - **Apple Silicon, for the MLX models only.** Models whose backend is `mlx`
-  (Parakeet on MLX, the Qwen3-TTS family, and so voice cloning) run in a
+  (Parakeet and Whisper on MLX, the Qwen3-TTS family, and so voice cloning) run in a
   Python sidecar on arm64 macOS. They need [`uv`](https://docs.astral.sh/uv/)
   and a one-time `naru-audio mlx setup`. On other machines they are listed
   as unavailable.
@@ -116,6 +116,7 @@ used.
 | `silero-vad` | VAD, pulled with the STT models | sherpa-onnx | 2 MB |
 | `pocket-tts-int8` | TTS (English) | sherpa-onnx | 0.10 GB |
 | `parakeet-tdt-0.6b-v2-mlx` | STT (English) | mlx | 2.5 GB |
+| `whisper-large-v3-turbo-mlx` | STT, 99 languages, word timestamps | mlx | 1.6 GB |
 | `qwen3-tts-0.6b-mlx` | TTS, preset voices | mlx | 2.0 GB |
 | `qwen3-tts-0.6b-base-mlx` | TTS, speaks cloned voices | mlx | 2.0 GB |
 | `qwen3-tts-1.7b-base-mlx` | TTS, speaks cloned voices | mlx | 3.1 GB |
@@ -444,7 +445,7 @@ MLX.
 MLX models run in a Python process the daemon supervises, not in Rust:
 
 - **Source:** [mlx/naru_audio_mlx/](mlx/naru_audio_mlx/) (`__main__.py`
-  runs parakeet-mlx and mlx-audio; `protocol.py` defines the frames).
+  runs parakeet-mlx, mlx-whisper and mlx-audio; `protocol.py` defines the frames).
   [mlx/pyproject.toml](mlx/pyproject.toml) pins Python 3.12 and the
   libraries; [mlx/uv.lock](mlx/uv.lock) locks them.
 - **Install:** these files are embedded in the binary. `naru-audio mlx
@@ -462,7 +463,7 @@ MLX models run in a Python process the daemon supervises, not in Rust:
 
   ```sh
   cd mlx
-  ~/.naru-audio/mlx/.venv/bin/python -m unittest tests.test_synth
+  ~/.naru-audio/mlx/.venv/bin/python -m unittest tests.test_synth tests.test_transcribe_whisper
   ```
 
 To add an MLX model, add a catalog entry with `backend = "mlx"`; see the

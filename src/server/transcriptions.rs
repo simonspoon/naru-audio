@@ -78,7 +78,11 @@ struct Job {
 struct Prepared {
     manifest: Manifest,
     pcm: Vec<f32>,
+    /// What the response reports absent a language from the model: the
+    /// request's, else the manifest's first.
     language: Option<String>,
+    /// The request's `language`, passed to the model as a hint.
+    requested: Option<String>,
 }
 
 /// Everything the decode needs, once the model has loaded. Dropping it ends
@@ -87,6 +91,7 @@ struct Loaded {
     model: Guard,
     pcm: Vec<f32>,
     language: Option<String>,
+    requested: Option<String>,
 }
 
 pub(super) async fn transcriptions(
@@ -135,6 +140,7 @@ pub(super) async fn transcriptions(
         manifest,
         pcm,
         language,
+        requested,
     } = tokio::task::spawn_blocking(prepare)
         .await
         .map_err(|e| internal(&st, &req_id, e.to_string()))??;
@@ -146,6 +152,7 @@ pub(super) async fn transcriptions(
             .map_err(|e| manager_error(&st, &req_id, e))?,
         pcm,
         language,
+        requested,
     };
 
     if stream {
@@ -154,15 +161,23 @@ pub(super) async fn transcriptions(
 
     let started = Instant::now();
     let (loaded, result) = tokio::task::spawn_blocking(move || {
-        let result = loaded
-            .model
-            .stt()
-            .decode(&loaded.pcm, hotwords.as_ref(), vad.as_ref());
+        let mut segments = Vec::new();
+        let result = loaded.model.stt().decode_each_in(
+            &loaded.pcm,
+            hotwords.as_ref(),
+            vad.as_ref(),
+            loaded.requested.as_deref(),
+            &mut |s| segments.push(s),
+        );
+        let result = result.map(|used| (segments, used));
         (loaded, result)
     })
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))?;
-    let segments = result.map_err(|e| decode_error(&st, &req_id, e))?;
+    let (segments, used) = result.map_err(|e| decode_error(&st, &req_id, e))?;
+    // A multilingual model reports the language it used, the request's or
+    // the one it detected; any other, the manifest's.
+    let language = used.or(loaded.language.clone());
     let text = join(&segments);
 
     Ok(match format {
@@ -170,7 +185,7 @@ pub(super) async fn transcriptions(
         Format::Text => ([(CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response(),
         Format::VerboseJson => Json(json!({
             "task": "transcribe",
-            "language": loaded.language,
+            "language": language,
             "duration": loaded.pcm.len() as f64 / TARGET_SAMPLE_RATE as f64,
             "text": text,
             "segments": segments
@@ -378,6 +393,7 @@ fn prepare(
 ) -> Result<Prepared, ApiError> {
     let manifest = stt_manifest(st, name)?;
     let languages = languages(&manifest);
+    let requested = language.clone();
     let language = match language {
         None => languages.first().cloned(),
         Some(l) if languages.contains(&l) => Some(l),
@@ -403,6 +419,7 @@ fn prepare(
         manifest,
         pcm,
         language,
+        requested,
     })
 }
 
@@ -444,15 +461,22 @@ fn sse(
             loaded
                 .model
                 .stt()
-                .decode_each(&loaded.pcm, hotwords.as_ref(), vad.as_ref(), &mut |s| {
-                    let delta = if text.is_empty() {
-                        s.text
-                    } else {
-                        format!(" {}", s.text)
-                    };
-                    text.push_str(&delta);
-                    send(json!({"type": "transcript.text.delta", "delta": delta}));
-                })
+                .decode_each_in(
+                    &loaded.pcm,
+                    hotwords.as_ref(),
+                    vad.as_ref(),
+                    loaded.requested.as_deref(),
+                    &mut |s| {
+                        let delta = if text.is_empty() {
+                            s.text
+                        } else {
+                            format!(" {}", s.text)
+                        };
+                        text.push_str(&delta);
+                        send(json!({"type": "transcript.text.delta", "delta": delta}));
+                    },
+                )
+                .map(|_| ())
                 .map_err(|e| (decode_code(&e), e.to_string()))
         }))
         .unwrap_or_else(|_| Err(("internal", "the decode panicked".to_string())));

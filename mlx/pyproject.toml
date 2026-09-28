@@ -6,7 +6,7 @@
 name = "naru-audio-mlx"
 version = "0.1.0"
 requires-python = "==3.12.*"
-dependencies = ["parakeet-mlx==0.5.2", "mlx-audio[tts]==0.5.6"]
+dependencies = ["parakeet-mlx==0.5.2", "mlx-audio[tts]==0.5.6", "mlx-whisper==0.4.3"]
 
 [tool.uv]
 # Only the dependencies are installed; the module sits next to the venv.

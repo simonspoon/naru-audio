@@ -70,6 +70,19 @@ def handle(header, samples):
         return {}
     if op == "stats":
         return {"active_bytes": FAKE_BYTES * len(loaded)}
+    if op == "transcribe" and header["model"] == "fake-whisper":
+        # Detects "de" unless told; words only when asked for.
+        segment = {"start": 0.0, "end": 0.5, "text": "hallo welt"}
+        answer = {"segments": [segment], "language": header.get("language", "de")}
+        if header.get("words"):
+            segment["words"] = [
+                {"start": 0.1, "end": 0.2, "text": "hallo"},
+                {"start": 0.3, "end": 0.5, "text": "welt"},
+            ]
+            answer["words"] = True
+            # A segment with text but no words must not fail the call.
+            answer["segments"].append({"start": 0.5, "end": 0.6, "text": "...", "words": []})
+        return answer
     if op == "transcribe":
         n = len(samples) // 4
         return {"segments": [{"start": 0.0, "end": n / 16000, "text": "fake %d" % n}]}
@@ -90,11 +103,12 @@ fn home() -> tempfile::TempDir {
     let models = dir.path().join("models");
     for (name, kind, backend, requires) in [
         ("fake-mlx", "stt", "mlx", vec!["fake-vad"]),
+        ("fake-whisper", "stt", "mlx", vec!["fake-vad"]),
         ("fake-vad", "vad", "sherpa-onnx", vec![]),
     ] {
         std::fs::create_dir_all(models.join(name)).unwrap();
         let manifest = json!({"model": {
-            "name": name, "kind": kind, "backend": backend, "languages": ["en"],
+            "name": name, "kind": kind, "backend": backend, "languages": ["en", "fr"],
             "requires": requires,
         }});
         std::fs::write(
@@ -186,8 +200,13 @@ async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
 }
 
 async fn transcribe(app: &Router) -> (StatusCode, Value) {
+    transcribe_with(app, "fake-mlx", &[]).await
+}
+
+async fn transcribe_with(app: &Router, model: &str, extra: &[(&str, &str)]) -> (StatusCode, Value) {
     let mut body = Vec::new();
-    for (name, value) in [("model", "fake-mlx"), ("vad", "false")] {
+    let fields = [("model", model), ("vad", "false")];
+    for &(name, value) in fields.iter().chain(extra) {
         body.extend_from_slice(
             format!(
                 "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
@@ -653,4 +672,62 @@ fn instructions_are_sent_as_instruct_only_to_a_model_that_instructs() {
     let header = sent("alloy");
     assert_eq!(header["instruct"], "A warm, husky woman. Speak slowly.");
     assert!(header.get("voice").is_none(), "{header}");
+}
+
+/// Whisper's language and word timestamps round-trip through the
+/// protocol: a requested language is passed to the sidecar and reported;
+/// without one, the sidecar's detected language is; a model that has no
+/// notion of a language keeps reporting the manifest's first.
+#[tokio::test]
+async fn a_whisper_model_reports_the_language_it_used_and_its_words() {
+    let runs = std::process::Command::new(PYTHON)
+        .args(["-c", ""])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !runs {
+        eprintln!("skipped: {PYTHON} does not run");
+        return;
+    }
+    let home = home();
+    let app = app(home.path());
+    let verbose = [("response_format", "verbose_json")];
+
+    let (status, body) = transcribe_with(&app, "fake-whisper", &verbose).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["text"], "hallo welt");
+    assert_eq!(body["language"], "de", "{body}");
+
+    let fr = [("response_format", "verbose_json"), ("language", "fr")];
+    let (status, body) = transcribe_with(&app, "fake-whisper", &fr).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["language"], "fr", "{body}");
+
+    let (status, body) = transcribe_with(&app, "fake-mlx", &verbose).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["language"], "en", "{body}");
+
+    // Words: from the model directly. `fake-mlx` answers text without
+    // any, which is unsupported; `fake-whisper` answers them.
+    let registry = Registry::open(home.path()).unwrap();
+    let load = |name: &str| {
+        let manifest = registry.pulled_manifest(name).unwrap();
+        naru_audio::backend::load_stt(&manifest, &home.path().join("models").join(name)).unwrap()
+    };
+    let pcm: Vec<f32> = (0..16_000)
+        .map(|i| (i as f32 / 16_000.0 * 440.0 * std::f32::consts::TAU).sin() * 0.3)
+        .collect();
+    let whisper = load("fake-whisper");
+    let (words, language) = whisper.decode_words_in(&pcm, None, None).unwrap();
+    assert_eq!(language.as_deref(), Some("de"));
+    let got: Vec<_> = words
+        .iter()
+        .map(|w| (w.text.as_str(), w.start, w.end))
+        .collect();
+    assert_eq!(got, [("hallo", 0.1, 0.2), ("welt", 0.3, 0.5)]);
+    let (_, language) = whisper.decode_words_in(&pcm, None, Some("fr")).unwrap();
+    assert_eq!(language.as_deref(), Some("fr"));
+    assert!(matches!(
+        load("fake-mlx").decode_words(&pcm, None),
+        Err(naru_audio::stt::SttError::WordTimestampsUnsupported)
+    ));
 }

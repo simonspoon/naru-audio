@@ -78,6 +78,10 @@ const BUILTIN: &[(&str, &str)] = &[
         "voxcpm2-8bit-mlx.toml",
         include_str!("../../catalog/voxcpm2-8bit-mlx.toml"),
     ),
+    (
+        "whisper-large-v3-turbo-mlx.toml",
+        include_str!("../../catalog/whisper-large-v3-turbo-mlx.toml"),
+    ),
 ];
 
 /// Derived files the registry knows how to generate (§3.2 `derive`).
@@ -621,7 +625,8 @@ mod tests {
                 "source-separation-spleeter-2stems-int8",
                 "speaker-diarization-en",
                 "speech-denoiser-gtcrn",
-                "voxcpm2-8bit-mlx"
+                "voxcpm2-8bit-mlx",
+                "whisper-large-v3-turbo-mlx"
             ]
         );
         for m in cat.models.values() {
@@ -652,6 +657,14 @@ mod tests {
         assert_eq!(mlx.model.backend, "mlx");
         assert_eq!(mlx.model.requires, ["silero-vad"]);
         assert_eq!(mlx.files.len(), 2);
+        let whisper = &cat.models["whisper-large-v3-turbo-mlx"];
+        assert_eq!(whisper.model.kind, Kind::Stt);
+        assert_eq!(whisper.model.backend, "mlx");
+        assert_eq!(whisper.model.requires, ["silero-vad"]);
+        assert_eq!(whisper.model.platforms, mlx.model.platforms);
+        assert_eq!(whisper.languages().unwrap().len(), 99);
+        assert_eq!(whisper.languages().unwrap()[0], "en");
+        assert_eq!(whisper.files.len(), 2);
         assert_eq!(cat.models["silero-vad"].model.kind, Kind::Vad);
     }
 
@@ -1003,6 +1016,7 @@ mod tests {
             "parakeet-tdt-0.6b-v2-int8",
             "parakeet-tdt-0.6b-v2-mlx",
             "silero-vad",
+            "whisper-large-v3-turbo-mlx",
         ] {
             assert!(
                 cat.models[name].prompt_format().is_none(),

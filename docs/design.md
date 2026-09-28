@@ -1261,7 +1261,7 @@ response and `meta.json`, naming the model and its licence — not a
 refusal: naru-audio ships no non-commercial model as a *default*, but
 still supports one, warned.
 
-### 8.4 Word timestamps: sherpa-onnx's own tokens, not a Whisper sidecar
+### 8.4 Word timestamps: sherpa-onnx's tokens, and mlx-whisper on MLX
 
 `POST /v1/audio/transcriptions` refuses `timestamp_granularities[]=word`
 (§2.2) because nothing in naru-audio produced word timestamps at all. This
@@ -1274,11 +1274,27 @@ marker (`stt::sherpa::merge_words`). `OfflineWhisperModelConfig::
 enable_token_timestamps` does not apply here — that field exists only for
 Whisper's attention-based timestamps; NeMo transducer models (Parakeet
 TDT) report per-token timestamps from the transducer's own frame
-alignment, with nothing to enable. Only `sherpa-onnx`'s Parakeet
-implements `decode_words`; the default is `Err(SttError::
-WordTimestampsUnsupported)`, so an MLX-backed request (the sidecar reports
-no per-token timestamps at all) gets a clear 400 naming a sherpa-onnx
-model to use instead — a deliberate scope cut, not an oversight: a Whisper
-MLX sidecar path (`mlx-whisper`) was the design's first idea, but Parakeet
-already loads through the daemon's one existing STT path and needs no new
-Python dependency, sidecar op or `uv.lock` change.
+alignment, with nothing to enable. Two backends implement
+word timestamps: `sherpa-onnx`'s Parakeet, and the MLX sidecar's
+`mlx-whisper` (naru task 1466, `whisper-large-v3-turbo-mlx`). The default
+is `Err(SttError::WordTimestampsUnsupported)`, so a request naming the MLX
+Parakeet (whose sidecar answer carries no words) still gets a clear 400
+naming a model to use instead.
+
+The Whisper path extends the sidecar protocol additively (§5.3,
+`protocol.py`): `transcribe` takes an optional `language` hint and
+`words: true`; the answer's segments then carry `words`, and it carries
+`language`, the one decoded in. The sidecar picks `mlx-whisper` for a model
+named `whisper*` (as it picks IndexTTS by name) and loads the pulled
+directory with `mlx_whisper.load_models.load_model`. The daemon still gates
+with Silero and decodes per utterance; each utterance's word times are
+offset by its slice's start. Without a `language` hint the first
+utterance's detected language is the hint for the rest. The trait grew two
+defaulted methods, `decode_each_in` and `decode_words_in`, taking that hint
+and returning the language used, so no other `SttModel` changes. The
+response's `language` (`/v1/audio/transcriptions` `verbose_json`, prep's
+`Transcript.language`) is the request's, else the detected one, else the
+manifest's first entry for a model with no notion of language. Prep's
+transcribe body takes an optional `language` to pass through. The cost is
+`mlx-whisper`'s dependency on `torch` (its tokenizer and timing code
+import it), which enlarges the sidecar's venv.

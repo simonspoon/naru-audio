@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::registry::manifest::Kind;
-use crate::stt::SttError;
+use crate::stt::{SttError, Word};
 
 /// The largest header either side accepts: `MAX_HEADER` in `protocol.py`.
 pub const MAX_HEADER: usize = 1 << 20;
@@ -39,6 +39,25 @@ pub const MAX_SAMPLES: usize = 16_000 * 60 * 60;
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// §5.3 restart backoff after a crash, in seconds.
 const BACKOFF: [u64; 3] = [1, 2, 4];
+
+/// A `transcribe` answer (`protocol.py`).
+#[derive(Debug, Default)]
+pub struct Transcription {
+    pub segments: Vec<TranscribedSegment>,
+    /// The language the model used: the request's, else the one it
+    /// detected. `None` for a model with no notion of one.
+    pub language: Option<String>,
+    /// The model reports word timestamps: the answer's `"words": true`.
+    /// A segment can still have none (punctuation only).
+    pub words: bool,
+}
+
+/// One segment of a [`Transcription`]; `words` are empty unless asked for.
+#[derive(Debug)]
+pub struct TranscribedSegment {
+    pub text: String,
+    pub words: Vec<Word>,
+}
 
 /// One frame: `header` with `"samples"` set to their count when there are
 /// samples. Over either cap is `InvalidInput`, and nothing is encoded.
@@ -262,28 +281,56 @@ impl Sidecar {
             .ok_or_else(|| SttError::Sidecar("`stats` has no active_bytes".to_string()))
     }
 
-    /// The texts of the segments `model` transcribes `samples` (16 kHz) to.
+    /// What `model` transcribes `samples` (16 kHz) to. `language` is the
+    /// caller's hint (a model that has no notion of one ignores it); `words`
+    /// asks for word timestamps, which only the Whisper model reports.
+    /// Times are seconds into `samples`.
     pub fn transcribe(
         self: &Arc<Self>,
         model: &str,
         samples: &[f32],
-    ) -> Result<Vec<String>, SttError> {
+        language: Option<&str>,
+        words: bool,
+    ) -> Result<Transcription, SttError> {
         let mut state = self.lock();
         if state.process.is_none() {
             self.start(&mut state)?;
         }
-        let answer = self.request(
-            &mut state,
-            json!({"op": "transcribe", "model": model}),
-            Some(samples),
-        )?;
-        Ok(answer["segments"]
+        let mut request = json!({"op": "transcribe", "model": model});
+        if let Some(language) = language {
+            request["language"] = json!(language);
+        }
+        if words {
+            request["words"] = json!(true);
+        }
+        let answer = self.request(&mut state, request, Some(samples))?;
+        let segments = answer["segments"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|s| s["text"].as_str())
-            .map(str::to_string)
-            .collect())
+            .filter_map(|s| {
+                Some(TranscribedSegment {
+                    text: s["text"].as_str()?.to_string(),
+                    words: s["words"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|w| {
+                            Some(Word {
+                                start: w["start"].as_f64()?,
+                                end: w["end"].as_f64()?,
+                                text: w["text"].as_str()?.to_string(),
+                            })
+                        })
+                        .collect(),
+                })
+            })
+            .collect();
+        Ok(Transcription {
+            segments,
+            language: answer["language"].as_str().map(str::to_string),
+            words: answer["words"].as_bool() == Some(true),
+        })
     }
 
     /// Synthesises with `model`: `request` is the `synth` header's other
