@@ -168,8 +168,8 @@ export function mount(view, params) {
     wireDrag(endHandle, 'end', duration);
     waveWrap.append(
       el('div', { style: 'display:flex;justify-content:space-between;color:var(--muted);font-size:10px' }, [
-        `${(trimEnd - trimStart).toFixed(1)} s selected`,
-        'drag the cyan handles to trim',
+        el('span', {}, [`${(trimEnd - trimStart).toFixed(1)} s selected`]),
+        el('span', {}, ['drag the cyan handles to trim']),
       ]),
     );
   }
