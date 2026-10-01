@@ -100,6 +100,11 @@ const ASSETS: &[Asset] = &[
         content_type: "text/javascript; charset=utf-8",
         bytes: include_bytes!("../admin/js/samples.mjs"),
     },
+    Asset {
+        path: "js/studio.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../admin/js/studio.mjs"),
+    },
 ];
 
 const INDEX: &[u8] = include_bytes!("../admin/index.html");

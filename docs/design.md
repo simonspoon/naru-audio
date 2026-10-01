@@ -1262,7 +1262,9 @@ are ignored. When absent the flags build the default chain
 enabled steps only. The sample's JSON gains `steps` (empty for a sample made
 before steps existed) and `analysis` (`null` likewise), both persisted in
 `meta.json`; `engines`/`warnings` are as before, for the model-backed steps
-that ran.
+that ran. An optional `transcript` string is stored as the sample's
+`transcript.txt` in place of the clip's words in the range (the studio's
+corrected, as-spoken text).
 
 `analysis` is `{integrated_lufs, peak_dbfs, noise_floor_dbfs, speech_secs,
 duration_secs}` of the finished audio. `integrated_lufs` is ITU-R BS.1770-4

@@ -618,6 +618,9 @@ struct ProcessRequest {
     /// When present it defines the chain and the four flags above (and the
     /// two model names) are ignored.
     steps: Option<Vec<Step>>,
+    /// The sample's transcript as the caller corrected it; replaces the
+    /// clip's words in the range (`transcript.txt`) when present.
+    transcript: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -854,7 +857,10 @@ pub(super) async fn create_sample(
 
             prep::write_wav(&dir.join(prep::CLEAN_WAV), &clean)?;
 
-            let transcript_txt = words_in_range(&home, &clip_id, start, end).unwrap_or_default();
+            let transcript_txt = match req.transcript.as_deref().map(str::trim) {
+                Some(text) if !text.is_empty() => text.to_string(),
+                _ => words_in_range(&home, &clip_id, start, end).unwrap_or_default(),
+            };
             std::fs::write(dir.join(prep::TRANSCRIPT_TXT), transcript_txt)
                 .map_err(|e| PrepError::Io(e.to_string()))?;
 

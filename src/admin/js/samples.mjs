@@ -3,7 +3,8 @@
 // upload into a model-agnostic clean clip. Library view lists what's
 // already prepped (name, length, cleaned-or-raw); "+ new clip" walks
 // upload -> transcript (words + speakers) -> crop (click words or drag the
-// waveform) -> speaker -> isolate + clean -> A/B preview -> keep/discard.
+// waveform) -> speaker -> name -> Sample Studio (`studio.mjs`), which owns the
+// cleaning chain, the A/B preview and saving the clone sample.
 //
 // Exposes `window.naruAdmin.samples.loadFile(file)` so a headless test
 // without a file picker can drive the upload path directly.
@@ -11,9 +12,8 @@
 // `#samples?clip=<id>&return=clone&model=<model>` (naru task 1463): the
 // clone tab routes a raw drop/recording here first instead of trimming it
 // itself. `clip` opens the prep flow directly on that already-uploaded
-// clip (reusing `loadClipWave`/`runTranscribe`, no re-upload); once the
-// user keeps the processed sample, `return=clone` sends them back to
-// `#clone?model=<model>&sample=<new id>` instead of the library.
+// clip (reusing `loadClipWave`/`runTranscribe`, no re-upload); `model` rides
+// along to the studio so its "use as clone sample" returns to that model.
 
 import { getJson, postJson, request, del } from './api.mjs';
 import { el, toast, decodeWav, waveformSvg, peaks, playButton } from './ui.mjs';
@@ -47,9 +47,8 @@ export function mount(view, params) {
   let mode = 'library'; // 'library' | 'prep'
   let selectedId = params.sample ?? null;
   let renameValue = '';
-  // Set when we arrived from the clone tab's raw-upload hand-off: keeping
-  // the processed sample sends the user back there instead of the library.
-  const returnTo = params.return === 'clone' ? { model: params.model ?? null } : null;
+  // The clone tab's model, handed on to the studio (see header).
+  const cloneModel = params.model ?? null;
 
   // ---- prep-flow state ------------------------------------------------------
   let clip = null; // ClipMeta json
@@ -59,9 +58,7 @@ export function mount(view, params) {
   let wordAnchor = null;
   let range = null; // {start, end} in seconds, the crop actually used
   let selectedSpeaker = null;
-  let flags = { isolate: true, denoise: true, trim_silence: true, normalize: true };
   let sampleName = '';
-  let created = null; // SampleMeta json once POST /v1/audio/samples has run
   let busy = false;
   // Bumped by every entry point into the prep flow (startPrep, loadFile,
   // startPrepForClip) so a stale continuation — e.g. params.clip's own
@@ -163,6 +160,7 @@ export function mount(view, params) {
       el('div', { class: 'lab', style: 'margin-top:10px' }, ['A/B PREVIEW']),
       playRow(() => rawUrl, 'raw crop'),
       playRow(() => cleanUrl, 'cleaned'),
+      el('button', { class: 'big', onclick: () => openStudio(s.id, false) }, ['OPEN IN SAMPLE STUDIO']),
       el('div', { class: 'lab', style: 'margin-top:10px' }, ['RENAME']),
       el('div', { class: 'row' }, [
         renameInput,
@@ -178,6 +176,13 @@ export function mount(view, params) {
     renameValue = '';
     renderList();
     renderSide();
+  }
+
+  /** `draft`: the sample was just made for the studio, which replaces it
+   * with the final one when the user saves. */
+  function openStudio(id, draft) {
+    const modelPart = cloneModel ? `&model=${encodeURIComponent(cloneModel)}` : '';
+    location.hash = `#studio?sample=${encodeURIComponent(id)}${draft ? '&draft=1' : ''}${modelPart}`;
   }
 
   async function renameSample(s) {
@@ -218,9 +223,7 @@ export function mount(view, params) {
     wordAnchor = null;
     range = null;
     selectedSpeaker = null;
-    flags = { isolate: true, denoise: true, trim_silence: true, normalize: true };
     sampleName = '';
-    created = null;
     busy = false;
   }
 
@@ -271,18 +274,6 @@ export function mount(view, params) {
     mode = 'library';
     renderList();
     refresh();
-  }
-
-  /** "Keep" on a freshly processed sample: back to the library normally,
-   * or back to the clone tab with this sample preselected when we arrived
-   * via its raw-upload hand-off (naru task 1463). */
-  function keepSample() {
-    if (returnTo && created) {
-      const modelPart = returnTo.model ? `model=${encodeURIComponent(returnTo.model)}&` : '';
-      location.hash = `#clone?${modelPart}sample=${encodeURIComponent(created.id)}`;
-      return;
-    }
-    backToLibrary();
   }
 
   async function loadFile(file) {
@@ -468,17 +459,6 @@ export function mount(view, params) {
 
   // ---- prep flow: 5. isolate + clean -----------------------------------------
 
-  function flagCheck(key, label) {
-    return el('label', { class: 'chk' }, [
-      el('input', {
-        type: 'checkbox',
-        checked: flags[key] || undefined,
-        onchange: (e) => (flags[key] = e.target.checked),
-      }),
-      label,
-    ]);
-  }
-
   async function runProcess() {
     if (!clip || !range) {
       toast('crop a range first', true);
@@ -491,52 +471,23 @@ export function mount(view, params) {
     }
     busy = true;
     renderPrep();
+    let created;
     try {
+      // No `steps`: the server builds its default chain, which the studio then edits.
       created = await postJson('/v1/audio/samples', {
         clip_id: clip.id,
         name,
         start: range.start,
         end: range.end,
         speaker: selectedSpeaker,
-        ...flags,
       });
-      toast(`${name} processed`);
     } catch {
-      created = null;
+      busy = false;
+      renderPrep();
+      return;
     }
     busy = false;
-    renderPrep();
-  }
-
-  function renderPreview() {
-    if (!created) return null;
-    const cleanUrl = `/v1/audio/samples/${encodeURIComponent(created.id)}/audio?variant=clean`;
-    const rawUrl = `/v1/audio/samples/${encodeURIComponent(created.id)}/audio?variant=cropped`;
-    return el('div', { class: 'step' }, [
-      el('span', { class: 'num' }, ['6']),
-      el('div', { style: 'flex:1' }, [
-        el('div', { class: 'lab' }, ['A/B PREVIEW']),
-        playRow(() => rawUrl, 'raw crop'),
-        playRow(() => cleanUrl, 'cleaned'),
-        created.warnings?.length ? el('div', { class: 'warn' }, [created.warnings.join('; ')]) : null,
-        el('div', { style: 'display:flex;gap:8px;margin-top:8px' }, [
-          el('button', { class: 'big', style: 'margin:0', onclick: keepSample }, ['✓ KEEP IN LIBRARY']),
-          el(
-            'button',
-            {
-              class: 'big r',
-              style: 'margin:0',
-              onclick: async () => {
-                await del(`/v1/audio/samples/${encodeURIComponent(created.id)}`).catch(() => {});
-                created = null;
-                renderPrep();
-              },
-            },
-            ['✕ DISCARD, REDO'],
-          ),
-        ]),
-      ]),
-    ]);
+    openStudio(created.id, true);
   }
 
   function renderPrep() {
@@ -591,7 +542,7 @@ export function mount(view, params) {
             el('div', { style: 'flex:1' }, [el('div', { class: 'lab' }, ['SPEAKER']), renderSpeakerChips()]),
           ])
         : null,
-      transcript && !created
+      transcript
         ? el('div', { class: 'step' }, [
             el('span', { class: 'num' }, ['5']),
             el('div', { style: 'flex:1;display:flex;gap:14px;align-items:center;flex-wrap:wrap' }, [
@@ -603,19 +554,14 @@ export function mount(view, params) {
                   oninput: (e) => (sampleName = e.target.value),
                 }),
               ]),
-              flagCheck('isolate', 'isolate'),
-              flagCheck('denoise', 'denoise'),
-              flagCheck('trim_silence', 'trim silence'),
-              flagCheck('normalize', 'normalize'),
               el(
                 'button',
                 { class: 'big', style: 'margin:0 0 0 auto;max-width:220px', disabled: busy || undefined, onclick: runProcess },
-                [busy ? 'working…' : '▶ ISOLATE + CLEAN'],
+                [busy ? 'working…' : '▶ OPEN IN SAMPLE STUDIO'],
               ),
             ]),
           ])
         : null,
-      renderPreview(),
       el('button', { class: 'btn x', style: 'margin-top:10px', onclick: backToLibrary }, ['‹ back to library']),
     ]);
   }

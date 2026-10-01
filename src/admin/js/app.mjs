@@ -17,8 +17,9 @@ import * as clone from './clone.mjs';
 import * as design from './design.mjs';
 import * as playground from './playground.mjs';
 import * as samples from './samples.mjs';
+import * as studio from './studio.mjs';
 
-const TABS = { overview, models, voices, clone, design, playground, samples };
+const TABS = { overview, models, voices, clone, design, playground, samples, studio };
 const DEFAULT_TAB = 'overview';
 const POLL_MS = 3000;
 

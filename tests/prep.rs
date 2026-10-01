@@ -783,6 +783,41 @@ async fn steps_array_defines_the_chain_and_ignores_the_flags() {
 }
 
 #[tokio::test]
+async fn create_sample_stores_a_corrected_transcript() {
+    let home = home();
+    let clip = uploaded_clip(home.path()).await;
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/samples",
+        json!({
+            "clip_id": clip, "name": "s", "start": 0.0, "end": 0.4,
+            "steps": [{"type": "highpass"}],
+            "transcript": "zero point fifteen um",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["transcript"], "zero point fifteen um");
+    let id = body["id"].as_str().unwrap();
+    let (_, got) = get(home.path(), &format!("/v1/audio/samples/{id}")).await;
+    assert_eq!(got["transcript"], "zero point fifteen um");
+
+    // A blank transcript is not a correction: the clip's words (none here) are used.
+    let (status, blank) = post_json(
+        home.path(),
+        "/v1/audio/samples",
+        json!({
+            "clip_id": clip, "name": "s", "start": 0.0, "end": 0.4,
+            "steps": [{"type": "highpass"}],
+            "transcript": "  ",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{blank}");
+    assert_eq!(blank["transcript"], "");
+}
+
+#[tokio::test]
 async fn legacy_flags_build_the_default_chain_and_report_it() {
     let home = home();
     let clip = uploaded_clip(home.path()).await;
