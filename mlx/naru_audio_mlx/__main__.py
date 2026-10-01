@@ -123,6 +123,8 @@ def transcribe_whisper(model, header, samples):
     ModelHolder.model, ModelHolder.model_path = model, name
     options = {}
     if header.get("verbatim"):
+        # Without conditioning on previous text, the prompt only biases the
+        # first 30 s window of each VAD chunk.
         options = {
             "initial_prompt": VERBATIM_PROMPT,
             "condition_on_previous_text": False,

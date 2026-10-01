@@ -14,7 +14,9 @@
 //! - `$5`: "five dollars" ("$1" "one dollar"); `$2.50`: "two dollars and
 //!   fifty cents". `50%`: "fifty percent".
 //! - Ordinals `3rd` `21st` `100th`: "third" "twenty-first" "one hundredth".
-//! - Ranges `10-20`: "ten to twenty" (each end read like any integer).
+//! - Ranges `10-20`: "ten to twenty" (each end read like any integer), only
+//!   when both ends have at most 4 digits, the left is below the right, and
+//!   it is not phone-like (3 digits, then 4): "555-1234" and "24-7" stay.
 //! - Integers, with or without `,` grouping: cardinal, no "and"
 //!   ("1,000" "one thousand"; "123" "one hundred twenty-three"). More than
 //!   15 digits, or a leading zero ("007"), is read digit by digit.
@@ -25,8 +27,8 @@
 //!   "fifteen hundred", which is also how it is spoken as often as not.
 //! - Decimals `2.5`: "two point five"; the fraction is read digit by digit
 //!   with 0 as "zero" ("2.05" "two point zero five").
-//! - Versions: three or more dotted parts (`3.0.1`), or any dotted number
-//!   after a `v` (`v2.1`, `v2`), are read part by part joined by "point",
+//! - Versions: three or more dotted parts (`3.0.1`), or two or more after a
+//!   `v` (`v2.1`; bare "v8" stays), are read part by part joined by "point",
 //!   a part of exactly "0" being "oh" ("3.0.1" "three point oh point one"),
 //!   and the `v` forms are prefixed "version" ("v2.1" "version two point
 //!   one"). A multi-digit part is a cardinal, one with a leading zero is
@@ -152,10 +154,7 @@ fn core_spoken(core: &str) -> Option<String> {
     if let Some(rest) = core.strip_prefix('-')
         && rest.starts_with(|c: char| c.is_ascii_digit())
     {
-        return Some(format!(
-            "minus {}",
-            core_spoken(rest).unwrap_or(rest.into())
-        ));
+        return Some(format!("minus {}", signed_rest(rest)));
     }
     if let Some(rest) = core.strip_prefix('$')
         && rest.starts_with(|c: char| c.is_ascii_digit())
@@ -170,7 +169,7 @@ fn core_spoken(core: &str) -> Option<String> {
     if let Some(rest) = core.strip_prefix('+')
         && rest.starts_with(|c: char| c.is_ascii_digit())
     {
-        return Some(format!("plus {}", core_spoken(rest).unwrap_or(rest.into())));
+        return Some(format!("plus {}", signed_rest(rest)));
     }
     for (suffix, word) in [('%', "percent"), ('+', "plus")] {
         if let Some(num) = core.strip_suffix(suffix)
@@ -184,6 +183,12 @@ fn core_spoken(core: &str) -> Option<String> {
         return Some(spoken);
     }
     if let Some((a, b)) = core.split_once('-')
+        && digits(a)
+        && digits(b)
+        && a.len() <= 4
+        && b.len() <= 4
+        && !(a.len() == 3 && b.len() == 4)
+        && a.parse::<u64>().ok() < b.parse::<u64>().ok()
         && let (Some(a), Some(b)) = (integer(a, true), integer(b, true))
     {
         return Some(format!("{a} to {b}"));
@@ -198,6 +203,17 @@ fn core_spoken(core: &str) -> Option<String> {
         return Some(format!("{whole} point {}", digit_words(frac)));
     }
     integer(core, true)
+}
+
+/// What follows a `-` or `+` sign: a plain integer is a quantity, never a
+/// year ("-1990" "minus one thousand nine hundred ninety").
+fn signed_rest(rest: &str) -> String {
+    if digits(rest) {
+        integer(rest, false)
+    } else {
+        core_spoken(rest)
+    }
+    .unwrap_or_else(|| rest.into())
 }
 
 /// `5` "five dollars", `2.50` "two dollars and fifty cents".
@@ -298,7 +314,7 @@ fn version(core: &str) -> Option<String> {
         None => (false, core),
     };
     let parts: Vec<&str> = nums.split('.').collect();
-    if !parts.iter().all(|p| digits(p)) || !(prefixed || parts.len() >= 3) {
+    if !parts.iter().all(|p| digits(p)) || parts.len() < if prefixed { 2 } else { 3 } {
         return None;
     }
     let spoken: Vec<String> = parts
@@ -424,7 +440,6 @@ mod tests {
             ("2100", "two thousand one hundred"),
             ("999", "nine hundred ninety-nine"),
             ("v2.1", "version two point one"),
-            ("V2", "version two"),
             ("3.0.1", "three point oh point one"),
             ("v10.04.2", "version ten point zero four point two"),
             ("3rd", "third"),
@@ -448,6 +463,8 @@ mod tests {
             ("+5", "plus five"),
             ("3+", "three plus"),
             ("-5", "minus five"),
+            ("-1990", "minus one thousand nine hundred ninety"),
+            ("+1999", "plus one thousand nine hundred ninety-nine"),
             ("10-20", "ten to twenty"),
             ("1999-2005", "nineteen ninety-nine to two thousand five"),
         ] {
@@ -481,6 +498,13 @@ mod tests {
             "v",
             "a.b.c",
             "$x",
+            "555-1234",
+            "24-7",
+            "20-10",
+            "10-10",
+            "V8",
+            "v6",
+            "12345-67",
         ] {
             assert_eq!(spoken_form(w), w, "{w}");
         }
