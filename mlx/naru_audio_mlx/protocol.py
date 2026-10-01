@@ -15,7 +15,9 @@ Requests, one at a time, each answered before the next is sent:
     {"op": "unload", "model": NAME}
     {"op": "transcribe", "model": NAME, "samples": S, "language": CODE
      (optional, a language hint), "words": true (optional, word
-     timestamps)} + S samples at 16 kHz
+     timestamps), "verbatim": true (optional, Whisper keeps fillers and
+     repetitions: a filler-rich initial prompt, no conditioning on
+     previous text; Parakeet ignores it)} + S samples at 16 kHz
     {"op": "synth", "model": NAME, "text": TEXT, "voice": ID (optional),
      "speed": X, "reference": PATH (optional), "reference_text": TEXT
      (optional, the reference's transcript), "instruct": TEXT (optional,

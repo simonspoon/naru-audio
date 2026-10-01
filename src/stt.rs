@@ -10,6 +10,7 @@ pub mod engine;
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 pub(crate) mod mlx;
 pub(crate) mod sherpa;
+pub mod spoken;
 pub mod vad;
 pub mod vocabulary;
 
@@ -102,6 +103,21 @@ pub trait SttModel: Send + Sync {
         _language: Option<&str>,
     ) -> Result<(Vec<Word>, Option<String>), SttError> {
         self.decode_words(pcm16k, vad).map(|words| (words, None))
+    }
+
+    /// [`SttModel::decode_words_in`] that keeps fillers, false starts and
+    /// repetitions when `verbatim` and the backend can (the MLX Whisper);
+    /// the `bool` answered is whether the decode was verbatim. The default
+    /// is a normal decode, answered `false`.
+    fn decode_words_verbatim(
+        &self,
+        pcm16k: &[f32],
+        vad: Option<&VadConfig>,
+        language: Option<&str>,
+        _verbatim: bool,
+    ) -> Result<(Vec<Word>, Option<String>, bool), SttError> {
+        self.decode_words_in(pcm16k, vad, language)
+            .map(|(words, language)| (words, language, false))
     }
 
     /// The Silero model streaming sessions segment with (§2.4); `None`

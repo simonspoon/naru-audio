@@ -7,7 +7,7 @@ from unittest import mock
 
 import numpy as np
 
-from naru_audio_mlx.__main__ import transcribe_whisper, whisper_answer
+from naru_audio_mlx.__main__ import VERBATIM_PROMPT, transcribe_whisper, whisper_answer
 
 RESULT = {
     "text": " Bonjour Simon.",
@@ -90,6 +90,30 @@ class WhisperTest(unittest.TestCase):
         self.assertIs(seen["word_timestamps"], True)
         self.assertIs(seen["model"], model)
         self.assertIsNone(ModelHolder.model)
+        self.assertNotIn("initial_prompt", seen)
+        self.assertNotIn("condition_on_previous_text", seen)
+
+    def test_verbatim_passes_a_filler_prompt_and_stops_conditioning(self):
+        samples = np.zeros(1600, dtype="<f4").tobytes()
+        seen = {}
+
+        def fake(audio, **kwargs):
+            seen.update(kwargs)
+            return RESULT
+
+        with mock.patch("mlx_whisper.transcribe", fake):
+            transcribe_whisper(
+                object(),
+                {"model": "whisper-x", "words": True, "verbatim": True},
+                samples,
+            )
+        self.assertEqual(seen["initial_prompt"], VERBATIM_PROMPT)
+        self.assertIn("um", seen["initial_prompt"].lower())
+        self.assertIs(seen["condition_on_previous_text"], False)
+        self.assertIs(seen["word_timestamps"], True)
+        # Disfluencies are never suppressed: no suppression override at all.
+        self.assertNotIn("suppress_tokens", seen)
+        self.assertNotIn("suppress_blank", seen)
 
 
 if __name__ == "__main__":

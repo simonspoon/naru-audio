@@ -74,6 +74,7 @@ impl SttModel for MlxStt {
                 &pcm16k[from..to],
                 language.as_deref(),
                 false,
+                false,
             )?;
             language = language.or(done.language);
             let text = done
@@ -103,6 +104,19 @@ impl SttModel for MlxStt {
         vad: Option<&VadConfig>,
         language: Option<&str>,
     ) -> Result<(Vec<Word>, Option<String>), SttError> {
+        self.decode_words_verbatim(pcm16k, vad, language, false)
+            .map(|(words, language, _)| (words, language))
+    }
+
+    /// [`SttModel::decode_words_in`] with the sidecar's `"verbatim"` set;
+    /// a model that answers words answers verbatim too.
+    fn decode_words_verbatim(
+        &self,
+        pcm16k: &[f32],
+        vad: Option<&VadConfig>,
+        language: Option<&str>,
+        verbatim: bool,
+    ) -> Result<(Vec<Word>, Option<String>, bool), SttError> {
         let rate = TARGET_SAMPLE_RATE as f64;
         let mut language = language.map(str::to_string);
         let mut words = Vec::new();
@@ -112,6 +126,7 @@ impl SttModel for MlxStt {
                 &pcm16k[from..to],
                 language.as_deref(),
                 true,
+                verbatim,
             )?;
             language = language.or(done.language);
             if !done.words {
@@ -128,7 +143,7 @@ impl SttModel for MlxStt {
                 }));
             }
         }
-        Ok((words, language))
+        Ok((words, language, verbatim))
     }
 
     fn decode_words(&self, pcm16k: &[f32], vad: Option<&VadConfig>) -> Result<Vec<Word>, SttError> {

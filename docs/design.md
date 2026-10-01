@@ -1236,7 +1236,9 @@ $NARU_AUDIO_HOME/prep/
     cropped.wav          the same span before cleaning, for A/B
     transcript.txt       the cropped span's words, joined (surfaced as
                           the sample's JSON "transcript" field, null if
-                          the file is absent)
+                          the file is absent); after §8.5's transcribe,
+                          the verbatim spoken text instead
+    transcript.json       §8.5's verbatim transcript, once transcribed
     meta.json             source clip, range, speaker, engines + licences, name
 ```
 
@@ -1298,3 +1300,49 @@ manifest's first entry for a model with no notion of language. Prep's
 transcribe body takes an optional `language` to pass through. The cost is
 `mlx-whisper`'s dependency on `torch` (its tokenizer and timing code
 import it), which enlarges the sidecar's venv.
+
+### 8.5 Verbatim sample transcript (naru task 1569)
+
+A clone prompt's text must match its audio, fillers and all, so
+`POST /v1/audio/samples/{id}/transcribe` transcribes the sample's
+`clean.wav` verbatim. Body (all optional): `{"stt_model", "language",
+"verbatim": true}`. It writes `samples/<id>/transcript.json` and replaces
+`transcript.txt` with `spoken_text`, so the clone screen's prefill is the
+spoken form. The answer, and `GET /v1/audio/samples/{id}/transcript` (409
+`transcript_not_run` before the first POST; 404 `sample_not_found`):
+
+```
+{"words": [{"start", "end", "text", "spoken", "differs", "filler"}],
+ "text": "...", "spoken_text": "...", "language", "stt_model",
+ "verbatim": true, "verbatim_supported": true}
+```
+
+`text` is the words as written, `spoken_text` as spoken. `differs` is a
+word whose spoken form is not its written one (case and punctuation
+ignored: "42." is "forty-two."), `filler` an um/uh/er/ah/hmm/mm-type
+word. The model must report word timestamps (§8.4), as for a clip.
+
+*Decoding.* The sidecar's `transcribe` takes `"verbatim": true`
+(`protocol.py`): `mlx-whisper` gets a filler-rich `initial_prompt` ("Um,
+uh, so, I- I mean, like, you know, hmm. Uh-huh."), which Whisper continues
+in the style of, and `condition_on_previous_text=False`, which stops a
+repetition loop feeding itself. No token suppression is touched, so
+fillers are not removed. `SttModel::decode_words_verbatim` (default: a
+normal decode, answered `false`) carries it; only the MLX Whisper
+overrides it. A model that cannot (sherpa Parakeet, which already emits
+what it hears, without the cleaning Whisper applies, but cannot be told to)
+answers `verbatim_supported: false` and the request is not refused. This
+is a bias, not a guarantee: Whisper may still drop a filler.
+
+*Spoken form.* `stt::spoken` converts per word, leaving leading and
+trailing punctuation outside: integers and `,`-grouped numbers to
+cardinals ("1,000" "one thousand"); a bare 1100..=2099 as a year ("1999"
+"nineteen ninety-nine", "2025" "twenty twenty-five", 2000..=2009 "two
+thousand [five]"); decimals digit by digit after "point" ("2.5" "two point
+five"); versions, three or more dotted parts or any `v`-prefixed ("v2.1"
+"version two point one", "3.0.1" "three point oh point one", a part of
+exactly 0 being "oh"); ordinals ("3rd" "third"); `%` `$` `&` `+` `@` (also
+"$2.50" "two dollars and fifty cents", "50%", "@name", "-5") and ranges
+("10-20" "ten to twenty"). Anything else, such as "AT&T", "3D" or "3:30",
+is left as written. The year rule is a guess: "1500" the quantity reads
+"fifteen hundred".

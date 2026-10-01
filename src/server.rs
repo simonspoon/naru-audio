@@ -5,6 +5,7 @@
 mod admin;
 mod prep;
 mod pulls;
+mod sample_transcript;
 mod speech;
 mod stream;
 mod transcriptions;
@@ -128,6 +129,14 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .delete(prep::delete_sample),
         )
         .route("/v1/audio/samples/{id}/audio", get(prep::sample_audio))
+        .route(
+            "/v1/audio/samples/{id}/transcribe",
+            post(sample_transcript::transcribe_sample),
+        )
+        .route(
+            "/v1/audio/samples/{id}/transcript",
+            get(sample_transcript::get_sample_transcript),
+        )
         .route("/api/pull", post(pull))
         .route("/api/pulls", get(pulls_list))
         .route("/api/pulls/{name}", delete(pulls_cancel))

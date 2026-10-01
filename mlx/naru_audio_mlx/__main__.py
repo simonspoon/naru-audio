@@ -101,9 +101,17 @@ def loaded(header):
     return model
 
 
+# Whisper continues the style of its prompt, so a prompt full of fillers and
+# false starts makes it transcribe them instead of cleaning them up.
+VERBATIM_PROMPT = "Um, uh, so, I- I mean, like, you know, hmm. Uh-huh."
+
+
 def transcribe_whisper(model, header, samples):
     """One utterance through mlx-whisper: `header["language"]` when given,
-    else Whisper detects it; word timestamps when `header["words"]`."""
+    else Whisper detects it; word timestamps when `header["words"]`.
+    `header["verbatim"]` biases it to keep fillers and repetitions: a
+    filler-rich `initial_prompt`, and no conditioning on its own previous
+    text, which is what lets a hallucinated loop carry on."""
     import mlx_whisper
     from mlx_whisper.transcribe import ModelHolder
 
@@ -113,12 +121,19 @@ def transcribe_whisper(model, header, samples):
     # for the call, and empty it after, so an unload frees the weights.
     name = header["model"]
     ModelHolder.model, ModelHolder.model_path = model, name
+    options = {}
+    if header.get("verbatim"):
+        options = {
+            "initial_prompt": VERBATIM_PROMPT,
+            "condition_on_previous_text": False,
+        }
     try:
         result = mlx_whisper.transcribe(
             audio,
             path_or_hf_repo=name,
             word_timestamps=bool(header.get("words")),
             language=header.get("language"),
+            **options,
         )
     finally:
         ModelHolder.model, ModelHolder.model_path = None, None

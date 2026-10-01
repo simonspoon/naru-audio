@@ -283,14 +283,16 @@ impl Sidecar {
 
     /// What `model` transcribes `samples` (16 kHz) to. `language` is the
     /// caller's hint (a model that has no notion of one ignores it); `words`
-    /// asks for word timestamps, which only the Whisper model reports.
-    /// Times are seconds into `samples`.
+    /// asks for word timestamps, which only the Whisper model reports;
+    /// `verbatim` asks Whisper to keep fillers and repetitions. Times are
+    /// seconds into `samples`.
     pub fn transcribe(
         self: &Arc<Self>,
         model: &str,
         samples: &[f32],
         language: Option<&str>,
         words: bool,
+        verbatim: bool,
     ) -> Result<Transcription, SttError> {
         let mut state = self.lock();
         if state.process.is_none() {
@@ -302,6 +304,9 @@ impl Sidecar {
         }
         if words {
             request["words"] = json!(true);
+        }
+        if verbatim {
+            request["verbatim"] = json!(true);
         }
         let answer = self.request(&mut state, request, Some(samples))?;
         let segments = answer["segments"]
