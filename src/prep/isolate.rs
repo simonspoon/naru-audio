@@ -165,6 +165,14 @@ mod ffi {
     }
 }
 
+/// Silence padded onto each end of the input to [`Isolator::vocals`].
+const EDGE_PAD_SECS: f64 = 0.5;
+
+/// `pad` samples at `in_rate`, as samples at `out_rate`.
+fn trim_len(pad: usize, in_rate: i32, out_rate: i32) -> usize {
+    (pad as f64 * out_rate as f64 / in_rate.max(1) as f64).round() as usize
+}
+
 #[derive(Debug)]
 pub enum IsolateError {
     MissingModel(PathBuf),
@@ -263,7 +271,24 @@ impl Isolator {
     /// duplicated into two identical channels before the call: the C++
     /// aborts the whole process (`exit(-1)`, not a recoverable error) on
     /// `num_channels: 1` (see this module's doc comment).
+    ///
+    /// The model's STFT blows up at both edges of its input (measured on a
+    /// real 10 s clip: samples near 0 and the end reach +40 dBFS, 100x the
+    /// input), so `pcm` is padded with [`EDGE_PAD_SECS`] of silence each side
+    /// and the same span is cut from the output, putting the artefacts
+    /// outside the returned audio.
     pub fn vocals(&self, pcm: &[f32], input_sample_rate: i32) -> Result<Vec<f32>, IsolateError> {
+        let pad = (input_sample_rate.max(0) as f64 * EDGE_PAD_SECS) as usize;
+        let mut padded = vec![0.0; pad];
+        padded.extend_from_slice(pcm);
+        padded.resize(pad + pcm.len() + pad, 0.0);
+        let out = self.separate(&padded, input_sample_rate)?;
+        let cut = trim_len(pad, input_sample_rate, self.output_sample_rate());
+        let end = out.len().saturating_sub(cut);
+        Ok(out[cut.min(end)..end].to_vec())
+    }
+
+    fn separate(&self, pcm: &[f32], input_sample_rate: i32) -> Result<Vec<f32>, IsolateError> {
         let channels: [*const f32; 2] = [pcm.as_ptr(), pcm.as_ptr()];
         // SAFETY: `channels` points at `pcm`, which outlives this call;
         // `pcm.len()` matches `num_samples` for both (identical) channels.
@@ -333,6 +358,12 @@ mod tests {
         std::fs::write(tmp.path().join(VOCALS_FILENAME), b"").unwrap();
         let err = Isolator::load(tmp.path()).err().expect("expected an error");
         assert!(matches!(err, IsolateError::MissingModel(_)), "{err}");
+    }
+
+    #[test]
+    fn padding_trims_to_the_output_rate() {
+        assert_eq!(trim_len(8000, 16_000, 44_100), 22_050);
+        assert_eq!(trim_len(0, 16_000, 44_100), 0);
     }
 
     #[test]
