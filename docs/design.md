@@ -1222,6 +1222,71 @@ same error `GET /v1/audio/transcriptions` gives for an unpulled STT
 model) — never a silent skip. Setting the flag `false` is the explicit
 skip.
 
+#### Step chains (`src/prep/pipeline.rs`, `src/prep/dsp.rs`)
+
+Past the crop, the cleaning is an ordered list of steps, each
+`{"type": "...", "enabled": true, ...params}`; every param has a serde
+default, unknown types and unknown params are 400s, and a value outside its
+range is a 400 `invalid_request` (`param: "steps"`) whose message names it
+(`steps[1].amount must be a number in 0..=1 ratio`). One table of ranges
+feeds both validation and `GET /v1/audio/prep/steps`, which returns every
+type's params (`default`, `min`, `max`, `unit`; `eq` also its `bands` item
+params) and the `default_chain`, so a UI builds its controls from the server.
+The crop (`start`/`end`/`speaker`) is not a step: the range defines the
+sample and is applied first. Steps run on 16 kHz mono `f32`; at most 32
+steps, at most 16 EQ bands. All DSP is pure Rust (hand-written biquads,
+WSOLA): no ffmpeg or other system dependency.
+
+| type | params (default) | implementation |
+|---|---|---|
+| `isolate` | `model`, `bleed` 0..1 (0) | Spleeter vocals; `bleed` mixes that fraction of the input back |
+| `denoise` | `model`, `amount` 0..1 (1) | GTCRN; `amount` is the wet/dry mix |
+| `trim_silence` | `threshold` 0.01..0.99 (0.2, the VAD default), `pad_ms` 0..2000 (0) | Silero spans; keeps `pad_ms` before the first / after the last span, clamped to the buffer |
+| `normalize` | `peak_db` (-1) | peak normalise |
+| `highpass` | `freq_hz` 20..1000 (80) | 4th-order Butterworth |
+| `eq` | `bands: [{kind: peak\|low_shelf\|high_shelf, freq_hz, gain_db, q}]` (none) | RBJ-cookbook biquads in order |
+| `deess` | `freq_hz` (6000), `threshold_db` (-30), `ratio` (4) | Linkwitz-Riley split; only the high band is attenuated by a peak-held detector |
+| `loudness` | `target_lufs` (-18), `peak_ceiling_db` (-1) | BS.1770-4 integrated loudness gain, then a 5 ms look-ahead limiter so peak <= ceiling (a peaky take can land under target) |
+| `compressor` | `threshold_db`, `ratio`, `attack_ms`, `release_ms`, `makeup_db` | feed-forward, dB-domain detector |
+| `pitch` | `semitones` -12..12 | WSOLA stretch + cubic resample: duration kept, **formants move with the pitch** (no formant preservation) |
+| `speed` | `rate` 0.5..2 | WSOLA, pitch preserved |
+| `telephone` | none | tanh saturation, then 300-3400 Hz 4th-order band-pass |
+| `reverb` | `room_size`, `wet` 0..1 | Schroeder (4 damped combs, 2 all-passes), level-matched to the dry RMS; output keeps the input length (tail cut) |
+
+`POST /v1/audio/samples` takes an optional `steps` array. When present it
+*is* the chain and the four flags (and `denoise_model`/`isolation_model`)
+are ignored. When absent the flags build the default chain
+`[isolate, denoise, trim_silence, normalize(-1)]`, each carrying its flag as
+`enabled`: audio identical to the former fixed chain. The 409
+`model_not_pulled` preflight (and the `silero-vad` check) is derived from the
+enabled steps only. The sample's JSON gains `steps` (empty for a sample made
+before steps existed) and `analysis` (`null` likewise), both persisted in
+`meta.json`; `engines`/`warnings` are as before, for the model-backed steps
+that ran.
+
+`analysis` is `{integrated_lufs, peak_dbfs, noise_floor_dbfs, speech_secs,
+duration_secs}` of the finished audio. `integrated_lufs` is ITU-R BS.1770-4
+(K-weighting biquads derived for 16 kHz from the standard's analogue
+prototype, 400 ms blocks at 75 % overlap, -70 LUFS absolute and -10 LU
+relative gates; a clip under 400 ms is one block). `peak_dbfs` is sample
+peak. `noise_floor_dbfs` is the 10th percentile of 50 ms frame RMS levels
+(speech has pauses, so the quietest tenth is the background). `speech_secs`
+is the sum of Silero spans, `null` if `silero-vad` is not pulled. Digital
+silence is `null`, never `-inf`.
+
+`POST /v1/audio/prep/clips/{id}/render` auditions a chain without creating a
+sample: body `{start?, end?, speaker?, steps, until?: N, solo?: N}`. No
+`until`/`solo`: crop + every enabled step. `until: N`: crop + steps `0..=N`.
+`solo: N`: crop + only step `N`. `until` with `solo`, or an index past the
+chain, is a 400. Disabled steps are skipped, except that `solo` applies its
+step even if disabled (soloing a step means hearing it). The response is an
+`audio/wav` body (16-bit, 16 kHz, mono) with the analysis in
+`x-naru-loudness-lufs`, `x-naru-peak-dbfs`, `x-naru-noise-floor-dbfs`,
+`x-naru-speech-secs` (a null value omits its header) and the whole struct as
+JSON in `x-naru-analysis`. 404 for an unknown clip, 409 `model_not_pulled`
+for a missing model, as `POST /v1/audio/samples` — but only the steps that
+run need theirs.
+
 ### 8.2 Storage
 
 ```
@@ -1237,7 +1302,8 @@ $NARU_AUDIO_HOME/prep/
     transcript.txt       the cropped span's words, joined (surfaced as
                           the sample's JSON "transcript" field, null if
                           the file is absent)
-    meta.json             source clip, range, speaker, engines + licences, name
+    meta.json             source clip, range, speaker, engines + licences, name,
+                          steps (the chain), analysis (measurements of clean.wav)
 ```
 
 `<id>` is a fresh opaque string ([`prep::new_id`]), not a client-chosen

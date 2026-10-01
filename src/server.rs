@@ -117,6 +117,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/audio/prep/clips/{id}/transcript",
             get(prep::get_transcript),
         )
+        .route("/v1/audio/prep/clips/{id}/render", post(prep::render_clip))
+        .route("/v1/audio/prep/steps", get(prep::list_steps))
         .route(
             "/v1/audio/samples",
             get(prep::list_samples).post(prep::create_sample),
