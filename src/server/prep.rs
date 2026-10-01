@@ -5,7 +5,8 @@
 //! blocking filesystem or model call runs in `spawn_blocking`, as
 //! `transcriptions` and `speech` do.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Json;
@@ -23,6 +24,7 @@ use super::{AppState, RequestId, manager_error, registry_error};
 use crate::backend;
 use crate::error::ApiError;
 use crate::prep::diarize::ClusterOptions;
+use crate::prep::pipeline::{self, Analysis, ModelSteps, Select, Step};
 use crate::prep::{
     self, ClipMeta, EngineUsed, PrepError, SampleMeta, SampleRange, SpeakerSpan, Transcript,
     TranscriptWord,
@@ -113,6 +115,8 @@ fn sample_json(home: &Path, m: &SampleMeta) -> Value {
         "warnings": m.warnings,
         "created_at": m.created_at,
         "transcript": transcript,
+        "steps": m.steps,
+        "analysis": m.analysis,
     })
 }
 
@@ -611,20 +615,159 @@ struct ProcessRequest {
     normalize: bool,
     denoise_model: Option<String>,
     isolation_model: Option<String>,
+    /// When present it defines the chain and the four flags above (and the
+    /// two model names) are ignored.
+    steps: Option<Vec<Step>>,
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// `POST /v1/audio/samples` (naru task 1461 §8, crop → isolate → denoise
-/// → trim → normalise): crops `clip_id` to `start..end` or, given
-/// `speaker` instead, to that cached diarized speaker's own span
-/// (`POST .../transcribe` must have run first); then isolates vocals from
-/// music/noise (Spleeter, via [`crate::prep::isolate`]'s hand-written
-/// FFI), denoises, trims silence and normalises, unless a flag turns a
-/// step off. Every step whose engine is not pulled fails with a 409
-/// naming it, unless its flag is `false`.
+/// The engines the enabled `steps` need, resolved up front so a missing
+/// model is a 409 before any work starts.
+struct Plan {
+    isolators: HashMap<String, Manifest>,
+    denoisers: HashMap<String, Manifest>,
+    vad_path: PathBuf,
+    vad_available: bool,
+}
+
+/// Resolves the models of `steps` (the ones that will run): each isolate or
+/// denoise step's model manifest (409 `model_not_pulled` if it is not
+/// pulled), and `silero-vad` for a trim_silence step. Resolving a manifest
+/// reads `pulled` and its `manifest.json` (`kind_manifest`) and the VAD check
+/// `stat`s a file, none of which belongs on the async runtime thread (naru
+/// task 1461 review), so it all runs in one `spawn_blocking`.
+async fn plan_models(st: &Arc<AppState>, req_id: &str, steps: Vec<Step>) -> Result<Plan, ApiError> {
+    let home = st.registry.home().to_path_buf();
+    let st2 = st.clone();
+    let plan = tokio::task::spawn_blocking(move || -> Result<Plan, ApiError> {
+        let mut plan = Plan {
+            isolators: HashMap::new(),
+            denoisers: HashMap::new(),
+            vad_path: home
+                .join("models")
+                .join("silero-vad")
+                .join(prep::VAD_FILENAME),
+            vad_available: false,
+        };
+        plan.vad_available = plan.vad_path.is_file();
+        for step in &steps {
+            match step {
+                Step::Isolate(s) => {
+                    let name = s.model.as_deref().unwrap_or(prep::DEFAULT_SEPARATION_MODEL);
+                    if !plan.isolators.contains_key(name) {
+                        let m = kind_manifest(&st2, name, Kind::Separation)?;
+                        plan.isolators.insert(name.to_string(), m);
+                    }
+                }
+                Step::Denoise(s) => {
+                    let name = s.model.as_deref().unwrap_or(prep::DEFAULT_DENOISE_MODEL);
+                    if !plan.denoisers.contains_key(name) {
+                        let m = kind_manifest(&st2, name, Kind::Denoise)?;
+                        plan.denoisers.insert(name.to_string(), m);
+                    }
+                }
+                Step::TrimSilence(_) if !plan.vad_available => {
+                    return Err(registry_error(crate::registry::RegistryError::NotPulled(
+                        "silero-vad".to_string(),
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(plan)
+    })
+    .await
+    .map_err(|e| internal(st, req_id, e.to_string()))??;
+    Ok(plan)
+}
+
+/// Runs the model-backed steps against the engines a [`Plan`] resolved,
+/// recording which engines ran and any licence warnings (`EngineUsed`).
+struct Runner<'a> {
+    home: &'a Path,
+    plan: &'a Plan,
+    engines: Vec<EngineUsed>,
+    warnings: Vec<String>,
+}
+
+impl Runner<'_> {
+    fn record(&mut self, stage: &str, model: &str, manifest: &Manifest) {
+        self.engines.push(EngineUsed {
+            stage: stage.to_string(),
+            model: model.to_string(),
+            license: manifest.model.license.clone(),
+            non_commercial: manifest.model.non_commercial,
+        });
+        if manifest.model.non_commercial {
+            self.warnings.push(format!(
+                "{model} is licensed for non-commercial use only ({})",
+                manifest.model.license.as_deref().unwrap_or("unknown")
+            ));
+        }
+    }
+}
+
+impl ModelSteps for Runner<'_> {
+    fn isolate(&mut self, model: Option<&str>, pcm: &[f32]) -> Result<Vec<f32>, PrepError> {
+        let name = model.unwrap_or(prep::DEFAULT_SEPARATION_MODEL);
+        let manifest = &self.plan.isolators[name];
+        let isolator = backend::load_isolator(manifest, &self.home.join("models").join(name))
+            .map_err(|e| PrepError::Engine(e.to_string()))?;
+        let vocals = isolator
+            .vocals(pcm, TARGET_SAMPLE_RATE as i32)
+            .map_err(|e| PrepError::Engine(e.to_string()))?;
+        let out = prep::resample_to_16k(&vocals, isolator.output_sample_rate() as u32)?;
+        self.record("isolate", name, manifest);
+        Ok(out)
+    }
+
+    fn denoise(&mut self, model: Option<&str>, pcm: &[f32]) -> Result<Vec<f32>, PrepError> {
+        let name = model.unwrap_or(prep::DEFAULT_DENOISE_MODEL);
+        let manifest = &self.plan.denoisers[name];
+        let denoiser = backend::load_denoiser(manifest, &self.home.join("models").join(name))
+            .map_err(|e| PrepError::Engine(e.to_string()))?;
+        let out = denoiser.run(pcm, TARGET_SAMPLE_RATE as i32);
+        self.record("denoise", name, manifest);
+        Ok(out)
+    }
+
+    fn speech_spans(
+        &mut self,
+        pcm: &[f32],
+        cfg: &VadConfig,
+    ) -> Result<Vec<(usize, usize)>, PrepError> {
+        let spans = prep::speech_spans(pcm, &self.plan.vad_path, cfg)?;
+        self.engines.push(EngineUsed {
+            stage: "trim_silence".to_string(),
+            model: "silero-vad".to_string(),
+            license: Some("MIT".to_string()),
+            non_commercial: false,
+        });
+        Ok(spans)
+    }
+}
+
+/// [`pipeline::analyze`] of `pcm`, with `speech_secs` when the VAD is pulled
+/// (a VAD failure here leaves it `null` rather than failing the request).
+fn analysis_of(pcm: &[f32], plan: &Plan) -> Analysis {
+    let speech = plan
+        .vad_available
+        .then(|| prep::speech_secs(pcm, &plan.vad_path).ok())
+        .flatten();
+    pipeline::analyze(pcm, speech)
+}
+
+/// `POST /v1/audio/samples` (naru task 1461 §8, crop → steps): crops
+/// `clip_id` to `start..end` or, given `speaker` instead, to that cached
+/// diarized speaker's own span (`POST .../transcribe` must have run first);
+/// then runs the chain. `steps` (see [`pipeline`]) defines the chain when
+/// present; otherwise the four flags build the default one: isolate
+/// (Spleeter, via [`crate::prep::isolate`]'s hand-written FFI) → denoise →
+/// trim silence → normalise, each skipped when its flag is `false`. Every
+/// enabled step whose engine is not pulled fails with a 409 naming it.
 pub(super) async fn create_sample(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
@@ -639,6 +782,18 @@ pub(super) async fn create_sample(
             "\"name\" is required",
         ));
     }
+    let steps = match req.steps.clone() {
+        Some(steps) => steps,
+        None => pipeline::default_chain(
+            req.isolate,
+            req.denoise,
+            req.trim_silence,
+            req.normalize,
+            req.isolation_model.clone(),
+            req.denoise_model.clone(),
+        ),
+    };
+    pipeline::validate(&steps).map_err(|m| bad_request("steps", "invalid_request", m))?;
     let home = st.registry.home().to_path_buf();
     let clip_id = req.clip_id.clone();
     let meta = tokio::task::spawn_blocking({
@@ -667,145 +822,41 @@ pub(super) async fn create_sample(
         ));
     }
 
-    let isolation_model = req
-        .isolation_model
-        .clone()
-        .unwrap_or_else(|| prep::DEFAULT_SEPARATION_MODEL.to_string());
-    let denoise_model = req
-        .denoise_model
-        .clone()
-        .unwrap_or_else(|| prep::DEFAULT_DENOISE_MODEL.to_string());
-    let vad_dir = home.join("models").join("silero-vad");
-
-    // Resolving a catalog manifest reads `pulled` and its `manifest.json`
-    // (`kind_manifest`), and the VAD availability check `stat`s a file;
-    // none of that belongs on the async runtime thread (naru task 1461
-    // review), so it all runs together in one `spawn_blocking`.
-    let (isolation_manifest, denoise_manifest, vad_available) = {
-        let (st2, want_isolate, want_denoise) = (st.clone(), req.isolate, req.denoise);
-        let (isolation_model2, denoise_model2, vad_dir2) = (
-            isolation_model.clone(),
-            denoise_model.clone(),
-            vad_dir.clone(),
-        );
-        tokio::task::spawn_blocking(
-            move || -> Result<(Option<Manifest>, Option<Manifest>, bool), ApiError> {
-                let isolation_manifest = if want_isolate {
-                    Some(kind_manifest(&st2, &isolation_model2, Kind::Separation)?)
-                } else {
-                    None
-                };
-                let denoise_manifest = if want_denoise {
-                    Some(kind_manifest(&st2, &denoise_model2, Kind::Denoise)?)
-                } else {
-                    None
-                };
-                let vad_available = vad_dir2.join(prep::VAD_FILENAME).is_file();
-                Ok((isolation_manifest, denoise_manifest, vad_available))
-            },
-        )
-        .await
-        .map_err(|e| internal(&st, &req_id, e.to_string()))??
-    };
-    if req.trim_silence && !vad_available {
-        return Err(registry_error(crate::registry::RegistryError::NotPulled(
-            "silero-vad".to_string(),
-        )));
-    }
+    let enabled: Vec<Step> = steps.iter().filter(|s| s.enabled()).cloned().collect();
+    let plan = plan_models(&st, &req_id, enabled).await?;
 
     let id = prep::new_id();
     let name = req.name.trim().to_string();
-    let denoise_enabled = req.denoise;
-    let trim_enabled = req.trim_silence;
-    let normalize_enabled = req.normalize;
 
-    let build = move || -> Result<(Value, ()), CreateSampleError> {
+    let build = move || -> Result<Value, PrepError> {
         let working = prep::clip_dir(&home, &clip_id).join(prep::WORKING_WAV);
-        let pcm = prep::read_wav(&working).map_err(CreateSampleError::Prep)?;
+        let pcm = prep::read_wav(&working)?;
         let cropped = prep::crop(&pcm, start, end);
 
         let dir = prep::sample_dir(&home, &id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| CreateSampleError::Prep(PrepError::Io(e.to_string())))?;
+        std::fs::create_dir_all(&dir).map_err(|e| PrepError::Io(e.to_string()))?;
 
         // Everything past this point can fail mid-pipeline (a missing
         // engine, a bad decode); on any of those the half-written sample
         // directory is removed rather than left behind (naru task 1461
         // review), the same way `create_clip` cleans up its own tmp dir.
-        let result = (|| -> Result<SampleMeta, CreateSampleError> {
-            prep::write_wav(&dir.join(prep::CROPPED_WAV), &cropped)
-                .map_err(CreateSampleError::Prep)?;
+        let result = (|| -> Result<SampleMeta, PrepError> {
+            prep::write_wav(&dir.join(prep::CROPPED_WAV), &cropped)?;
 
-            let mut engines = Vec::new();
-            let mut warnings = Vec::new();
-            let mut clean = cropped.clone();
+            let mut runner = Runner {
+                home: &home,
+                plan: &plan,
+                engines: Vec::new(),
+                warnings: Vec::new(),
+            };
+            let clean = pipeline::run(&steps, Select::All, cropped, &mut runner)?;
+            let analysis = analysis_of(&clean, &plan);
 
-            if let Some(manifest) = isolation_manifest {
-                let dir_m = home.join("models").join(&isolation_model);
-                let isolator = backend::load_isolator(&manifest, &dir_m)
-                    .map_err(|e| CreateSampleError::Engine(e.to_string()))?;
-                let vocals = isolator
-                    .vocals(&clean, TARGET_SAMPLE_RATE as i32)
-                    .map_err(|e| CreateSampleError::Engine(e.to_string()))?;
-                clean = prep::resample_to_16k(&vocals, isolator.output_sample_rate() as u32)
-                    .map_err(CreateSampleError::Prep)?;
-                engines.push(EngineUsed {
-                    stage: "isolate".to_string(),
-                    model: isolation_model.clone(),
-                    license: manifest.model.license.clone(),
-                    non_commercial: manifest.model.non_commercial,
-                });
-                if manifest.model.non_commercial {
-                    warnings.push(format!(
-                        "{isolation_model} is licensed for non-commercial use only ({})",
-                        manifest.model.license.as_deref().unwrap_or("unknown")
-                    ));
-                }
-            }
-
-            if let Some(manifest) = denoise_manifest {
-                let dir_m = home.join("models").join(&denoise_model);
-                let denoiser = backend::load_denoiser(&manifest, &dir_m)
-                    .map_err(|e| CreateSampleError::Engine(e.to_string()))?;
-                clean = denoiser.run(&clean, TARGET_SAMPLE_RATE as i32);
-                engines.push(EngineUsed {
-                    stage: "denoise".to_string(),
-                    model: denoise_model.clone(),
-                    license: manifest.model.license.clone(),
-                    non_commercial: manifest.model.non_commercial,
-                });
-                if manifest.model.non_commercial {
-                    warnings.push(format!(
-                        "{denoise_model} is licensed for non-commercial use only ({})",
-                        manifest.model.license.as_deref().unwrap_or("unknown")
-                    ));
-                }
-            }
-
-            if trim_enabled {
-                clean = prep::trim_silence(
-                    &clean,
-                    &vad_dir.join(prep::VAD_FILENAME),
-                    &VadConfig::default(),
-                )
-                .map_err(CreateSampleError::Prep)?;
-                engines.push(EngineUsed {
-                    stage: "trim_silence".to_string(),
-                    model: "silero-vad".to_string(),
-                    license: Some("MIT".to_string()),
-                    non_commercial: false,
-                });
-            }
-
-            if normalize_enabled {
-                prep::normalize_peak(&mut clean, -1.0);
-            }
-
-            prep::write_wav(&dir.join(prep::CLEAN_WAV), &clean).map_err(CreateSampleError::Prep)?;
+            prep::write_wav(&dir.join(prep::CLEAN_WAV), &clean)?;
 
             let transcript_txt = words_in_range(&home, &clip_id, start, end).unwrap_or_default();
             std::fs::write(dir.join(prep::TRANSCRIPT_TXT), transcript_txt)
-                .map_err(|e| CreateSampleError::Prep(PrepError::Io(e.to_string())))?;
+                .map_err(|e| PrepError::Io(e.to_string()))?;
 
             let sample_meta = SampleMeta {
                 id: id.clone(),
@@ -814,34 +865,149 @@ pub(super) async fn create_sample(
                 original_filename: meta.original_filename.clone(),
                 range: SampleRange { start, end },
                 speaker: req.speaker,
-                engines,
-                warnings,
+                engines: runner.engines,
+                warnings: runner.warnings,
                 created_at: prep::now_rfc3339(),
+                steps,
+                analysis: Some(analysis),
             };
-            prep::save_json(&dir.join(prep::SAMPLE_META), &sample_meta)
-                .map_err(CreateSampleError::Prep)?;
+            prep::save_json(&dir.join(prep::SAMPLE_META), &sample_meta)?;
             Ok(sample_meta)
         })();
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&dir);
         }
-        result.map(|meta| (sample_json(&home, &meta), ()))
+        result.map(|meta| sample_json(&home, &meta))
     };
-    let _ = denoise_enabled;
 
-    let (value, ()) = tokio::task::spawn_blocking(build)
+    let value = tokio::task::spawn_blocking(build)
         .await
         .map_err(|e| internal(&st, &req_id, e.to_string()))?
-        .map_err(|e| match e {
-            CreateSampleError::Prep(e) => prep_error(&st, &req_id, e),
-            CreateSampleError::Engine(m) => internal(&st, &req_id, m),
-        })?;
+        .map_err(|e| prep_error(&st, &req_id, e))?;
     Ok((StatusCode::CREATED, Json(value)).into_response())
 }
 
-enum CreateSampleError {
-    Prep(PrepError),
-    Engine(String),
+#[derive(Debug, Deserialize)]
+struct RenderRequest {
+    start: Option<f64>,
+    end: Option<f64>,
+    speaker: Option<i32>,
+    steps: Vec<Step>,
+    until: Option<usize>,
+    solo: Option<usize>,
+}
+
+/// `POST /v1/audio/prep/clips/{id}/render`: auditions a chain without
+/// creating a sample. Crops like [`create_sample`], then runs `steps` (all
+/// of them, `until: N` = steps `0..=N`, or `solo: N` = only step `N`;
+/// `until` and `solo` together are a 400, an index past the chain is a 400).
+/// Disabled steps are skipped, except that `solo` applies its step even if
+/// disabled. Returns the 16-bit 16 kHz mono WAV, with the result's
+/// [`Analysis`] in `x-naru-loudness-lufs`, `x-naru-peak-dbfs`,
+/// `x-naru-noise-floor-dbfs` and `x-naru-speech-secs` (each omitted when
+/// null) plus the whole struct as JSON in `x-naru-analysis`. Same 404/409
+/// semantics as [`create_sample`], for the steps that run.
+pub(super) async fn render_clip(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    AxumPath(id): AxumPath<String>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let req: RenderRequest = serde_json::from_slice(&body)
+        .map_err(|e| bad_request("body", "invalid_request", e.to_string()))?;
+    pipeline::validate(&req.steps).map_err(|m| bad_request("steps", "invalid_request", m))?;
+    let select = match (req.until, req.solo) {
+        (Some(_), Some(_)) => {
+            return Err(bad_request(
+                "solo",
+                "invalid_request",
+                "\"until\" and \"solo\" are mutually exclusive",
+            ));
+        }
+        (Some(n), None) => Select::Until(n),
+        (None, Some(n)) => Select::Solo(n),
+        (None, None) => Select::All,
+    };
+    let (param, index) = match select {
+        Select::Until(n) => ("until", Some(n)),
+        Select::Solo(n) => ("solo", Some(n)),
+        Select::All => ("steps", None),
+    };
+    if index.is_some_and(|n| n >= req.steps.len()) {
+        return Err(bad_request(
+            param,
+            "invalid_request",
+            format!("\"{param}\" must be a step index below {}", req.steps.len()),
+        ));
+    }
+
+    let home = st.registry.home().to_path_buf();
+    {
+        let (home, id) = (home.clone(), id.clone());
+        tokio::task::spawn_blocking(move || load_clip_meta(&home, &id))
+            .await
+            .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    }
+    let (start, end) =
+        resolve_range(&st, &req_id, &home, &id, req.start, req.end, req.speaker).await?;
+    if end <= start {
+        return Err(bad_request(
+            "end",
+            "invalid_request",
+            format!("the range {start}-{end} is empty"),
+        ));
+    }
+
+    let running: Vec<Step> = select
+        .indices(&req.steps)
+        .into_iter()
+        .map(|i| req.steps[i].clone())
+        .collect();
+    let plan = plan_models(&st, &req_id, running).await?;
+
+    let steps = req.steps;
+    let (bytes, analysis) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, Analysis), PrepError> {
+            let working = prep::clip_dir(&home, &id).join(prep::WORKING_WAV);
+            let cropped = prep::crop(&prep::read_wav(&working)?, start, end);
+            let mut runner = Runner {
+                home: &home,
+                plan: &plan,
+                engines: Vec::new(),
+                warnings: Vec::new(),
+            };
+            let out = pipeline::run(&steps, select, cropped, &mut runner)?;
+            Ok((prep::wav_bytes(&out)?, analysis_of(&out, &plan)))
+        })
+        .await
+        .map_err(|e| internal(&st, &req_id, e.to_string()))?
+        .map_err(|e| prep_error(&st, &req_id, e))?;
+
+    let mut headers = vec![
+        ("content-type", "audio/wav".to_string()),
+        (
+            "x-naru-analysis",
+            serde_json::to_string(&analysis).unwrap_or_default(),
+        ),
+    ];
+    for (name, v) in [
+        ("x-naru-loudness-lufs", analysis.integrated_lufs),
+        ("x-naru-peak-dbfs", analysis.peak_dbfs),
+        ("x-naru-noise-floor-dbfs", analysis.noise_floor_dbfs),
+        ("x-naru-speech-secs", analysis.speech_secs),
+    ] {
+        if let Some(v) = v {
+            headers.push((name, format!("{v:.2}")));
+        }
+    }
+    Ok((AppendHeaders(headers), axum::body::Body::from(bytes)).into_response())
+}
+
+/// `GET /v1/audio/prep/steps`: the step catalogue (every type's params with
+/// default/min/max/unit) and the default chain, for a UI to build its
+/// controls from.
+pub(super) async fn list_steps() -> Json<Value> {
+    Json(pipeline::catalogue())
 }
 
 /// `start`/`end` when given directly, else `speaker`'s span from the

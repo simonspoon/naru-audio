@@ -675,3 +675,309 @@ async fn failed_create_sample_leaves_no_directory_behind() {
         "a failed create must not leave a sample directory behind"
     );
 }
+
+// ---- steps, render, catalogue, analysis ------------------------------------
+
+async fn post_raw(
+    home: &Path,
+    path: &str,
+    body: Value,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let req = Request::post(path)
+        .header(HOST, HOSTPORT)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let resp = app(home).oneshot(req).await.unwrap();
+    let (status, headers) = (resp.status(), resp.headers().clone());
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, bytes.to_vec())
+}
+
+async fn uploaded_clip(home: &Path) -> String {
+    let (_, body) = upload(home, &wav()).await;
+    body["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn steps_catalogue_lists_types_params_and_the_default_chain() {
+    let home = home();
+    let (status, body) = get(home.path(), "/v1/audio/prep/steps").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let steps = body["steps"].as_array().unwrap();
+    let hp = steps.iter().find(|s| s["type"] == "highpass").unwrap();
+    let freq = hp["params"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "freq_hz")
+        .unwrap();
+    assert_eq!(freq["default"], 80.0);
+    assert_eq!(freq["unit"], "Hz");
+    assert!(freq["min"].is_number() && freq["max"].is_number());
+    let types: Vec<&str> = steps.iter().map(|s| s["type"].as_str().unwrap()).collect();
+    for t in [
+        "isolate",
+        "denoise",
+        "trim_silence",
+        "normalize",
+        "eq",
+        "deess",
+        "loudness",
+        "reverb",
+    ] {
+        assert!(types.contains(&t), "{t} missing from {types:?}");
+    }
+    let chain: Vec<&str> = body["default_chain"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(chain, ["isolate", "denoise", "trim_silence", "normalize"]);
+}
+
+#[tokio::test]
+async fn steps_array_defines_the_chain_and_ignores_the_flags() {
+    let home = home();
+    let clip = uploaded_clip(home.path()).await;
+    // The flags would default to isolate+denoise+trim (409 with no models);
+    // `steps` replaces them wholesale.
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/samples",
+        json!({
+            "clip_id": clip, "name": "s", "start": 0.0, "end": 0.4,
+            "isolate": true,
+            "steps": [
+                {"type": "highpass"},
+                {"type": "loudness", "target_lufs": -20},
+                {"type": "isolate", "enabled": false},
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let steps = body["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 3);
+    assert_eq!(steps[0]["freq_hz"], 80.0);
+    assert_eq!(steps[1]["target_lufs"], -20.0);
+    assert_eq!(steps[2]["enabled"], false);
+    assert_eq!(body["engines"], json!([]));
+
+    let a = &body["analysis"];
+    assert!(
+        (a["integrated_lufs"].as_f64().unwrap() + 20.0).abs() < 1.0,
+        "{a}"
+    );
+    assert!(a["peak_dbfs"].as_f64().unwrap() <= -1.0 + 0.01);
+    assert!(a["noise_floor_dbfs"].is_number());
+    assert!(a["speech_secs"].is_null(), "no VAD model pulled");
+    assert!((a["duration_secs"].as_f64().unwrap() - 0.4).abs() < 1e-3);
+
+    // Persisted: a GET returns the same steps and analysis.
+    let id = body["id"].as_str().unwrap();
+    let (_, got) = get(home.path(), &format!("/v1/audio/samples/{id}")).await;
+    assert_eq!(got["steps"], body["steps"]);
+    assert_eq!(got["analysis"], body["analysis"]);
+}
+
+#[tokio::test]
+async fn legacy_flags_build_the_default_chain_and_report_it() {
+    let home = home();
+    let clip = uploaded_clip(home.path()).await;
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/samples",
+        json!({
+            "clip_id": clip, "name": "s", "start": 0.0, "end": 0.4,
+            "isolate": false, "denoise": false, "trim_silence": false,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let steps: Vec<(&str, bool)> = body["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["type"].as_str().unwrap(), s["enabled"].as_bool().unwrap()))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            ("isolate", false),
+            ("denoise", false),
+            ("trim_silence", false),
+            ("normalize", true)
+        ]
+    );
+    assert_eq!(body["steps"][3]["peak_db"], -1.0);
+    assert!((body["analysis"]["peak_dbfs"].as_f64().unwrap() + 1.0).abs() < 0.01);
+}
+
+#[tokio::test]
+async fn steps_preflight_follows_the_enabled_steps() {
+    let home = home();
+    let clip = uploaded_clip(home.path()).await;
+    for (steps, model) in [
+        (json!([{"type": "denoise"}]), "speech-denoiser-gtcrn"),
+        (json!([{"type": "trim_silence"}]), "silero-vad"),
+        (
+            json!([{"type": "isolate"}]),
+            "source-separation-spleeter-2stems-int8",
+        ),
+    ] {
+        let (status, body) = post_json(
+            home.path(),
+            "/v1/audio/samples",
+            json!({"clip_id": clip, "name": "s", "start": 0.0, "end": 0.3, "steps": steps}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"]["code"], "model_not_pulled");
+        assert!(body["error"]["message"].as_str().unwrap().contains(model));
+    }
+}
+
+#[tokio::test]
+async fn invalid_steps_are_400_naming_the_param() {
+    let home = home();
+    let clip = uploaded_clip(home.path()).await;
+    for (steps, needle) in [
+        (
+            json!([{"type": "normalize"}, {"type": "denoise", "amount": 2}]),
+            "steps[1].amount",
+        ),
+        (json!([{"type": "speed", "rate": 0}]), "steps[0].rate"),
+        (json!([{"type": "bogus"}]), "bogus"),
+        (
+            json!(vec![json!({"type": "speed", "rate": 0.5}); 6]),
+            "speed",
+        ),
+        (json!([{"type": "highpass", "freq": 80}]), "freq"),
+    ] {
+        let (status, body) = post_json(
+            home.path(),
+            "/v1/audio/samples",
+            json!({"clip_id": clip, "name": "s", "start": 0.0, "end": 0.3, "steps": steps}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"]["message"].as_str().unwrap().contains(needle),
+            "{body}"
+        );
+    }
+}
+
+fn render_path(clip: &str) -> String {
+    format!("/v1/audio/prep/clips/{clip}/render")
+}
+
+fn wav_len(bytes: &[u8]) -> usize {
+    hound::WavReader::new(std::io::Cursor::new(bytes))
+        .unwrap()
+        .len() as usize
+}
+
+#[tokio::test]
+async fn render_whole_chain_until_and_solo() {
+    let home = home();
+    let clip = uploaded_clip(home.path()).await;
+    let steps = json!([
+        {"type": "normalize", "peak_db": -6},
+        {"type": "speed", "rate": 2.0},
+        {"type": "normalize", "peak_db": -20, "enabled": false},
+    ]);
+    let render = |extra: Value| {
+        let mut body = json!({"start": 0.0, "end": 0.4, "steps": steps});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        post_raw(home.path(), render_path(&clip).leak(), body)
+    };
+
+    let (status, headers, bytes) = render(json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[CONTENT_TYPE], "audio/wav");
+    assert_eq!(wav_len(&bytes), 3200, "0.4 s at 2x, disabled step skipped");
+    let peak: f64 = headers["x-naru-peak-dbfs"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((peak + 6.0).abs() < 1.0, "{peak}");
+    assert!(headers.contains_key("x-naru-loudness-lufs"));
+    assert!(headers.contains_key("x-naru-noise-floor-dbfs"));
+    assert!(
+        !headers.contains_key("x-naru-speech-secs"),
+        "null analysis is omitted"
+    );
+    let analysis: Value =
+        serde_json::from_str(headers["x-naru-analysis"].to_str().unwrap()).unwrap();
+    assert!(analysis["speech_secs"].is_null());
+    assert!((analysis["duration_secs"].as_f64().unwrap() - 0.2).abs() < 1e-3);
+
+    let (_, _, bytes) = render(json!({"until": 0})).await;
+    assert_eq!(wav_len(&bytes), 6400, "until 0 stops before the speed step");
+    let (_, _, bytes) = render(json!({"solo": 1})).await;
+    assert_eq!(wav_len(&bytes), 3200);
+    let (status, headers, _) = render(json!({"solo": 2})).await;
+    assert_eq!(status, StatusCode::OK, "solo applies a disabled step");
+    let peak: f64 = headers["x-naru-peak-dbfs"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((peak + 20.0).abs() < 1.0, "{peak}");
+}
+
+#[tokio::test]
+async fn render_rejects_until_with_solo_and_bad_indices() {
+    let home = home();
+    let clip = uploaded_clip(home.path()).await;
+    let steps = json!([{"type": "normalize"}]);
+    for extra in [
+        json!({"until": 0, "solo": 0}),
+        json!({"until": 1}),
+        json!({"solo": 5}),
+    ] {
+        let mut body = json!({"start": 0.0, "end": 0.3, "steps": steps});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (status, body) = post_json(home.path(), &render_path(&clip), body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn render_unknown_clip_is_404_and_missing_model_is_409() {
+    let home = home();
+    let (status, body) = post_json(
+        home.path(),
+        &render_path("nonexistent"),
+        json!({"start": 0.0, "end": 0.3, "steps": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let clip = uploaded_clip(home.path()).await;
+    let (status, body) = post_json(
+        home.path(),
+        &render_path(&clip),
+        json!({"start": 0.0, "end": 0.3, "steps": [{"type": "denoise"}, {"type": "normalize"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "model_not_pulled");
+
+    // Only the steps that run need their models: solo on the model-free one.
+    let (status, _, _) = post_raw(
+        home.path(),
+        &render_path(&clip),
+        json!({"start": 0.0, "end": 0.3, "steps": [{"type": "denoise"}, {"type": "normalize"}], "solo": 1}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}

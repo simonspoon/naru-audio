@@ -19,7 +19,9 @@
 
 pub mod denoise;
 pub mod diarize;
+pub mod dsp;
 pub mod isolate;
+pub mod pipeline;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -177,6 +179,14 @@ pub struct SampleMeta {
     pub engines: Vec<EngineUsed>,
     pub warnings: Vec<String>,
     pub created_at: String,
+    /// The chain that produced `clean.wav` (`pipeline::Step`s). Empty for a
+    /// sample made before steps existed.
+    #[serde(default)]
+    pub steps: Vec<pipeline::Step>,
+    /// Measurements of `clean.wav` at creation; `None` for a sample made
+    /// before analysis existed.
+    #[serde(default)]
+    pub analysis: Option<pipeline::Analysis>,
 }
 
 pub fn now_rfc3339() -> String {
@@ -189,6 +199,8 @@ pub enum PrepError {
     /// `afconvert` (or the decode after it) failed on the upload.
     BadAudio(String),
     Json(String),
+    /// A model-backed step's engine failed to load or run.
+    Engine(String),
 }
 
 impl std::fmt::Display for PrepError {
@@ -197,6 +209,7 @@ impl std::fmt::Display for PrepError {
             PrepError::Io(m) => write!(f, "{m}"),
             PrepError::BadAudio(m) => write!(f, "{m}"),
             PrepError::Json(m) => write!(f, "{m}"),
+            PrepError::Engine(m) => write!(f, "{m}"),
         }
     }
 }
@@ -237,14 +250,20 @@ pub fn read_wav(path: &Path) -> Result<Vec<f32>, PrepError> {
 
 /// Writes `samples` (16 kHz mono) as a 16-bit PCM WAV.
 pub fn write_wav(path: &Path, samples: &[f32]) -> Result<(), PrepError> {
+    std::fs::write(path, wav_bytes(samples)?).map_err(io_err("write wav"))
+}
+
+/// `samples` (16 kHz mono) as the bytes of a 16-bit PCM WAV.
+pub fn wav_bytes(samples: &[f32]) -> Result<Vec<u8>, PrepError> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: TARGET_SAMPLE_RATE,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
+    let mut cursor = std::io::Cursor::new(Vec::new());
     let mut writer =
-        hound::WavWriter::create(path, spec).map_err(|e| PrepError::Io(e.to_string()))?;
+        hound::WavWriter::new(&mut cursor, spec).map_err(|e| PrepError::Io(e.to_string()))?;
     for &s in samples {
         let clamped = s.clamp(-1.0, 1.0);
         let i = (clamped * i16::MAX as f32).round() as i16;
@@ -252,7 +271,10 @@ pub fn write_wav(path: &Path, samples: &[f32]) -> Result<(), PrepError> {
             .write_sample(i)
             .map_err(|e| PrepError::Io(e.to_string()))?;
     }
-    writer.finalize().map_err(|e| PrepError::Io(e.to_string()))
+    writer
+        .finalize()
+        .map_err(|e| PrepError::Io(e.to_string()))?;
+    Ok(cursor.into_inner())
 }
 
 /// Resamples mono `input` at `input_rate` to [`crate::stt::audio::
@@ -298,31 +320,59 @@ pub fn crop(pcm: &[f32], start_secs: f64, end_secs: f64) -> Vec<f32> {
     pcm[from..to].to_vec()
 }
 
+/// The speech spans the Silero gate `vad_model` finds in `pcm`, as
+/// `(start, end)` sample indices.
+pub fn speech_spans(
+    pcm: &[f32],
+    vad_model: &Path,
+    cfg: &VadConfig,
+) -> Result<Vec<(usize, usize)>, PrepError> {
+    let vad = Vad::load(vad_model, cfg).map_err(|e| PrepError::BadAudio(e.to_string()))?;
+    let mut segmenter = vad.segmenter();
+    let mut spans = Vec::new();
+    for chunk in pcm.chunks(4096) {
+        segmenter.accept(chunk);
+        while let Some(span) = segmenter.next_span() {
+            spans.push((span.start, span.start + span.len));
+        }
+    }
+    segmenter.finish();
+    while let Some(span) = segmenter.next_span() {
+        spans.push((span.start, span.start + span.len));
+    }
+    Ok(spans)
+}
+
+/// Total seconds of speech [`speech_spans`] finds in `pcm` (default gate).
+pub fn speech_secs(pcm: &[f32], vad_model: &Path) -> Result<f64, PrepError> {
+    let spans = speech_spans(pcm, vad_model, &VadConfig::default())?;
+    let samples: usize = spans
+        .iter()
+        .map(|(from, to)| to.saturating_sub(*from))
+        .sum();
+    Ok(samples as f64 / TARGET_SAMPLE_RATE as f64)
+}
+
+/// `pcm` from the first span's start to the last span's end, widened by
+/// `pad` samples each side and clamped to the buffer; `pcm` unchanged if
+/// there are no spans.
+pub fn trim_to_spans(pcm: &[f32], spans: &[(usize, usize)], pad: usize) -> Vec<f32> {
+    match (spans.first(), spans.last()) {
+        (Some(&(from, _)), Some(&(_, to))) => {
+            let from = from.saturating_sub(pad).min(pcm.len());
+            let to = to.saturating_add(pad).clamp(from, pcm.len());
+            pcm[from..to].to_vec()
+        }
+        _ => pcm.to_vec(),
+    }
+}
+
 /// Trims leading and trailing silence using the Silero gate `vad_model`
 /// already loaded for (naru task 1461 §8 "clean"): the span from the
 /// first detected span's start to the last one's end, or `pcm` unchanged
 /// if the gate finds no speech in it at all.
 pub fn trim_silence(pcm: &[f32], vad_model: &Path, cfg: &VadConfig) -> Result<Vec<f32>, PrepError> {
-    let vad = Vad::load(vad_model, cfg).map_err(|e| PrepError::BadAudio(e.to_string()))?;
-    let mut segmenter = vad.segmenter();
-    let mut first = None;
-    let mut last_end = None;
-    for chunk in pcm.chunks(4096) {
-        segmenter.accept(chunk);
-        while let Some(span) = segmenter.next_span() {
-            first.get_or_insert(span.start);
-            last_end = Some(span.start + span.len);
-        }
-    }
-    segmenter.finish();
-    while let Some(span) = segmenter.next_span() {
-        first.get_or_insert(span.start);
-        last_end = Some(span.start + span.len);
-    }
-    match (first, last_end) {
-        (Some(from), Some(to)) => Ok(pcm[from..to.min(pcm.len())].to_vec()),
-        _ => Ok(pcm.to_vec()),
-    }
+    Ok(trim_to_spans(pcm, &speech_spans(pcm, vad_model, cfg)?, 0))
 }
 
 /// The clip's peak level in dBFS (`-inf` reported as `f32::NEG_INFINITY`
