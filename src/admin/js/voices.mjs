@@ -10,7 +10,7 @@
 import { getJson, postJson, putJson, request, del } from './api.mjs';
 import { el, toast, playButton, waveformSvg, peaks, decodeWav } from './ui.mjs';
 
-const FILTERS = ['ALL', 'BUILT-IN', 'CLONED', 'DESIGNED'];
+const FILTERS = ['All', 'Built-in', 'Cloned', 'Designed'];
 const TRY_IT_DEFAULT = 'Warm coffee, a quiet morning, and nothing on fire yet.';
 
 function originOf(v) {
@@ -19,11 +19,11 @@ function originOf(v) {
 
 function matchesFilter(v, filter) {
   switch (filter) {
-    case 'BUILT-IN':
+    case 'Built-in':
       return originOf(v) === 'builtin';
-    case 'CLONED':
+    case 'Cloned':
       return originOf(v) === 'cloned';
-    case 'DESIGNED':
+    case 'Designed':
       return originOf(v) === 'designed';
     default:
       return true;
@@ -36,13 +36,13 @@ export function mount(view, params) {
   let selectedModel = params.model ?? null;
   let voiceList = [];
   let selectedVoiceId = null;
-  let filter = 'ALL';
+  let filter = 'All';
 
   const modelBar = el('div', { class: 'filt' });
   const filtBar = el('div', { class: 'filt' });
   const grid = el('div', { class: 'vg' });
   const listCard = el('div', { class: 'card' }, [
-    el('h3', {}, ['VOICES']),
+    el('h3', {}, ['Voices']),
     modelBar,
     filtBar,
     grid,
@@ -87,9 +87,9 @@ export function mount(view, params) {
   }
 
   function renderFilters() {
-    const counts = { ALL: voiceList.length, 'BUILT-IN': 0, CLONED: 0, DESIGNED: 0 };
+    const counts = { All: voiceList.length, 'Built-in': 0, Cloned: 0, Designed: 0 };
     for (const v of voiceList) {
-      const label = { builtin: 'BUILT-IN', cloned: 'CLONED', designed: 'DESIGNED' }[originOf(v)];
+      const label = { builtin: 'Built-in', cloned: 'Cloned', designed: 'Designed' }[originOf(v)];
       if (label) counts[label]++;
     }
     filtBar.replaceChildren(
@@ -203,7 +203,7 @@ export function mount(view, params) {
     }
     const tryText = el('input', { class: 'inp', value: TRY_IT_DEFAULT });
     nodes.push(
-      el('div', { class: 'lab', style: 'margin-top:10px' }, ['TRY IT']),
+      el('div', { class: 'lab', style: 'margin-top:10px' }, ['Try it']),
       tryText,
       el(
         'button',
@@ -228,7 +228,7 @@ export function mount(view, params) {
             }
           },
         },
-        ['▶ SPEAK'],
+        ['▶ Speak'],
       ),
     );
     if (!v.default) {
@@ -247,7 +247,7 @@ export function mount(view, params) {
               refreshVoices();
             },
           },
-          ['★ SET DEFAULT'],
+          ['★ Set default'],
         ),
       );
     }
@@ -268,13 +268,13 @@ export function mount(view, params) {
             }
           },
         },
-        ['EXPORT'],
+        ['Export'],
       ),
     );
     if (origin !== 'builtin') {
       const renameInput = el('input', { class: 'inp', value: v.id });
       nodes.push(
-        el('div', { class: 'lab', style: 'margin-top:10px' }, ['RENAME']),
+        el('div', { class: 'lab', style: 'margin-top:10px' }, ['Rename']),
         el('div', { class: 'row' }, [
           renameInput,
           el(
@@ -317,7 +317,7 @@ export function mount(view, params) {
               refreshVoices();
             },
           },
-          ['DELETE'],
+          ['Delete'],
         ),
       );
     }

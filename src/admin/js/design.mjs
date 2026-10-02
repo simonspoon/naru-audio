@@ -11,11 +11,11 @@ import { el, toast, playButton, waveformSvg, peaks, decodeWav } from './ui.mjs';
 const TEST_LINE = 'Warm coffee, a quiet morning, and nothing on fire yet.';
 const RECENT_KEY = 'naru-audio-design-recent';
 const CHIP_GROUPS = [
-  { key: 'voice', label: 'VOICE', options: ['male', 'female', 'neutral'] },
-  { key: 'age', label: 'AGE', options: ['young', 'adult', 'older'] },
-  { key: 'pitch', label: 'PITCH', options: ['low', 'mid', 'high'] },
-  { key: 'pace', label: 'PACE', options: ['slow', 'steady', 'quick'] },
-  { key: 'mood', label: 'MOOD', options: ['warm', 'dry', 'bright', 'gravelly'] },
+  { key: 'voice', label: 'Voice', options: ['male', 'female', 'neutral'] },
+  { key: 'age', label: 'Age', options: ['young', 'adult', 'older'] },
+  { key: 'pitch', label: 'Pitch', options: ['low', 'mid', 'high'] },
+  { key: 'pace', label: 'Pace', options: ['slow', 'steady', 'quick'] },
+  { key: 'mood', label: 'Mood', options: ['warm', 'dry', 'bright', 'gravelly'] },
 ];
 
 /** Builds the instructions text from the quick-pick attributes, formatted
@@ -65,8 +65,8 @@ export function mount(view, params) {
   const descBox = el('textarea', { class: 'inp', rows: 4 });
   const takesGrid = el('div', { class: 'vg3' });
   const nameInput = el('input', { class: 'inp' });
-  const saveHint = el('span', { style: 'color:var(--muted);font-size:11px' });
-  const createBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:200px' }, ['CREATE VOICE']);
+  const saveHint = el('span', { style: 'color:var(--muted);font-size:13px' });
+  const createBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:200px' }, ['Create voice']);
   const testLineInput = el('input', { class: 'inp', value: TEST_LINE });
   const recentList = el('div', {});
 
@@ -74,27 +74,27 @@ export function mount(view, params) {
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['1']),
       el('div', { style: 'flex:1' }, [
-        el('div', { class: 'lab' }, ['MODEL']),
+        el('div', { class: 'lab' }, ['Model']),
         modelBar,
-        el('span', { style: 'color:var(--muted);font-size:11px' }, [' only models that can design']),
+        el('span', { style: 'color:var(--muted);font-size:13px' }, [' only models that can design']),
       ]),
     ]),
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['2']),
       el('div', { style: 'flex:1;display:grid;grid-template-columns:1fr 1.2fr;gap:14px' }, [
-        el('div', {}, [el('div', { class: 'lab' }, ['QUICK PICKS']), chipsWrap]),
-        el('div', {}, [el('div', { class: 'lab' }, ['DESCRIBE IT · PICKS FILL THIS IN']), descBox]),
+        el('div', {}, [el('div', { class: 'lab' }, ['Quick picks']), chipsWrap]),
+        el('div', {}, [el('div', { class: 'lab' }, ['Describe it · picks fill this in']), descBox]),
       ]),
     ]),
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['3']),
       el('div', { style: 'flex:1' }, [
         el('div', { style: 'display:flex;align-items:center' }, [
-          el('div', { class: 'lab', style: 'margin:0' }, ['TAKES · SAME DESCRIPTION, THREE TRIES']),
+          el('div', { class: 'lab', style: 'margin:0' }, ['Takes · same description, three tries']),
           el(
             'button',
             { class: 'btn', style: 'margin-left:auto', onclick: generateTakes },
-            ['↻ GENERATE 3'],
+            ['↻ Generate 3'],
           ),
         ]),
         takesGrid,
@@ -103,7 +103,7 @@ export function mount(view, params) {
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['4']),
       el('div', { style: 'flex:1;display:flex;gap:14px;align-items:center;flex-wrap:wrap' }, [
-        el('div', {}, [el('div', { class: 'lab' }, ['NAME']), nameInput]),
+        el('div', {}, [el('div', { class: 'lab' }, ['Name']), nameInput]),
         saveHint,
         createBtn,
       ]),
@@ -111,12 +111,12 @@ export function mount(view, params) {
   ]);
 
   const rightCard = el('div', { class: 'card' }, [
-    el('h3', {}, ['TEST LINE']),
+    el('h3', {}, ['Test line']),
     testLineInput,
-    el('div', { style: 'color:var(--muted);font-size:11px;margin-top:8px' }, [
+    el('div', { style: 'color:var(--muted);font-size:13px;margin-top:8px' }, [
       'Every take speaks this line, so you compare like with like.',
     ]),
-    el('div', { class: 'lab', style: 'margin-top:14px' }, ['RECENT PROMPTS']),
+    el('div', { class: 'lab', style: 'margin-top:14px' }, ['Recent prompts']),
     recentList,
   ]);
 

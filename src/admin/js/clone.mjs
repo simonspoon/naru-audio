@@ -61,30 +61,30 @@ export function mount(view, params) {
       if (e.target.value) pickSample(e.target.value);
     },
   });
-  const sampleHint = el('div', { style: 'color:var(--muted);font-size:11px' });
+  const sampleHint = el('div', { style: 'color:var(--muted);font-size:13px' });
   const dropZone = el('div', { class: 'drop' });
   const waveWrap = el('div', { class: 'trim-wrap' });
   const transcriptBox = el('textarea', { class: 'inp', rows: 2 });
   const nameInput = el('input', { class: 'inp' });
   const permCheck = el('input', { type: 'checkbox' });
-  const createBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:200px' }, ['CREATE VOICE']);
+  const createBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:200px' }, ['Create voice']);
   const originalPlay = el('span', { class: 'cmp' }, ['no sample loaded']);
-  const previewLine = el('div', { class: 'inp', style: 'font-size:12px' }, [TEST_LINE]);
-  const previewBtn = el('button', { class: 'big' }, ['▶ PREVIEW CLONE']);
+  const previewLine = el('div', { class: 'inp', style: 'font-size:14px' }, [TEST_LINE]);
+  const previewBtn = el('button', { class: 'big' }, ['▶ Preview clone']);
 
   const leftCard = el('div', { class: 'card' }, [
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['1']),
       el('div', { style: 'flex:1' }, [
-        el('div', { class: 'lab' }, ['MODEL']),
+        el('div', { class: 'lab' }, ['Model']),
         modelBar,
-        el('span', { style: 'color:var(--muted);font-size:11px' }, [' only models that can clone']),
+        el('span', { style: 'color:var(--muted);font-size:13px' }, [' only models that can clone']),
       ]),
     ]),
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['2']),
       el('div', { style: 'flex:1' }, [
-        el('div', { class: 'lab' }, ['SAMPLE · ONE SPEAKER · 5-15 S']),
+        el('div', { class: 'lab' }, ['Sample · one speaker · 5-15 s']),
         el('div', { class: 'row' }, [sampleSelect, sampleHint]),
         dropZone,
         waveWrap,
@@ -93,14 +93,14 @@ export function mount(view, params) {
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['3']),
       el('div', { style: 'flex:1' }, [
-        el('div', { class: 'lab' }, ['TRANSCRIPT · AUTO · EDIT IF WRONG']),
+        el('div', { class: 'lab' }, ['Transcript · auto · edit if wrong']),
         transcriptBox,
       ]),
     ]),
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['4']),
       el('div', { style: 'flex:1;display:flex;gap:14px;align-items:center;flex-wrap:wrap' }, [
-        el('div', {}, [el('div', { class: 'lab' }, ['NAME']), nameInput]),
+        el('div', {}, [el('div', { class: 'lab' }, ['Name']), nameInput]),
         el('label', { class: 'chk' }, [permCheck, 'I have permission to clone this voice']),
         createBtn,
       ]),
@@ -108,13 +108,13 @@ export function mount(view, params) {
   ]);
 
   const rightCard = el('div', { class: 'card' }, [
-    el('h3', {}, ['BEFORE YOU SAVE']),
-    el('div', { class: 'lab' }, ['ORIGINAL']),
+    el('h3', {}, ['Before you save']),
+    el('div', { class: 'lab' }, ['Original']),
     originalPlay,
-    el('div', { class: 'lab', style: 'margin-top:10px' }, ['CLONE SAYS']),
+    el('div', { class: 'lab', style: 'margin-top:10px' }, ['Clone says']),
     previewLine,
     previewBtn,
-    el('div', { style: 'color:var(--muted);font-size:11px;margin-top:10px' }, [
+    el('div', { style: 'color:var(--muted);font-size:13px;margin-top:10px' }, [
       'Sounds off? Trim tighter, fix the transcript, try again. Nothing is saved until you create it.',
     ]),
   ]);
@@ -167,7 +167,7 @@ export function mount(view, params) {
     wireDrag(startHandle, 'start', duration);
     wireDrag(endHandle, 'end', duration);
     waveWrap.append(
-      el('div', { style: 'display:flex;justify-content:space-between;color:var(--muted);font-size:10px' }, [
+      el('div', { style: 'display:flex;justify-content:space-between;color:var(--muted);font-size:12px' }, [
         el('span', {}, [`${(trimEnd - trimStart).toFixed(1)} s selected`]),
         el('span', {}, ['drag the cyan handles to trim']),
       ]),
@@ -327,7 +327,7 @@ export function mount(view, params) {
     })(),
     el('span', { style: 'color:var(--muted)' }, ['or']),
     (() => {
-      const btn = el('button', { class: 'rec' }, ['● RECORD']);
+      const btn = el('button', { class: 'rec' }, ['● Record']);
       btn.addEventListener('click', () => toggleRecord(btn));
       return btn;
     })(),
@@ -366,13 +366,13 @@ export function mount(view, params) {
     mediaRecorder.onstop = async () => {
       stream.getTracks().forEach((t) => t.stop());
       btn.classList.remove('on');
-      btn.textContent = '● RECORD';
+      btn.textContent = '● Record';
       const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
       await uploadRawClip(new File([blob], 'recording', { type: blob.type }));
     };
     mediaRecorder.start();
     btn.classList.add('on');
-    btn.textContent = '■ STOP';
+    btn.textContent = '■ Stop';
   }
 
   previewBtn.addEventListener('click', async () => {

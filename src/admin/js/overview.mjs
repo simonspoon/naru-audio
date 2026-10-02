@@ -10,8 +10,8 @@ import { el, toast, playButton, waveformSvg, peaks, decodeWav, fmtBytes } from '
 
 export function mount(view) {
   let disposed = false;
-  const modelsCard = el('div', { class: 'card' }, [el('h3', {}, ['MODELS'])]);
-  const voicesTitle = el('h3', {}, ['VOICES']);
+  const modelsCard = el('div', { class: 'card' }, [el('h3', {}, ['Models'])]);
+  const voicesTitle = el('h3', {}, ['Voices']);
   const voicesGrid = el('div', { class: 'vg' });
   const voicesCard = el('div', { class: 'card' }, [voicesTitle, voicesGrid]);
   view.append(el('div', { class: 'grid' }, [modelsCard, voicesCard]));
@@ -31,7 +31,7 @@ export function mount(view) {
   }
 
   function renderModels(list) {
-    modelsCard.replaceChildren(el('h3', {}, ['MODELS']));
+    modelsCard.replaceChildren(el('h3', {}, ['Models']));
     for (const m of list) {
       modelsCard.append(modelRow(m));
     }
@@ -104,11 +104,11 @@ export function mount(view) {
   async function renderVoices(ttsDefault) {
     voicesGrid.replaceChildren();
     if (!ttsDefault) {
-      voicesTitle.textContent = 'VOICES';
+      voicesTitle.textContent = 'Voices';
       voicesGrid.append(el('div', { class: 'placeholder' }, ['no default TTS model']));
       return;
     }
-    voicesTitle.textContent = `VOICES · ${ttsDefault.id}`;
+    voicesTitle.textContent = `Voices · ${ttsDefault.id}`;
     let voices;
     try {
       voices = (await getJson(`/v1/audio/voices?model=${encodeURIComponent(ttsDefault.id)}`, {

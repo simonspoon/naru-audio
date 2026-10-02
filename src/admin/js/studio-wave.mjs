@@ -12,9 +12,10 @@ import { speakerColor } from './studio-edit.mjs';
 
 const OVERVIEW_BUCKETS = 2000;
 const OVERVIEW_H = 52;
-const RULER_H = 14;
-const TAKES_H = 16;
-const WAVE_H = 150;
+const RULER_H = 16;
+const TAKES_H = 18;
+// The waveform grows with the window.
+const waveH = () => Math.round(Math.min(380, Math.max(150, window.innerHeight * 0.3)));
 const LANE_H = 9;
 const MIN_VIEW_S = 0.5;
 const MIN_CROP_S = 0.2;
@@ -135,7 +136,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
   }
 
   function mainHeight() {
-    return RULER_H + (hasTakes() ? TAKES_H : 0) + WAVE_H + data.lanes.length * LANE_H + 2;
+    return RULER_H + (hasTakes() ? TAKES_H : 0) + waveH() + data.lanes.length * LANE_H + 2;
   }
 
   const clampT = (t) => Math.min(duration, Math.max(0, t));
@@ -261,7 +262,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
     const x = (t) => tToX(t, w);
 
     // ruler
-    ctx.font = '10px "Share Tech Mono", monospace';
+    ctx.font = '12px "Share Tech Mono", monospace';
     ctx.fillStyle = '#5d7f8f';
     ctx.strokeStyle = '#16384a';
     const len = view.end - view.start;
@@ -273,7 +274,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
       ctx.moveTo(tx, RULER_H - 4);
       ctx.lineTo(tx, h);
       ctx.stroke();
-      ctx.fillText(fmtTime(t), tx + 3, 10);
+      ctx.fillText(fmtTime(t), tx + 3, 12);
     }
 
     // speaker tint behind the waveform
@@ -281,7 +282,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
       ctx.fillStyle = `${speakerColor(lane.speaker)}${data.activeSpeaker === lane.speaker ? '30' : '14'}`;
       for (const s of lane.spans) {
         if (s.end < view.start || s.start > view.end) continue;
-        ctx.fillRect(x(s.start), wy, Math.max(1, x(s.end) - x(s.start)), WAVE_H);
+        ctx.fillRect(x(s.start), wy, Math.max(1, x(s.end) - x(s.start)), waveH());
       }
     }
 
@@ -289,7 +290,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
     const src = detailCovers() ? detail : overview;
     if (src) {
       ctx.fillStyle = 'rgba(93,127,143,0.55)';
-      drawColumns(ctx, w, wy, WAVE_H, src);
+      drawColumns(ctx, w, wy, waveH(), src);
       ctx.save();
       ctx.beginPath();
       for (const s of data.kept) {
@@ -297,29 +298,29 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
         ctx.rect(x(s.start), 0, Math.max(1, x(s.end) - x(s.start)), h);
       }
       ctx.clip();
-      const grad = ctx.createLinearGradient(0, wy, 0, wy + WAVE_H);
+      const grad = ctx.createLinearGradient(0, wy, 0, wy + waveH());
       grad.addColorStop(0, '#00e5ff');
       grad.addColorStop(1, '#b06bff');
       ctx.fillStyle = grad;
-      drawColumns(ctx, w, wy, WAVE_H, src);
+      drawColumns(ctx, w, wy, waveH(), src);
       ctx.restore();
     } else {
       ctx.fillStyle = '#5d7f8f';
-      ctx.fillText('loading waveform…', 8, wy + WAVE_H / 2);
+      ctx.fillText('loading waveform…', 8, wy + waveH() / 2);
     }
 
     // outside the crop
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    if (crop.start > view.start) ctx.fillRect(0, wy, Math.min(w, x(crop.start)), WAVE_H);
-    if (crop.end < view.end) ctx.fillRect(Math.max(0, x(crop.end)), wy, w, WAVE_H);
+    if (crop.start > view.start) ctx.fillRect(0, wy, Math.min(w, x(crop.start)), waveH());
+    if (crop.end < view.end) ctx.fillRect(Math.max(0, x(crop.end)), wy, w, waveH());
 
     // cuts: dimmed and struck through
     for (const c of data.cuts) {
       if (c.end < view.start || c.start > view.end) continue;
       ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(x(c.start), wy, Math.max(1, x(c.end) - x(c.start)), WAVE_H);
+      ctx.fillRect(x(c.start), wy, Math.max(1, x(c.end) - x(c.start)), waveH());
       ctx.fillStyle = 'rgba(255,59,92,0.9)';
-      ctx.fillRect(x(c.start), wy + WAVE_H / 2 - 1, Math.max(1, x(c.end) - x(c.start)), 2);
+      ctx.fillRect(x(c.start), wy + waveH() / 2 - 1, Math.max(1, x(c.end) - x(c.start)), 2);
     }
 
     // crosstalk: hatched red; a stronger wash and top bar when it is not being dropped
@@ -329,10 +330,10 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
       const ox = x(o.start);
       const ow = Math.max(2, x(o.end) - ox);
       ctx.fillStyle = data.excludeOverlaps ? 'rgba(255,59,92,0.10)' : 'rgba(255,59,92,0.28)';
-      ctx.fillRect(ox, wy, ow, WAVE_H);
+      ctx.fillRect(ox, wy, ow, waveH());
       ctx.globalAlpha = data.excludeOverlaps ? 0.45 : 1;
       ctx.fillStyle = pattern;
-      ctx.fillRect(ox, wy, ow, WAVE_H);
+      ctx.fillRect(ox, wy, ow, waveH());
       ctx.globalAlpha = 1;
       if (!data.excludeOverlaps) {
         ctx.fillStyle = '#ff3b5c';
@@ -348,16 +349,16 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
         const tw = Math.max(2, x(t.end) - tx);
         ctx.strokeStyle = t.picked ? '#2bff9c' : 'rgba(93,127,143,0.8)';
         ctx.lineWidth = t.picked ? 2 : 1;
-        ctx.strokeRect(tx + 0.5, RULER_H + 1, tw, TAKES_H - 2 + WAVE_H);
+        ctx.strokeRect(tx + 0.5, RULER_H + 1, tw, TAKES_H - 2 + waveH());
         ctx.lineWidth = 1;
         ctx.fillStyle = t.picked ? '#2bff9c' : '#5d7f8f';
-        if (tw > 26) ctx.fillText(t.score.toFixed(2), tx + 4, RULER_H + 12);
+        if (tw > 26) ctx.fillText(t.score.toFixed(2), tx + 4, RULER_H + 13);
       }
     }
 
     // speaker lanes under the waveform
     data.lanes.forEach((lane, i) => {
-      const ly = wy + WAVE_H + i * LANE_H;
+      const ly = wy + waveH() + i * LANE_H;
       ctx.fillStyle = speakerColor(lane.speaker);
       ctx.globalAlpha = data.activeSpeaker == null || data.activeSpeaker === lane.speaker ? 1 : 0.35;
       for (const s of lane.spans) {

@@ -6,13 +6,13 @@
 import { getJson, postJson, putJson, del, streamNdjson } from './api.mjs';
 import { el, toast, fmtBytes, fmtUptime } from './ui.mjs';
 
-const FILTERS = ['ALL', 'TTS', 'STT', 'ON DISK', 'RUNNING'];
+const FILTERS = ['All', 'TTS', 'STT', 'On disk', 'Running'];
 
 export function mount(view, params) {
   let disposed = false;
   let models = [];
   let selectedId = params.model ?? null;
-  let filter = 'ALL';
+  let filter = 'All';
   let search = '';
   let pullTimer = null;
 
@@ -28,9 +28,9 @@ export function mount(view, params) {
         return m.x_kind === 'tts';
       case 'STT':
         return m.x_kind === 'stt';
-      case 'ON DISK':
+      case 'On disk':
         return m.x_pulled;
-      case 'RUNNING':
+      case 'Running':
         return m.x_loaded;
       default:
         return true;
@@ -70,11 +70,11 @@ export function mount(view, params) {
       .filter((m) => !search || m.id.toLowerCase().includes(search.toLowerCase()));
     table.replaceChildren(
       el('tr', {}, [
-        el('th', {}, ['MODEL']),
-        el('th', {}, ['KIND']),
-        el('th', {}, ['CAN DO']),
-        el('th', {}, ['LICENSE']),
-        el('th', {}, ['STATE']),
+        el('th', {}, ['Model']),
+        el('th', {}, ['Kind']),
+        el('th', {}, ['Can do']),
+        el('th', {}, ['License']),
+        el('th', {}, ['State']),
         el('th', {}, ['']),
       ]),
       ...rows.map(modelRow),
@@ -237,16 +237,16 @@ export function mount(view, params) {
         el(
           'button',
           { class: 'big', onclick: () => setDefault(m) },
-          [m.x_default ? '★ DEFAULT' : `★ DEFAULT FOR ${m.x_kind.toUpperCase()}`],
+          [m.x_default ? '★ Default' : `★ Default for ${m.x_kind.toUpperCase()}`],
         ),
       );
     }
     if (m.x_loaded) {
-      nodes.push(el('button', { class: 'big', onclick: () => unload(m) }, ['UNLOAD']));
+      nodes.push(el('button', { class: 'big', onclick: () => unload(m) }, ['Unload']));
     }
     if (m.x_pulled) {
       nodes.push(
-        el('button', { class: 'big r', onclick: () => removeModel(m) }, ['DELETE FROM DISK']),
+        el('button', { class: 'big r', onclick: () => removeModel(m) }, ['Delete from disk']),
       );
     }
     sidePanel.replaceChildren(...nodes);

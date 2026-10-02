@@ -1,3 +1,4 @@
+Copyright 2016 The Inter Project Authors (https://github.com/rsms/inter)
 Copyright 2018 The Orbitron Project Authors (https://github.com/theleagueof/orbitron)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.

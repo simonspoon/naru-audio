@@ -58,7 +58,7 @@ async function pollTopbar() {
       getJson('/api/ps', { silent: true }),
     ]);
     const online = document.getElementById('online-pill');
-    online.textContent = `● ONLINE :${location.port || 80}`;
+    online.textContent = `● Online :${location.port || 80}`;
     online.classList.add('ok');
     online.classList.remove('bad');
     document.getElementById('tts-pill').textContent = `TTS: ${health.tts.default}`;
@@ -66,10 +66,10 @@ async function pollTopbar() {
     const used = ps.reduce((sum, m) => sum + (m.resident_bytes ?? 0), 0);
     const budget = health.profile.budget_bytes;
     document.getElementById('mem-pill').textContent =
-      `MEM ${(used / 1e9).toFixed(1)} / ${(budget / 1e9).toFixed(0)} GB`;
+      `Mem ${(used / 1e9).toFixed(1)} / ${(budget / 1e9).toFixed(0)} GB`;
   } catch {
     const online = document.getElementById('online-pill');
-    online.textContent = '● OFFLINE';
+    online.textContent = '● Offline';
     online.classList.add('bad');
     online.classList.remove('ok');
   }

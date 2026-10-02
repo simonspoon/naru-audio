@@ -115,7 +115,7 @@ export function mount(view, params) {
       if (file) loadFile(file);
     });
     setChildren(uploadCard, [
-      el('h3', {}, ['NEW SAMPLE PROJECT']),
+      el('h3', {}, ['New sample project']),
       drop,
       el('div', { class: 'studio-note', style: 'margin-top:6px' }, [
         'WAV / MP3 / M4A, up to 4 h. It opens raw in Sample Studio — separate speakers, cut, pick the best takes, clean.',
@@ -139,7 +139,7 @@ export function mount(view, params) {
   function projectRow(p) {
     return el('div', { class: 'row' }, [
       el('b', {}, [p.name]),
-      el('span', { style: 'color:var(--muted);font-size:11px' }, [
+      el('span', { style: 'color:var(--muted);font-size:13px' }, [
         `${fmtMmSs(p.duration)} · ${p.speaker != null ? `speaker ${p.speaker}` : 'all speakers'} · ${p.segment_count} segment${p.segment_count === 1 ? '' : 's'} · ${
           p.updated_at ? new Date(p.updated_at).toLocaleString() : ''
         }`,
@@ -151,7 +151,7 @@ export function mount(view, params) {
 
   function renderProjects() {
     setChildren(projectsCard, [
-      el('h3', {}, ['SAMPLE PROJECTS']),
+      el('h3', {}, ['Sample projects']),
       ...projects.map(projectRow),
       projects.length ? null : el('div', { class: 'placeholder' }, ['no saved projects yet']),
     ]);
@@ -172,7 +172,7 @@ export function mount(view, params) {
         el('span', { style: 'color:var(--muted);width:50px;text-align:right' }, [
           fmtMmSs(sampleSecs(s)),
         ]),
-        el('span', { style: `color:${s.engines?.length ? 'var(--green)' : 'var(--amber)'};font-size:11px` }, [
+        el('span', { style: `color:${s.engines?.length ? 'var(--green)' : 'var(--amber)'};font-size:13px` }, [
           statusOf(s),
         ]),
       ],
@@ -181,7 +181,7 @@ export function mount(view, params) {
 
   function renderList() {
     setChildren(listCard, [
-      el('h3', {}, ['SAMPLES']),
+      el('h3', {}, ['Samples']),
       ...samples.map(libraryRow),
       samples.length ? null : el('div', { class: 'placeholder' }, ['no samples yet']),
     ]);
@@ -216,16 +216,16 @@ export function mount(view, params) {
       kv('status', statusOf(s)),
       kv('speaker', s.speaker ?? '—'),
       s.warnings?.length ? el('div', { class: 'warn' }, [s.warnings.join('; ')]) : null,
-      el('div', { class: 'lab', style: 'margin-top:10px' }, ['A/B PREVIEW']),
+      el('div', { class: 'lab', style: 'margin-top:10px' }, ['A/B preview']),
       playRow(() => rawUrl, 'raw crop'),
       playRow(() => cleanUrl, 'cleaned'),
-      el('button', { class: 'big', onclick: () => openStudio(s.id) }, ['OPEN IN SAMPLE STUDIO']),
-      el('div', { class: 'lab', style: 'margin-top:10px' }, ['RENAME']),
+      el('button', { class: 'big', onclick: () => openStudio(s.id) }, ['Open in Sample Studio']),
+      el('div', { class: 'lab', style: 'margin-top:10px' }, ['Rename']),
       el('div', { class: 'row' }, [
         renameInput,
         el('button', { class: 'btn', onclick: () => renameSample(s) }, ['save']),
       ]),
-      el('button', { class: 'big r', onclick: () => deleteSample(s) }, ['DELETE']),
+      el('button', { class: 'big r', onclick: () => deleteSample(s) }, ['Delete']),
     ]);
   }
 

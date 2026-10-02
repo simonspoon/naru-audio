@@ -67,7 +67,7 @@ function fmtValue(v, unit) {
 }
 
 function paramLabel(name) {
-  return name.replace(/_(hz|db|ms|lufs)$/, '').replace(/_/g, ' ').toUpperCase();
+  return name.replace(/_(hz|db|ms|lufs)$/, '').replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
 }
 
 function stepTitle(type) {
@@ -194,34 +194,34 @@ export function mount(view, params) {
   const pipelineHost = el('div', { class: 'studio-cards' });
   const meterHost = el('div', { class: 'studio-meters' });
   const subtitle = el('span', { class: 'studio-sub' });
-  const abA = el('button', { type: 'button', onclick: () => setAb('A') }, ['A · RAW']);
-  const abB = el('button', { type: 'button', onclick: () => setAb('B') }, ['B · PIPELINE']);
+  const abA = el('button', { type: 'button', onclick: () => setAb('A') }, ['A · Raw']);
+  const abB = el('button', { type: 'button', onclick: () => setAb('B') }, ['B · Pipeline']);
   const useBtn = el('button', { class: 'studio-use', type: 'button', onclick: useAsCloneSample }, [
-    'USE AS CLONE SAMPLE →',
+    'Use as clone sample →',
   ]);
   const clipHost = el('div', { class: 'card studio-card' });
 
   view.append(
     el('div', { class: 'studio' }, [
       el('div', { class: 'studio-head' }, [
-        el('h2', {}, ['SAMPLE STUDIO']),
+        el('h2', {}, ['Sample Studio']),
         subtitle,
         el('div', { class: 'studio-ab' }, [abA, abB]),
         useBtn,
       ]),
       clipMode ? clipHost : null,
       el('div', { class: 'card studio-card' }, [
-        clipMode ? el('div', { class: 'lab' }, ['RESULT · THE KEPT AUDIO THROUGH THE PIPELINE']) : null,
+        clipMode ? el('div', { class: 'lab' }, ['Result · the kept audio through the pipeline']) : null,
         el('div', { class: 'studio-wave-head' }, [playBtn, clock, legend]),
         waveWrap,
         el('div', { class: 'studio-trans-head' }, [
-          el('span', { class: 'lab' }, ['TRANSCRIPT · AS SPOKEN · CLICK A WORD TO EDIT']),
+          el('span', { class: 'lab' }, ['Transcript · as spoken · click a word to edit']),
           badge,
         ]),
         wordHost,
       ]),
       el('div', { class: 'studio-sect' }, [
-        el('h3', {}, ['PIPELINE']),
+        el('h3', {}, ['Pipeline']),
         el('span', {}, ['one step at a time · drag to reorder · solo to hear just that step']),
       ]),
       pipelineHost,
@@ -305,9 +305,9 @@ export function mount(view, params) {
   function renderLegend() {
     const hearing = audition?.kind === 'hear' ? ` ${audition.index + 1}` : '';
     legend.replaceChildren(
-      el('span', { class: 'raw' }, ['RAW']),
-      el('span', { class: 'proc' }, [audition && !audition.busy && hearing ? `AFTER STEP${hearing}` : 'PIPELINE']),
-      el('span', { class: 'look' }, ['NEEDS A LOOK']),
+      el('span', { class: 'raw' }, ['Raw']),
+      el('span', { class: 'proc' }, [audition && !audition.busy && hearing ? `After step${hearing}` : 'Pipeline']),
+      el('span', { class: 'look' }, ['Needs a look']),
     );
   }
 
@@ -330,7 +330,7 @@ export function mount(view, params) {
     const n = unchecked();
     badge.classList.toggle('hidden', !words);
     badge.classList.toggle('ok', n === 0);
-    badge.replaceChildren(...(n ? [el('i', {}, [String(n)]), 'SAID ≠ WRITTEN'] : ['✓ ALL CHECKED']));
+    badge.replaceChildren(...(n ? [el('i', {}, [String(n)]), 'Said ≠ written'] : ['✓ All checked']));
   }
 
   function wordNode(w) {
@@ -484,7 +484,7 @@ export function mount(view, params) {
     const was = rawAnalysis?.noise_floor_dbfs;
     meterHost.replaceChildren(
       meter(
-        'LOUDNESS',
+        'Loudness',
         num(lufs) ? lufs.toFixed(1) : '—',
         'LUFS',
         num(lufs) ? (lufs + 40) / 40 : 0,
@@ -492,7 +492,7 @@ export function mount(view, params) {
         num(lufs) ? (lufs >= LUFS_OK[0] && lufs <= LUFS_OK[1] ? 'clone range' : `outside ${LUFS_OK[0]}..${LUFS_OK[1]}`) : 'silent',
       ),
       meter(
-        'PEAK',
+        'Peak',
         num(peak) ? peak.toFixed(1) : '—',
         'dBFS',
         num(peak) ? (peak + 40) / 40 : 0,
@@ -500,7 +500,7 @@ export function mount(view, params) {
         num(peak) ? (peak <= PEAK_OK_MAX ? 'no clipping' : 'close to clipping') : 'silent',
       ),
       meter(
-        'NOISE FLOOR',
+        'Noise floor',
         num(noise) ? noise.toFixed(0) : '—',
         'dB',
         num(noise) ? (noise + 90) / 70 : 0,
@@ -508,7 +508,7 @@ export function mount(view, params) {
         num(was) ? `was ${was.toFixed(0)}` : num(noise) ? (noise <= NOISE_OK_MAX ? 'quiet' : 'noisy') : 'silent',
       ),
       meter(
-        'SPEECH',
+        'Speech',
         num(speech) ? speech.toFixed(1) : '—',
         num(a?.duration_secs) ? `s of ${a.duration_secs.toFixed(1)}` : 's',
         num(speech) && num(a?.duration_secs) ? speech / a.duration_secs : 0,
@@ -516,7 +516,7 @@ export function mount(view, params) {
         num(speech) ? `${SPEECH_OK[0]}-${SPEECH_OK[1]} s ideal` : 'needs the silero-vad model',
       ),
       meter(
-        'TRANSCRIPT MATCH',
+        'Transcript match',
         words ? String(n) : '—',
         words ? 'words to check' : '',
         words && words.length ? 1 - n / words.length : 0,
@@ -663,8 +663,8 @@ export function mount(view, params) {
         tag ? el('div', { class: 'tag' }, [tag]) : null,
         el('div', { class: 'knobs' }, knobs.length ? knobs.map((k) => knobNode(k, chainChanged)) : [el('div', { class: 'studio-note' }, ['no settings'])]),
         el('div', { class: 'acts' }, [
-          actionBtn('solo', 'SOLO', isSolo),
-          actionBtn('hear', '▶ HEAR', isHear),
+          actionBtn('solo', 'Solo', isSolo),
+          actionBtn('hear', '▶ Hear', isHear),
           el('button', {
             type: 'button',
             class: 'studio-act x',
@@ -737,7 +737,7 @@ export function mount(view, params) {
             renderPipeline();
           },
         },
-        [el('b', {}, ['+']), el('span', {}, ['ADD STEP']), menu],
+        [el('b', {}, ['+']), el('span', {}, ['Add step']), menu],
       ),
     );
   }
@@ -958,7 +958,7 @@ export function mount(view, params) {
         getExtras: () => ({ steps, transcript: transcriptText(), fixes: Object.fromEntries(fixes) }),
         onChange: clipChanged,
       });
-      clipHost.append(el('div', { class: 'lab' }, ['CLIP EDITOR · RAW AUDIO']), editor.root);
+      clipHost.append(el('div', { class: 'lab' }, ['Clip editor · raw audio']), editor.root);
       await editor.ready;
     } catch {
       if (!disposed) {

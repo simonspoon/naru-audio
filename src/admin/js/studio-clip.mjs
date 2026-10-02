@@ -215,23 +215,23 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
     const sel = !!selection;
     const playing = player.playingTag();
     setKids(toolbar,
-      tb(playing === 'kept' ? '■ STOP' : '▶ PLAY KEPT', playKept, { title: 'plays only what is kept (Space)' }),
-      tb(playing === 'selection' ? '■ STOP' : '▶ SELECTION', playSelection, { disabled: !sel }),
+      tb(playing === 'kept' ? '■ Stop' : '▶ Play kept', playKept, { title: 'plays only what is kept (Space)' }),
+      tb(playing === 'selection' ? '■ Stop' : '▶ Selection', playSelection, { disabled: !sel }),
       el('span', { class: 'sc-sep' }),
-      tb('✂ CUT', cutSelection, { disabled: !sel, title: 'delete the selected region (Delete)' }),
-      tb('UNCUT', uncutSelection, { disabled: !sel || !model.cuts.length, cls: 'x', title: 'bring cut audio in the selection back' }),
-      tb('KEEP ONLY SELECTION', cropToSelection, { disabled: !sel, title: 'crop to the selection' }),
+      tb('✂ Cut', cutSelection, { disabled: !sel, title: 'delete the selected region (Delete)' }),
+      tb('Uncut', uncutSelection, { disabled: !sel || !model.cuts.length, cls: 'x', title: 'bring cut audio in the selection back' }),
+      tb('Keep only selection', cropToSelection, { disabled: !sel, title: 'crop to the selection' }),
       el('span', { class: 'sc-sep' }),
       tb('↶', undo, { disabled: !history.canUndo(), cls: 'x', title: 'undo (Ctrl/Cmd-Z)' }),
       tb('↷', redo, { disabled: !history.canRedo(), cls: 'x', title: 'redo (Shift-Cmd-Z / Ctrl-Y)' }),
-      tb('RESET', () => mutate((m) => Object.assign(m, newModel(clip.duration_secs), { takes: m.takes })), {
+      tb('Reset', () => mutate((m) => Object.assign(m, newModel(clip.duration_secs), { takes: m.takes })), {
         cls: 'x',
         title: 'drop every crop, cut and speaker choice',
       }),
       el('span', { class: 'sc-sep' }),
       tb('−', () => wave.zoomBy(0.5), { cls: 'x', title: 'zoom out (Ctrl/Cmd-wheel)' }),
       tb('+', () => wave.zoomBy(2), { cls: 'x', title: 'zoom in (Ctrl/Cmd-wheel)' }),
-      tb('FIT', () => wave.fitAll(), { cls: 'x' }),
+      tb('Fit', () => wave.fitAll(), { cls: 'x' }),
       tb('◂', () => wave.panBy(-0.4), { cls: 'x', title: 'scroll left (shift-drag also pans)' }),
       tb('▸', () => wave.panBy(0.4), { cls: 'x' }),
     );
@@ -245,7 +245,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
     else if (secs > CLONE_MAX_S) verdict = el('span', { class: 'warn-t' }, [`! too long — a clone sample needs ${CLONE_MIN_S}–${CLONE_MAX_S} s (pick best takes or crop)`]);
     else if (secs < IDEAL[0] || secs > IDEAL[1]) verdict = el('span', { class: 'studio-note' }, [`ok — ${IDEAL[0]}–${IDEAL[1]} s is ideal`]);
     setKids(readout,
-      el('span', { class: 'lab' }, ['KEPT']),
+      el('span', { class: 'lab' }, ['Kept']),
       el('b', {}, [`${secs.toFixed(1)} s`]),
       el('span', { class: 'studio-note' }, [` in ${keptCache.length} segment${keptCache.length === 1 ? '' : 's'} of ${fmt(clip.duration_secs)}`]),
       verdict,
@@ -329,13 +329,13 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
 
   function renderSpeakers() {
     if (!wave) return;
-    const head = el('div', { class: 'lab' }, ['SPEAKERS']);
+    const head = el('div', { class: 'lab' }, ['Speakers']);
     if (transcriptState === 'none') {
       setKids(speakersHost,
         head,
         el('div', { class: 'studio-note' }, ['Separate speakers to see who talks when, keep one voice and drop crosstalk. Runs speech recognition over the whole clip, so a long clip takes a while — you can keep editing meanwhile.']),
         speakerCountSelect(),
-        tb('SEPARATE SPEAKERS', separateSpeakers, { cls: 'v' }),
+        tb('Separate speakers', separateSpeakers, { cls: 'v' }),
       );
       return;
     }
@@ -354,18 +354,18 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
       head,
       ...(stats.length
         ? [
-            el('div', { class: 'studio-note' }, ['KEEP one speaker — the others are dropped']),
+            el('div', { class: 'studio-note' }, ['Keep one speaker — the others are dropped']),
             ...[...stats].sort((a, b) => b.secs - a.secs).map((s) =>
               el('div', { class: 'sc-row' }, [
-                radio(s.speaker, `SPEAKER ${s.speaker}`, [el('i', { class: 'sc-dot', style: `background:${speakerColor(s.speaker)}` })]),
+                radio(s.speaker, `Speaker ${s.speaker}`, [el('i', { class: 'sc-dot', style: `background:${speakerColor(s.speaker)}` })]),
                 el('span', { class: 'studio-note' }, [`${s.secs.toFixed(1)} s`]),
                 tb(player.playingTag() === `speaker:${s.speaker}` ? '■' : '▶', () => togglePlay(auditionSpans(s.speaker), `speaker:${s.speaker}`), {
                   title: `audition speaker ${s.speaker}`,
                 }),
               ]),
             ),
-            el('div', { class: 'sc-row' }, [radio(null, 'ALL SPEAKERS', [])]),
-            el('div', { class: 'sc-row' }, [speakerCountSelect(), tb('RE-SEPARATE', separateSpeakers, { title: 'run speaker separation again with this speaker count' })]),
+            el('div', { class: 'sc-row' }, [radio(null, 'All speakers', [])]),
+            el('div', { class: 'sc-row' }, [speakerCountSelect(), tb('Re-separate', separateSpeakers, { title: 'run speaker separation again with this speaker count' })]),
           ]
         : [el('div', { class: 'studio-note' }, ['no speech found'])]),
       el('label', { class: 'chk sc-cross' }, [
@@ -443,7 +443,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
 
   function renderTakes() {
     if (!wave) return;
-    const head = el('div', { class: 'lab' }, ['BEST TAKES']);
+    const head = el('div', { class: 'lab' }, ['Best takes']);
     if (!transcript) {
       setKids(takesHost, head, el('div', { class: 'studio-note' }, ['Takes are scored on the transcript and speakers — separate speakers first.']));
       return;
@@ -472,7 +472,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
         el('span', { class: 'studio-note' }, ['–']),
         num('max'),
         el('span', { class: 'studio-note' }, ['s']),
-        tb(takesBusy ? 'SCORING…' : '★ PICK BEST TAKES', pickTakes, { cls: 'v', disabled: takesBusy }),
+        tb(takesBusy ? 'Scoring…' : '★ Pick best takes', pickTakes, { cls: 'v', disabled: takesBusy }),
       ]),
       list.length
         ? el('div', { class: 'sc-takes' }, list.map(takeRow))
@@ -538,7 +538,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
   function renderProject() {
     if (!wave) return;
     setKids(projectHost,
-      el('span', { class: 'lab' }, ['PROJECT']),
+      el('span', { class: 'lab' }, ['Project']),
       el('input', {
         class: 'inp sc-name',
         placeholder: 'name this project',
@@ -546,7 +546,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
         oninput: (e) => (name = e.target.value),
         onchange: () => scheduleSave(),
       }),
-      tb('SAVE PROJECT', save, { disabled: saving }),
+      tb('Save project', save, { disabled: saving }),
       el('span', { class: 'studio-note' }, [saveText || (savedOnce ? '' : 'not saved yet — saving turns on autosave')]),
     );
   }

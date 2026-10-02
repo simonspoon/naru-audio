@@ -90,7 +90,7 @@ export function mount(view, params) {
   const formatPickerWrap = el('div', {});
   const speedWrap = el('div', {});
   const knobsWrap = el('div', {});
-  const speakBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:140px' }, ['▶ SPEAK']);
+  const speakBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:140px' }, ['▶ Speak']);
   const waveWrap = el('div', { style: 'margin-top:10px' });
   const statRow = el('div', { class: 'stat' });
   const downloadLink = el('a', { class: 'btn', style: 'display:none' }, ['⇩ download']);
@@ -98,12 +98,12 @@ export function mount(view, params) {
   const copyCurlBtn = el('span', { class: 'btn', style: 'margin-left:auto' }, ['⧉ copy']);
 
   const speakCard = el('div', { class: 'card' }, [
-    el('h3', {}, ['SPEAK · TEXT → AUDIO']),
-    el('div', { class: 'lab' }, ['MODEL']),
+    el('h3', {}, ['Speak · text → audio']),
+    el('div', { class: 'lab' }, ['Model']),
     speakModelBar,
     instructWrap,
     prefixWrap,
-    el('div', { class: 'lab', style: 'margin-top:8px' }, ['TEXT TO SPEAK']),
+    el('div', { class: 'lab', style: 'margin-top:8px' }, ['Text to speak']),
     textBox,
     tagStrip,
     el('div', { style: 'display:flex;gap:14px;margin-top:8px;align-items:flex-end;flex-wrap:wrap' }, [
@@ -122,22 +122,22 @@ export function mount(view, params) {
   // --- Listen panel --------------------------------------------------------
 
   const sttModelBar = el('div', { class: 'filt' });
-  const recordBtn = el('button', { class: 'rec' }, ['● RECORD']);
+  const recordBtn = el('button', { class: 'rec' }, ['● Record']);
   const dropZone = el('div', { class: 'drop' });
   const liveBox = el('div', { class: 'live' }, [el('span', {}, ['record or drop a file to transcribe']) ]);
   const listenStat = el('div', { class: 'stat' });
   const copyTranscriptBtn = el('span', { class: 'btn', style: 'margin-left:auto' }, ['⧉ copy text']);
 
   const listenCard = el('div', { class: 'card' }, [
-    el('h3', {}, ['LISTEN · AUDIO → TEXT']),
-    el('div', { class: 'lab' }, ['MODEL']),
+    el('h3', {}, ['Listen · audio → text']),
+    el('div', { class: 'lab' }, ['Model']),
     sttModelBar,
     el('div', { style: 'display:flex;gap:8px;align-items:center;margin:8px 0' }, [
       recordBtn,
-      el('span', { style: 'color:var(--muted);font-size:11px' }, ['or drop a file below']),
+      el('span', { style: 'color:var(--muted);font-size:13px' }, ['or drop a file below']),
     ]),
     dropZone,
-    el('div', { class: 'lab', style: 'margin-top:10px' }, ['TRANSCRIPT']),
+    el('div', { class: 'lab', style: 'margin-top:10px' }, ['Transcript']),
     liveBox,
     listenStat,
   ]);
@@ -187,16 +187,16 @@ export function mount(view, params) {
     if (model.x_instruct && style !== 'inline_prefix') {
       instructWrap.append(
         el('div', { style: 'display:flex;align-items:center;gap:8px' }, [
-          el('div', { class: 'lab', style: 'margin:0' }, ['OVERALL INSTRUCTION']),
+          el('div', { class: 'lab', style: 'margin:0' }, ['Overall instruction']),
           el('span', { class: 'cap y' }, ['this model takes one']),
         ]),
         el('textarea', { class: 'inp', rows: 1, id: 'pg-instruction' }),
       );
     } else if (style === 'inline_prefix') {
       prefixWrap.append(
-        el('div', { class: 'lab' }, ['DESCRIPTION · PREFIXED TO THE TEXT']),
+        el('div', { class: 'lab' }, ['Description · prefixed to the text']),
         el('input', { class: 'inp', id: 'pg-prefix' }),
-        el('div', { style: 'color:var(--muted);font-size:11px;margin-top:2px' }, [
+        el('div', { style: 'color:var(--muted);font-size:13px;margin-top:2px' }, [
           model.x_prompt_format?.hint ?? 'e.g. (cheerful, slightly faster)',
         ]),
       );
@@ -221,7 +221,7 @@ export function mount(view, params) {
     const wrap = (tag) => syntax.replace(/tag/, tag);
     tagStrip.append(
       el('div', { class: 'cmp', style: 'border-left:2px solid var(--violet);margin-top:8px' }, [
-        el('span', { style: 'color:var(--violet)' }, ['INLINE FOR THIS MODEL']),
+        el('span', { style: 'color:var(--violet)' }, ['Inline for this model']),
         ' ',
         ...inline.tags.map((tag) =>
           el(
@@ -230,7 +230,7 @@ export function mount(view, params) {
             [wrap(tag)],
           ),
         ),
-        el('span', { style: 'color:var(--muted);font-size:11px;display:block;margin-top:4px' }, [
+        el('span', { style: 'color:var(--muted);font-size:13px;display:block;margin-top:4px' }, [
           inline.example ?? model.x_prompt_format?.hint ?? 'click a tag to insert it at the cursor',
         ]),
       ]),
@@ -243,7 +243,7 @@ export function mount(view, params) {
     const items = voices.map((v) => ({ id: v.id, label: v.id }));
     const select = picker(items, speakVoice, (id) => (speakVoice = id));
     select.className = 'sel';
-    voicePickerWrap.append(el('div', { class: 'lab' }, ['VOICE']), select);
+    voicePickerWrap.append(el('div', { class: 'lab' }, ['Voice']), select);
   }
 
   function renderFormatPicker() {
@@ -253,7 +253,7 @@ export function mount(view, params) {
       (id) => (speakFormat = id),
     );
     select.className = 'sel';
-    formatPickerWrap.replaceChildren(el('div', { class: 'lab' }, ['FORMAT']), select);
+    formatPickerWrap.replaceChildren(el('div', { class: 'lab' }, ['Format']), select);
   }
 
   function knobSlider(knob, onDefaultRow) {
@@ -261,7 +261,7 @@ export function mount(view, params) {
     const step = knob.step ?? (hasRange ? (knob.max - knob.min) / 100 : 0.1);
     const initial = knobValues[knob.name] ?? knob.default ?? 0;
     knobValues[knob.name] = initial;
-    const valueLabel = el('span', { style: 'color:var(--muted);font-size:11px' }, [
+    const valueLabel = el('span', { style: 'color:var(--muted);font-size:13px' }, [
       `${initial}${knob.name === 'speed' ? '×' : ''}`,
     ]);
     const input = hasRange
@@ -279,7 +279,7 @@ export function mount(view, params) {
       valueLabel.textContent = `${v}${knob.name === 'speed' ? '×' : ''}`;
     });
     if (onDefaultRow) {
-      return el('div', {}, [el('div', { class: 'lab' }, [knob.name.toUpperCase()]), input, valueLabel]);
+      return el('div', {}, [el('div', { class: 'lab' }, [knob.name]), input, valueLabel]);
     }
     return el('div', { class: 'row' }, [
       el('b', {}, [knob.name]),
@@ -302,7 +302,7 @@ export function mount(view, params) {
     const knobs = declaredKnobs(model).filter((k) => k.name !== 'speed');
     if (!knobs.length) return;
     knobsWrap.append(
-      el('div', { class: 'lab', style: 'margin-top:8px' }, ['KNOBS']),
+      el('div', { class: 'lab', style: 'margin-top:8px' }, ['Knobs']),
       ...knobs.map((k) => knobSlider(k, false)),
     );
   }
@@ -500,7 +500,7 @@ export function mount(view, params) {
       audioCtx = null;
     }
     recordBtn.classList.remove('on');
-    recordBtn.textContent = '● RECORD';
+    recordBtn.textContent = '● Record';
   }
 
   async function startRecording() {
@@ -559,7 +559,7 @@ export function mount(view, params) {
     source.connect(node);
 
     recordBtn.classList.add('on');
-    recordBtn.textContent = '■ STOP · recording';
+    recordBtn.textContent = '■ Stop · recording';
   }
 
   recordBtn.addEventListener('click', () => {

@@ -31,6 +31,26 @@ const ASSETS: &[Asset] = &[
         bytes: include_bytes!("../admin/fonts/OFL.txt"),
     },
     Asset {
+        path: "fonts/inter-latin-400-normal.woff2",
+        content_type: "font/woff2",
+        bytes: include_bytes!("../admin/fonts/inter-latin-400-normal.woff2"),
+    },
+    Asset {
+        path: "fonts/inter-latin-500-normal.woff2",
+        content_type: "font/woff2",
+        bytes: include_bytes!("../admin/fonts/inter-latin-500-normal.woff2"),
+    },
+    Asset {
+        path: "fonts/inter-latin-600-normal.woff2",
+        content_type: "font/woff2",
+        bytes: include_bytes!("../admin/fonts/inter-latin-600-normal.woff2"),
+    },
+    Asset {
+        path: "fonts/inter-latin-700-normal.woff2",
+        content_type: "font/woff2",
+        bytes: include_bytes!("../admin/fonts/inter-latin-700-normal.woff2"),
+    },
+    Asset {
         path: "fonts/orbitron-latin-400-normal.woff2",
         content_type: "font/woff2",
         bytes: include_bytes!("../admin/fonts/orbitron-latin-400-normal.woff2"),
