@@ -166,12 +166,22 @@ pub(super) async fn upload_clip(
     let home = st.registry.home().to_path_buf();
     let id = prep::new_id();
     let dir = prep::clip_dir(&home, &id);
+    // A dropped handler (client disconnect) never reaches the error arms
+    // below; the guard removes the half-written clip dir instead.
+    let mut guard = DirGuard(Some(dir.clone()));
 
     let streamed = async {
         let mut saved: Option<(String, Option<String>, Option<String>)> = None;
         while let Some(mut field) = multipart.next_field().await.map_err(upload_error)? {
             if field.name().unwrap_or_default() != "file" {
                 continue;
+            }
+            if saved.is_some() {
+                return Err(bad_request(
+                    "file",
+                    "invalid_request",
+                    "only one \"file\" field is accepted",
+                ));
             }
             let filename = field.file_name().map(str::to_string);
             let content_type = field.content_type().map(str::to_string);
@@ -213,7 +223,29 @@ pub(super) async fn upload_clip(
         CreateClipError::Prep(e) => prep_error(&st, &req_id, e),
         CreateClipError::BadAudio(m) => bad_request("file", "invalid_request", m),
     })?;
+    guard.0 = None;
     Ok((StatusCode::CREATED, Json(clip_json(&meta))).into_response())
+}
+
+/// Removes a half-uploaded clip directory on drop unless disarmed
+/// (`.0 = None`). The removal runs on the blocking pool when a runtime is
+/// current, so a dropped handler future does not stall its executor thread.
+struct DirGuard(Option<PathBuf>);
+
+impl Drop for DirGuard {
+    fn drop(&mut self) {
+        let Some(dir) = self.0.take() else { return };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn_blocking(move || {
+                    let _ = std::fs::remove_dir_all(dir);
+                });
+            }
+            Err(_) => {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
 }
 
 /// A multipart read error: the body cap trips as 413, anything else is 400.
@@ -796,12 +828,13 @@ pub(super) async fn clip_takes(
                 format!("no diarized speaker {sp} in this clip's transcript"),
             ));
         }
-        let kept = match &req.segments {
-            Some(raw) => Some(
+        // `[]` means the whole clip, as in the Project docs, not keep-nothing.
+        let kept = match req.segments.as_deref() {
+            Some(raw) if !raw.is_empty() => Some(
                 edit::normalize_segments(raw, meta.duration_secs)
                     .map_err(|m| bad_request("segments", "invalid_request", m))?,
             ),
-            None => None,
+            _ => None,
         };
         let pcm = prep::read_wav(&prep::clip_dir(&home, &id).join(prep::WORKING_WAV))
             .map_err(prep_error_to_api)?;

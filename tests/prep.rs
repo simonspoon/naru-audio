@@ -173,6 +173,39 @@ async fn upload_with_no_file_field_is_400() {
 }
 
 #[tokio::test]
+async fn upload_with_two_file_fields_is_400_and_leaves_nothing() {
+    let home = home();
+    let part = |bytes: &[u8]| {
+        let mut p = format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\n"
+        )
+        .into_bytes();
+        p.extend_from_slice(bytes);
+        p.extend_from_slice(b"\r\n");
+        p
+    };
+    let mut body = part(&wav());
+    body.extend(part(&wav()));
+    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    let req = Request::post("/v1/audio/prep/clips")
+        .header(HOST, HOSTPORT)
+        .header(
+            CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let (status, body) = send(app(home.path()), req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["param"], "file");
+    let (_, listed) = get(home.path(), "/v1/audio/prep/clips").await;
+    assert_eq!(listed["clips"], json!([]));
+    let clips = naru_audio::prep::clip_dir(home.path(), "x");
+    let clips = clips.parent().unwrap();
+    assert!(!clips.exists() || std::fs::read_dir(clips).unwrap().next().is_none());
+}
+
+#[tokio::test]
 async fn upload_then_get_then_list_then_delete_a_clip() {
     let home = home();
     let (status, body) = upload(home.path(), &wav()).await;
@@ -1260,6 +1293,11 @@ async fn takes_need_a_transcript_then_pick_the_best() {
     let (status, out) = post_json(home.path(), &path, json!({"speaker": 0})).await;
     assert_eq!(status, StatusCode::OK, "{out}");
     let takes = out["takes"].as_array().unwrap();
+    // An empty `segments` is the whole clip, not keep-nothing.
+    let (status, empty) =
+        post_json(home.path(), &path, json!({"speaker": 0, "segments": []})).await;
+    assert_eq!(status, StatusCode::OK, "{empty}");
+    assert_eq!(empty["takes"], out["takes"]);
     assert!(!takes.is_empty());
     let picked: f64 = takes
         .iter()

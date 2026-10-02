@@ -282,8 +282,20 @@ pub fn ingest_to_wav(src: &Path, dst: &Path) -> Result<f64, PrepError> {
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    let samples = decode_wav(std::fs::File::open(dst).map_err(io_err("open converted wav"))?)?;
-    Ok(samples.len() as f64 / TARGET_SAMPLE_RATE as f64)
+    // The length comes from the WAV header; decoding a 4-hour clip just to
+    // count it would hold ~1 GB of samples.
+    let file = std::fs::File::open(dst).map_err(io_err("open converted wav"))?;
+    let wav = hound::WavReader::new(std::io::BufReader::new(file))
+        .map_err(|e| PrepError::BadAudio(format!("failed to decode wav: {e}")))?;
+    let secs = wav.duration() as f64 / TARGET_SAMPLE_RATE as f64;
+    let cap = crate::stt::audio::Limits::PREP.max_seconds;
+    if secs > cap as f64 {
+        return Err(PrepError::BadAudio(format!(
+            "audio exceeds the {}-hour clip cap",
+            cap / 3600
+        )));
+    }
+    Ok(secs)
 }
 
 /// Reads a 16 kHz mono WAV back into samples, e.g. a clip's `working.wav`

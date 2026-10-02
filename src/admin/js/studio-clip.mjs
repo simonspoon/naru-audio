@@ -62,6 +62,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
   let target = { min: IDEAL[0], max: IDEAL[1] };
   let sepTimer = null;
   let sepSecs = 0;
+  let numSpeakers = null; // forced speaker count for the next separation; null = auto
   let wave = null;
   let lastPlay = null; // {list, tag} of the running playback, to restart it on a seek
   const player = createSegmentPlayer(`${base}/audio`, {
@@ -264,15 +265,21 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
     }, 1000);
     renderSpeakers();
     try {
-      await postJson(`${base}/transcribe`, {});
+      await postJson(`${base}/transcribe`, numSpeakers ? { num_speakers: numSpeakers } : {});
       if (disposed) return;
       await loadTranscript();
+      // Cluster ids are not stable across runs: a kept speaker or its takes may not exist now.
+      if (model.speaker != null && !stats.some((s) => s.speaker === model.speaker)) {
+        model.speaker = null;
+        model.takes = null;
+        model.useTakes = false;
+      }
     } catch {
       // postJson already toasted
     }
     clearInterval(sepTimer);
     if (disposed) return;
-    if (!transcript) transcriptState = 'none';
+    transcriptState = transcript ? 'ready' : 'none';
     afterChange();
   }
 
@@ -287,6 +294,24 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
       transcriptState = 'none';
       stats = [];
     }
+  }
+
+  /** "speakers: auto / 1-8" — how many voices the separation should find. */
+  function speakerCountSelect() {
+    return el('label', { class: 'studio-note' }, [
+      'speakers: ',
+      el(
+        'select',
+        {
+          class: 'inp',
+          title: 'force the number of speakers, e.g. 2 when auto splits one voice into several',
+          onchange: (e) => {
+            numSpeakers = e.target.value ? Number(e.target.value) : null;
+          },
+        },
+        ['auto', 1, 2, 3, 4, 5, 6, 7, 8].map((n) => el('option', { value: n === 'auto' ? '' : n, selected: (n === 'auto' ? numSpeakers == null : n === numSpeakers) || undefined }, [n])),
+      ),
+    ]);
   }
 
   function pickSpeaker(id) {
@@ -309,6 +334,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
       setKids(speakersHost,
         head,
         el('div', { class: 'studio-note' }, ['Separate speakers to see who talks when, keep one voice and drop crosstalk. Runs speech recognition over the whole clip, so a long clip takes a while — you can keep editing meanwhile.']),
+        speakerCountSelect(),
         tb('SEPARATE SPEAKERS', separateSpeakers, { cls: 'v' }),
       );
       return;
@@ -329,7 +355,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
       ...(stats.length
         ? [
             el('div', { class: 'studio-note' }, ['KEEP one speaker — the others are dropped']),
-            ...stats.map((s) =>
+            ...[...stats].sort((a, b) => b.secs - a.secs).map((s) =>
               el('div', { class: 'sc-row' }, [
                 radio(s.speaker, `SPEAKER ${s.speaker}`, [el('i', { class: 'sc-dot', style: `background:${speakerColor(s.speaker)}` })]),
                 el('span', { class: 'studio-note' }, [`${s.secs.toFixed(1)} s`]),
@@ -339,6 +365,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
               ]),
             ),
             el('div', { class: 'sc-row' }, [radio(null, 'ALL SPEAKERS', [])]),
+            el('div', { class: 'sc-row' }, [speakerCountSelect(), tb('RE-SEPARATE', separateSpeakers, { title: 'run speaker separation again with this speaker count' })]),
           ]
         : [el('div', { class: 'studio-note' }, ['no speech found'])]),
       el('label', { class: 'chk sc-cross' }, [

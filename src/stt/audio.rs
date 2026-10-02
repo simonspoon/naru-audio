@@ -224,9 +224,9 @@ fn check_duration(mono: &[f32], sample_rate: u32, max_seconds: u32) -> Result<()
 }
 
 /// Resamples mono audio to [`TARGET_SAMPLE_RATE`]; a no-op at 16 kHz.
-fn resample_to_target(input: &[f32], input_rate: u32) -> Result<Vec<f32>, AudioError> {
+fn resample_to_target(input: Vec<f32>, input_rate: u32) -> Result<Vec<f32>, AudioError> {
     if input_rate == TARGET_SAMPLE_RATE || input.is_empty() {
-        return Ok(input.to_vec());
+        return Ok(input);
     }
 
     use rubato::audioadapter_buffers::direct::InterleavedSlice;
@@ -244,7 +244,7 @@ fn resample_to_target(input: &[f32], input_rate: u32) -> Result<Vec<f32>, AudioE
     )
     .map_err(|e| AudioError::Resample(e.to_string()))?;
 
-    let input_adapter = InterleavedSlice::new(input, CHANNELS, input.len())
+    let input_adapter = InterleavedSlice::new(&input[..], CHANNELS, input.len())
         .map_err(|e| AudioError::Resample(e.to_string()))?;
 
     let output = resampler
@@ -351,7 +351,10 @@ impl<R: Read> WavStream<R> {
 
     /// The rest of the stream, mono at [`TARGET_SAMPLE_RATE`].
     fn rest_resampled(&mut self) -> Result<Vec<f32>, AudioError> {
-        let mut mono = Vec::new();
+        // The header's frame count, capped so a lying header cannot reserve
+        // more than the duration limit allows.
+        let cap = self.max_seconds as u64 * self.sample_rate as u64;
+        let mut mono = Vec::with_capacity((self.wav.duration() as u64).min(cap) as usize);
         loop {
             let chunk = self.next_chunk(READ_CHUNK_FRAMES)?;
             if chunk.is_empty() {
@@ -360,7 +363,7 @@ impl<R: Read> WavStream<R> {
             mono.extend_from_slice(&chunk);
         }
         check_duration(&mono, self.sample_rate, self.max_seconds)?;
-        resample_to_target(&mono, self.sample_rate)
+        resample_to_target(mono, self.sample_rate)
     }
 }
 
