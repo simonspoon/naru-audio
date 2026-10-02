@@ -501,8 +501,8 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
       exclude_overlaps: model.excludeOverlaps,
       steps: x.steps,
       transcript: x.transcript,
-      // `takes` holds the editor state the server's own fields do not: the crop the kept segments came from, the takes result, transcript fixes.
-      takes: { v: 1, crop: model.crop, useTakes: model.useTakes, result: model.takes, fixes: x.fixes },
+      // `takes` holds the editor state the server's own fields do not: the crop the kept segments came from, the takes result, transcript fixes, the forced speaker count.
+      takes: { v: 1, crop: model.crop, useTakes: model.useTakes, result: model.takes, fixes: x.fixes, numSpeakers },
     };
   }
 
@@ -593,6 +593,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
     model.crop = ed.crop ?? (segs.length ? { start: segs[0].start, end: segs[segs.length - 1].end } : model.crop);
     model.takes = ed.result ?? null;
     model.useTakes = !!ed.useTakes && !!model.takes;
+    numSpeakers = Number.isInteger(ed.numSpeakers) && ed.numSpeakers > 0 ? ed.numSpeakers : null;
   }
 
   const ready = (async () => {

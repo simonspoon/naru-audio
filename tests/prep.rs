@@ -261,6 +261,77 @@ async fn clip_audio_returns_raw_and_working() {
     assert_eq!(raw.to_vec(), wav());
 }
 
+async fn audio_get(
+    home: &Path,
+    uri: &str,
+    range: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut req = Request::get(uri).header(HOST, HOSTPORT);
+    if let Some(r) = range {
+        req = req.header("range", r);
+    }
+    let resp = app(home)
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let (status, headers) = (resp.status(), resp.headers().clone());
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, body)
+}
+
+#[tokio::test]
+async fn clip_audio_serves_byte_ranges() {
+    let home = home();
+    let (_, body) = upload(home.path(), &wav()).await;
+    let id = body["id"].as_str().unwrap();
+    let whole = wav();
+    let len = whole.len();
+    for uri in [
+        format!("/v1/audio/prep/clips/{id}/audio"),
+        format!("/v1/audio/prep/clips/{id}/audio?raw=true"),
+    ] {
+        let (st, h, b) = audio_get(home.path(), &uri, None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(h["accept-ranges"], "bytes");
+        assert!(!b.is_empty());
+
+        let (st, h, b) = audio_get(home.path(), &uri, Some("bytes=10-19")).await;
+        assert_eq!(st, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            h["content-range"],
+            format!(
+                "bytes 10-19/{}",
+                h["content-range"]
+                    .to_str()
+                    .unwrap()
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+            )
+        );
+        assert_eq!(b.len(), 10);
+
+        let (st, _, _) = audio_get(home.path(), &uri, Some("bytes=99999999-")).await;
+        assert_eq!(st, StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+    // The raw upload is the original bytes, so a range is checkable exactly.
+    let uri = format!("/v1/audio/prep/clips/{id}/audio?raw=true");
+    let (st, h, b) = audio_get(home.path(), &uri, Some("bytes=10-19")).await;
+    assert_eq!(st, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(h["content-range"], format!("bytes 10-19/{len}"));
+    assert_eq!(b, whole[10..20]);
+    let (_, _, b) = audio_get(home.path(), &uri, Some("bytes=-4")).await;
+    assert_eq!(b, whole[len - 4..]);
+    let (_, _, b) = audio_get(home.path(), &uri, Some(&format!("bytes={}-", len - 3))).await;
+    assert_eq!(b, whole[len - 3..]);
+}
+
 /// `fake-stt` has no real model files, so the load itself fails — the
 /// same 503 `tests/transcriptions.rs::listed_language_reaches_the_load`
 /// gets, reached the same way: past every check, into `ModelManager`.

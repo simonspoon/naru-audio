@@ -13,8 +13,8 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::multipart::MultipartRejection;
 use axum::extract::{Extension, Multipart, Path as AxumPath, State};
-use axum::http::StatusCode;
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -372,15 +372,16 @@ pub(super) async fn clip_audio(
     Extension(RequestId(req_id)): Extension<RequestId>,
     AxumPath(id): AxumPath<String>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let home = st.registry.home().to_path_buf();
     let raw = q.get("raw").map(String::as_str) == Some("true");
     let id2 = id.clone();
     let outcome =
-        tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, String), ClipAudioError> {
+        tokio::task::spawn_blocking(move || -> Result<(PathBuf, String), ClipAudioError> {
             let meta = load_clip_meta_blocking(&home, &id2)?;
             let dir = prep::clip_dir(&home, &id2);
-            let (path, content_type) = if raw {
+            Ok(if raw {
                 (
                     dir.join(&meta.raw_filename),
                     meta.content_type
@@ -388,21 +389,115 @@ pub(super) async fn clip_audio(
                 )
             } else {
                 (dir.join(prep::WORKING_WAV), "audio/wav".to_string())
-            };
-            let bytes = std::fs::read(&path).map_err(|e| ClipAudioError::Io(e.to_string()))?;
-            Ok((bytes, content_type))
+            })
         })
         .await
         .map_err(|e| internal(&st, &req_id, e.to_string()))?;
-    let (bytes, content_type) = outcome.map_err(|e| match e {
+    let (path, content_type) = outcome.map_err(|e| match e {
         ClipAudioError::NotFound => clip_not_found(&id),
         ClipAudioError::Io(m) => internal(&st, &req_id, m),
     })?;
-    Ok((
-        AppendHeaders([(CONTENT_TYPE, content_type)]),
-        axum::body::Body::from(bytes),
-    )
-        .into_response())
+    serve_file(&path, &content_type, &headers)
+        .await
+        .map_err(|e| internal(&st, &req_id, e.to_string()))
+}
+
+/// A parsed single `Range: bytes=` request against a file of `len` bytes.
+enum ByteRange {
+    /// No usable `Range` header (absent, multi-range, or malformed, all of
+    /// which RFC 9110 says to answer with the whole body).
+    Whole,
+    /// Inclusive `start..=end`, already clamped to the file.
+    Part(u64, u64),
+    Unsatisfiable,
+}
+
+fn parse_range(headers: &HeaderMap, len: u64) -> ByteRange {
+    let Some(spec) = headers
+        .get(RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().strip_prefix("bytes="))
+    else {
+        return ByteRange::Whole;
+    };
+    let Some((first, last)) = spec.trim().split_once('-') else {
+        return ByteRange::Whole;
+    };
+    let (first, last) = (first.trim(), last.trim());
+    if last.contains(',') || first.contains(',') {
+        return ByteRange::Whole;
+    }
+    match (first.parse::<u64>(), last.parse::<u64>()) {
+        (Ok(s), Ok(e)) if s > e => ByteRange::Whole,
+        (Ok(s), _) if s >= len => ByteRange::Unsatisfiable,
+        (Ok(s), Ok(e)) => ByteRange::Part(s, e.min(len - 1)),
+        (Ok(s), Err(_)) if last.is_empty() => ByteRange::Part(s, len - 1),
+        // Suffix range: the last `n` bytes.
+        (Err(_), Ok(n)) if first.is_empty() => {
+            if n == 0 || len == 0 {
+                ByteRange::Unsatisfiable
+            } else {
+                ByteRange::Part(len.saturating_sub(n), len - 1)
+            }
+        }
+        _ => ByteRange::Whole,
+    }
+}
+
+/// Serves `path` with single-range support (`206`/`416`) and
+/// `Accept-Ranges: bytes`, streaming from the file rather than reading it
+/// into memory, so a browser can seek a long clip.
+async fn serve_file(
+    path: &Path,
+    content_type: &str,
+    headers: &HeaderMap,
+) -> std::io::Result<Response> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path).await?;
+    let len = file.metadata().await?.len();
+    let (status, start, count) = match parse_range(headers, len) {
+        ByteRange::Whole => (StatusCode::OK, 0, len),
+        ByteRange::Part(s, e) => (StatusCode::PARTIAL_CONTENT, s, e - s + 1),
+        ByteRange::Unsatisfiable => {
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                AppendHeaders([
+                    (CONTENT_RANGE, format!("bytes */{len}")),
+                    (ACCEPT_RANGES, "bytes".to_string()),
+                ]),
+            )
+                .into_response());
+        }
+    };
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let stream = futures_util::stream::unfold(
+        (file.take(count), vec![0u8; 64 * 1024]),
+        |(mut reader, mut buf)| async move {
+            match reader.read(&mut buf).await {
+                Ok(0) => None,
+                Ok(n) => Some((Ok(Bytes::copy_from_slice(&buf[..n])), (reader, buf))),
+                Err(e) => Some((Err(e), (reader, buf))),
+            }
+        },
+    );
+    let mut resp = Response::new(axum::body::Body::from_stream(stream));
+    *resp.status_mut() = status;
+    let h = resp.headers_mut();
+    h.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(content_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+    h.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    h.insert(CONTENT_LENGTH, HeaderValue::from(count));
+    if status == StatusCode::PARTIAL_CONTENT {
+        h.insert(
+            CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {start}-{}/{len}", start + count - 1))
+                .expect("ascii header"),
+        );
+    }
+    Ok(resp)
 }
 
 enum ClipAudioError {
@@ -1701,26 +1796,25 @@ pub(super) async fn sample_audio(
     Extension(RequestId(req_id)): Extension<RequestId>,
     AxumPath(id): AxumPath<String>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let cropped = q.get("variant").map(String::as_str) == Some("cropped");
     let home = st.registry.home().to_path_buf();
     let id2 = id.clone();
-    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ApiError> {
+    let path = tokio::task::spawn_blocking(move || -> Result<PathBuf, ApiError> {
         let _meta = load_sample_meta(&home, &id2)?;
         let file = if cropped {
             prep::CROPPED_WAV
         } else {
             prep::CLEAN_WAV
         };
-        std::fs::read(prep::sample_dir(&home, &id2).join(file)).map_err(prep_error_to_api_io)
+        Ok(prep::sample_dir(&home, &id2).join(file))
     })
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
-    Ok((
-        AppendHeaders([(CONTENT_TYPE, "audio/wav")]),
-        axum::body::Body::from(bytes),
-    )
-        .into_response())
+    serve_file(&path, "audio/wav", &headers)
+        .await
+        .map_err(prep_error_to_api_io)
 }
 
 fn prep_error_to_api_io(e: std::io::Error) -> ApiError {
