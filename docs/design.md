@@ -1295,8 +1295,11 @@ run need theirs.
 $NARU_AUDIO_HOME/prep/
   clips/<id>/
     raw.<ext>          verbatim upload
-    working.wav        16 kHz mono, afconvert + stt::audio::decode
-    transcript.json     { words, speakers, stt_model, diarization_model }
+    working.wav        16 kHz mono, afconvert + stt::audio::decode_with
+                        (Limits::PREP: 4 h, not the STT endpoints' 10 min)
+    transcript.json     { words (+ confidence), speakers, overlaps,
+                          stt_model, diarization_model }
+    project.json        a saved Sample Studio edit (below), if any
     meta.json
   samples/<id>/
     clean.wav           denoised, trimmed, normalised
@@ -1309,6 +1312,38 @@ $NARU_AUDIO_HOME/prep/
     meta.json             source clip, range, speaker, engines + licences, name,
                           steps (the chain), analysis (measurements of clean.wav)
 ```
+
+Sample Studio (naru task 1576) opens a raw clip of any length. The upload
+(`POST /v1/audio/prep/clips`, 4 GiB body cap) streams to `raw.<ext>` and is
+never buffered whole; `working.wav` and every re-read of it use
+`Limits::PREP`. Further endpoints, all under `/v1/audio/prep/`:
+
+- `GET clips/{id}/peaks?start&end&buckets` — `{sample_rate, duration, start,
+  end, buckets, min[], max[]}`, read straight from `working.wav` for the
+  range (buckets 1-8192, default 2000), so a browser never downloads a long
+  clip to draw it.
+- `render` and `POST /v1/audio/samples` take `segments: [{start, end}]`
+  instead of `start`/`end`/`speaker`: validated, sorted, merged, spliced in
+  order with a 10 ms crossfade, then the step chain runs. The sample's
+  `meta.json` keeps `segments`; its `transcript.txt` is the corrected
+  transcript, else the words inside the segments.
+- `transcript.json`'s `overlaps: [{start, end}]` are the ranges where two
+  different speakers' diarized spans overlap (crosstalk); absent in an older
+  file it loads as empty. `words[].confidence` is MLX Whisper's per-word
+  probability (absent for Parakeet).
+- `POST clips/{id}/takes` `{speaker?, segments?, target_min = 10,
+  target_max = 20, exclude_overlaps = true}` — the speaker's speech inside
+  the kept region, minus overlaps, cut at word gaps into 1-8 s takes, each
+  scored in 0-1 (noise floor, clipping, overlap, confidence, pace) by
+  `prep::takes`, the best picked until the total reaches `target_min`
+  without passing `target_max`. 409 `transcript_not_run` without a
+  transcript. Returns `{takes: [{start, end, score, picked, metrics}],
+  picked_secs}`.
+- `GET|PUT|DELETE clips/{id}/project` and `GET projects`: a project is the
+  clip plus its edit (`name, speaker, segments, cuts, exclude_overlaps,
+  steps, transcript, takes, created_at, updated_at`), stored as
+  `project.json` (404 `no_project`; steps validated; body at most 1 MiB).
+  Deleting the clip deletes its project; the raw upload is never altered.
 
 `<id>` is a fresh opaque string ([`prep::new_id`]), not a client-chosen
 name — `meta.json`'s `name` is what `PATCH /v1/audio/samples/{id}` renames.

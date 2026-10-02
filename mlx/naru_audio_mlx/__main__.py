@@ -142,6 +142,15 @@ def transcribe_whisper(model, header, samples):
     return whisper_answer(result, bool(header.get("words")))
 
 
+def word_answer(w):
+    """One mlx-whisper word as an answer word; `probability` (its
+    confidence) is carried when mlx-whisper reports it."""
+    word = {"start": w["start"], "end": w["end"], "text": w["word"].strip()}
+    if "probability" in w:
+        word["probability"] = w["probability"]
+    return word
+
+
 def whisper_answer(result, words):
     """mlx-whisper's `transcribe` result as a `transcribe` answer
     (`protocol.py`): its non-empty segments, each with its words when
@@ -154,9 +163,7 @@ def whisper_answer(result, words):
         segment = {"start": s["start"], "end": s["end"], "text": text}
         if words:
             segment["words"] = [
-                {"start": w["start"], "end": w["end"], "text": w["word"].strip()}
-                for w in s.get("words", [])
-                if w["word"].strip()
+                word_answer(w) for w in s.get("words", []) if w["word"].strip()
             ]
         segments.append(segment)
     answer = {"segments": segments, "language": result.get("language")}

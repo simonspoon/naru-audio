@@ -40,8 +40,8 @@ class WhisperTest(unittest.TestCase):
                     "end": 1.5,
                     "text": "Bonjour Simon.",
                     "words": [
-                        {"start": 0.1, "end": 0.6, "text": "Bonjour"},
-                        {"start": 0.7, "end": 1.4, "text": "Simon."},
+                        {"start": 0.1, "end": 0.6, "text": "Bonjour", "probability": 0.9},
+                        {"start": 0.7, "end": 1.4, "text": "Simon.", "probability": 0.8},
                     ],
                 }
             ],

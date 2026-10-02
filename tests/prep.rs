@@ -1016,3 +1016,420 @@ async fn render_unknown_clip_is_404_and_missing_model_is_409() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
+
+// ---- studio: long clips, peaks, segments, overlaps, takes, projects -----------
+
+/// `secs` seconds of 16 kHz mono 16-bit audio: a 440 Hz tone at `amp`.
+fn tone_wav(secs: usize, amp: f32) -> Vec<u8> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
+    for i in 0..secs * 16_000 {
+        let t = (i % 16_000) as f32 / 16_000.0;
+        let s = (t * 440.0 * std::f32::consts::TAU).sin() * amp;
+        writer.write_sample((s * i16::MAX as f32) as i16).unwrap();
+    }
+    writer.finalize().unwrap();
+    cursor.into_inner()
+}
+
+fn write_transcript(home: &Path, clip: &str, transcript: Value) {
+    let path = home
+        .join("prep")
+        .join("clips")
+        .join(clip)
+        .join("transcript.json");
+    std::fs::write(path, transcript.to_string()).unwrap();
+}
+
+/// Words every 0.4 s from 0 to `secs`, no confidence.
+fn words_json(secs: f64) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut t = 0.0;
+    while t + 0.3 <= secs {
+        out.push(json!({"start": t, "end": t + 0.3, "text": "word"}));
+        t += 0.4;
+    }
+    out
+}
+
+/// A clip past the STT endpoints' 10-minute cap uploads, and its peaks are
+/// served from `working.wav` without a whole-clip decode.
+#[tokio::test]
+async fn long_clip_uploads_and_has_peaks() {
+    let home = home();
+    // 11 minutes, quiet, with a loud second at 600 s.
+    let mut wav = tone_wav(11 * 60, 0.01);
+    let loud = tone_wav(1, 0.8);
+    let at = 44 + 600 * 16_000 * 2;
+    wav[at..at + 32_000].copy_from_slice(&loud[44..44 + 32_000]);
+    let (status, body) = upload(home.path(), &wav).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap();
+    assert!((body["duration_secs"].as_f64().unwrap() - 660.0).abs() < 0.01);
+
+    let (status, p) = get(home.path(), &format!("/v1/audio/prep/clips/{id}/peaks")).await;
+    assert_eq!(status, StatusCode::OK, "{p}");
+    assert_eq!(p["buckets"], 2000);
+    assert_eq!(p["sample_rate"], 16_000);
+    assert_eq!(p["min"].as_array().unwrap().len(), 2000);
+    assert_eq!(p["max"].as_array().unwrap().len(), 2000);
+    assert!((p["duration"].as_f64().unwrap() - 660.0).abs() < 0.01);
+    // 600 s is bucket 1818 of 2000 (0.33 s each).
+    assert!(p["max"][1819].as_f64().unwrap() > 0.5);
+    assert!(p["max"][100].as_f64().unwrap() < 0.1);
+
+    let (status, p) = get(
+        home.path(),
+        &format!("/v1/audio/prep/clips/{id}/peaks?start=599&end=602&buckets=6"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{p}");
+    assert_eq!(
+        (p["start"].as_f64(), p["end"].as_f64()),
+        (Some(599.0), Some(602.0))
+    );
+    assert!(p["max"][2].as_f64().unwrap() > 0.5);
+    assert!(p["max"][0].as_f64().unwrap() < 0.1);
+
+    for bad in ["buckets=0", "buckets=8193", "start=x", "start=5&end=5"] {
+        let (status, body) = get(
+            home.path(),
+            &format!("/v1/audio/prep/clips/{id}/peaks?{bad}"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    let (status, _) = get(home.path(), "/v1/audio/prep/clips/nope/peaks").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn render_and_create_sample_take_segments() {
+    let home = home();
+    let clip = uploaded_clip(home.path()).await; // 0.5 s
+    // 0.1 s + 0.1 s joined with a 10 ms crossfade (160 samples); the
+    // overlapping first two merge into 0.0-0.12.
+    let segments = json!([
+        {"start": 0.2, "end": 0.3}, {"start": 0.0, "end": 0.1}, {"start": 0.05, "end": 0.12},
+    ]);
+    let (status, _, bytes) = post_raw(
+        home.path(),
+        &render_path(&clip),
+        json!({"segments": segments, "steps": [{"type": "normalize", "peak_db": -6}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(wav_len(&bytes), 1920 + 1600 - 160);
+
+    for (bad, param) in [
+        (json!([]), "segments"),
+        (json!([{"start": 0.3, "end": 0.3}]), "segments"),
+        (json!([{"start": 0.1, "end": 9.0}]), "segments"),
+        (json!([{"start": -1.0, "end": 0.2}]), "segments"),
+    ] {
+        let (status, body) = post_json(
+            home.path(),
+            &render_path(&clip),
+            json!({"segments": bad, "steps": []}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["param"], param);
+    }
+
+    write_transcript(
+        home.path(),
+        &clip,
+        json!({
+            "words": [
+                {"start": 0.0, "end": 0.1, "text": "one"},
+                {"start": 0.1, "end": 0.2, "text": "two"},
+                {"start": 0.2, "end": 0.3, "text": "three"},
+            ],
+            "speakers": [], "stt_model": "m", "diarization_model": null,
+        }),
+    );
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/samples",
+        json!({
+            "clip_id": clip, "name": "seg", "segments": segments,
+            "steps": [{"type": "highpass"}],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["transcript"], "one three");
+    assert_eq!(
+        body["segments"],
+        json!([{"start": 0.0, "end": 0.12}, {"start": 0.2, "end": 0.3}])
+    );
+    assert_eq!(body["range"], json!({"start": 0.0, "end": 0.3}));
+    let id = body["id"].as_str().unwrap();
+    let req = Request::get(format!("/v1/audio/samples/{id}/audio?variant=cropped"))
+        .header(HOST, HOSTPORT)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app(home.path()).oneshot(req).await.unwrap();
+    let cropped = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(wav_len(&cropped), 1920 + 1600 - 160);
+
+    // A plain range still works and stores no segments.
+    let (status, body) = post_json(
+        home.path(),
+        "/v1/audio/samples",
+        json!({"clip_id": clip, "name": "r", "start": 0.0, "end": 0.2, "steps": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["segments"], json!([]));
+}
+
+#[tokio::test]
+async fn transcript_without_overlaps_or_confidence_still_loads() {
+    let home = home();
+    let clip = uploaded_clip(home.path()).await;
+    write_transcript(
+        home.path(),
+        &clip,
+        json!({
+            "words": [{"start": 0.0, "end": 0.1, "text": "hi"}],
+            "speakers": [{"start": 0.0, "end": 0.4, "speaker": 0}],
+            "stt_model": "m", "diarization_model": "d",
+        }),
+    );
+    let (status, t) = get(
+        home.path(),
+        &format!("/v1/audio/prep/clips/{clip}/transcript"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{t}");
+    assert_eq!(t["overlaps"], json!([]));
+    assert!(t["words"][0].get("confidence").is_none());
+
+    write_transcript(
+        home.path(),
+        &clip,
+        json!({
+            "words": [{"start": 0.0, "end": 0.1, "text": "hi", "confidence": 0.75}],
+            "speakers": [], "stt_model": "m", "diarization_model": null,
+            "overlaps": [{"start": 1.0, "end": 2.0}],
+        }),
+    );
+    let (_, t) = get(
+        home.path(),
+        &format!("/v1/audio/prep/clips/{clip}/transcript"),
+    )
+    .await;
+    assert_eq!(t["overlaps"], json!([{"start": 1.0, "end": 2.0}]));
+    assert_eq!(t["words"][0]["confidence"], 0.75);
+}
+
+#[tokio::test]
+async fn takes_need_a_transcript_then_pick_the_best() {
+    let home = home();
+    let (_, body) = upload(home.path(), &tone_wav(40, 0.1)).await;
+    let clip = body["id"].as_str().unwrap().to_string();
+    let path = format!("/v1/audio/prep/clips/{clip}/takes");
+
+    let (status, body) = post_json(home.path(), &path, json!({})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "transcript_not_run");
+
+    // Speaker 0 for 0-20 s and speaker 1 for 20-40 s, crosstalk 8-12 s.
+    write_transcript(
+        home.path(),
+        &clip,
+        json!({
+            "words": words_json(40.0),
+            "speakers": [
+                {"start": 0.0, "end": 20.0, "speaker": 0},
+                {"start": 8.0, "end": 12.0, "speaker": 1},
+                {"start": 20.0, "end": 40.0, "speaker": 1},
+            ],
+            "overlaps": [{"start": 8.0, "end": 12.0}],
+            "stt_model": "m", "diarization_model": "d",
+        }),
+    );
+    let (status, out) = post_json(home.path(), &path, json!({"speaker": 0})).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    let takes = out["takes"].as_array().unwrap();
+    assert!(!takes.is_empty());
+    let picked: f64 = takes
+        .iter()
+        .filter(|t| t["picked"] == true)
+        .map(|t| t["end"].as_f64().unwrap() - t["start"].as_f64().unwrap())
+        .sum();
+    assert!((10.0..=20.0).contains(&picked), "{picked}");
+    assert!((out["picked_secs"].as_f64().unwrap() - picked).abs() < 1e-6);
+    for t in takes {
+        assert!(t["end"].as_f64().unwrap() <= 8.0 || t["start"].as_f64().unwrap() >= 12.0);
+        assert!(t["end"].as_f64().unwrap() <= 20.0);
+        let score = t["score"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&score));
+        let m = &t["metrics"];
+        assert!(m["noise_floor_dbfs"].is_number());
+        assert_eq!(m["clipped_ratio"], 0.0);
+        assert_eq!(m["overlap_ratio"], 0.0);
+        assert!(m["confidence"].is_null());
+        assert!(m["words_per_sec"].as_f64().unwrap() > 2.0);
+        assert!(m["duration"].as_f64().unwrap() >= 1.0);
+    }
+
+    // Keeping the overlap leaves takes with crosstalk in them.
+    let (_, out) = post_json(
+        home.path(),
+        &path,
+        json!({"speaker": 0, "exclude_overlaps": false, "segments": [{"start": 6.0, "end": 14.0}]}),
+    )
+    .await;
+    let takes = out["takes"].as_array().unwrap();
+    assert!(
+        takes
+            .iter()
+            .all(|t| t["start"].as_f64().unwrap() >= 6.0 && t["end"].as_f64().unwrap() <= 14.0)
+    );
+    assert!(
+        takes
+            .iter()
+            .any(|t| t["metrics"]["overlap_ratio"].as_f64().unwrap() > 0.0)
+    );
+
+    let (status, body) = post_json(home.path(), &path, json!({"speaker": 9})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["param"], "speaker");
+    let (status, _) = post_json(
+        home.path(),
+        &path,
+        json!({"target_min": 30, "target_max": 20}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = post_json(home.path(), "/v1/audio/prep/clips/nope/takes", json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+async fn put_json(home: &Path, path: &str, body: Value) -> (StatusCode, Value) {
+    let req = Request::put(path)
+        .header(HOST, HOSTPORT)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    send(app(home), req).await
+}
+
+#[tokio::test]
+async fn project_put_get_list_delete_and_clip_delete() {
+    let home = home();
+    let a = uploaded_clip(home.path()).await;
+    let b = uploaded_clip(home.path()).await;
+    let path = |c: &str| format!("/v1/audio/prep/clips/{c}/project");
+
+    let (status, body) = get(home.path(), &path(&a)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "no_project");
+    let (status, body) = get(home.path(), "/v1/audio/prep/projects").await;
+    assert_eq!((status, &body["projects"]), (StatusCode::OK, &json!([])));
+
+    let edit = json!({
+        "name": " My take ", "speaker": 1,
+        "segments": [{"start": 0.3, "end": 0.4}, {"start": 0.0, "end": 0.2}],
+        "cuts": [{"start": 0.2, "end": 0.3}],
+        "exclude_overlaps": true,
+        "steps": [{"type": "normalize", "peak_db": -3}],
+        "transcript": "fixed words",
+        "takes": {"takes": [], "picked_secs": 0},
+    });
+    let (status, put) = put_json(home.path(), &path(&a), edit.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    assert_eq!(put["clip_id"], a);
+    assert_eq!(put["name"], "My take");
+    assert_eq!(
+        put["segments"],
+        json!([{"start": 0.0, "end": 0.2}, {"start": 0.3, "end": 0.4}])
+    );
+    assert_eq!(put["cuts"], json!([{"start": 0.2, "end": 0.3}]));
+    assert_eq!(put["transcript"], "fixed words");
+    assert_eq!(put["takes"], json!({"takes": [], "picked_secs": 0}));
+    assert_eq!(put["speaker"], 1);
+    assert_eq!(put["exclude_overlaps"], true);
+    let created = put["created_at"].clone();
+    assert!(put["updated_at"].is_string());
+
+    let (_, got) = get(home.path(), &path(&a)).await;
+    assert_eq!(got, put);
+
+    // Replacing keeps created_at.
+    let (status, again) = put_json(
+        home.path(),
+        &path(&a),
+        json!({"name": "renamed", "steps": []}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{again}");
+    assert_eq!(again["created_at"], created);
+    assert_eq!(again["segments"], json!([]));
+    assert!(again["transcript"].is_null() && again["speaker"].is_null());
+
+    // Validation.
+    for bad in [
+        json!({"name": " "}),
+        json!({"name": "x", "steps": [{"type": "normalize", "peak_db": 99}]}),
+        json!({"name": "x", "segments": [{"start": 0.0, "end": 99.0}]}),
+        json!({"name": "x", "cuts": [{"start": 0.4, "end": 0.1}]}),
+    ] {
+        let (status, body) = put_json(home.path(), &path(&a), bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    let (status, _) = put_json(home.path(), &path("nope"), json!({"name": "x"})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let big = json!({"name": "x", "transcript": "a".repeat(1024 * 1024)});
+    let (status, _) = put_json(home.path(), &path(&a), big).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    // A second project, listed newest first.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    put_json(
+        home.path(),
+        &path(&b),
+        json!({"name": "second", "segments": [{"start": 0.0, "end": 0.1}]}),
+    )
+    .await;
+    write_transcript(
+        home.path(),
+        &b,
+        json!({"words": [], "speakers": [], "stt_model": "m", "diarization_model": null}),
+    );
+    let (_, listed) = get(home.path(), "/v1/audio/prep/projects").await;
+    let rows = listed["projects"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["clip_id"], b);
+    assert_eq!(rows[0]["name"], "second");
+    assert_eq!(rows[0]["segment_count"], 1);
+    assert_eq!(rows[0]["has_transcript"], true);
+    assert!((rows[0]["duration"].as_f64().unwrap() - 0.5).abs() < 0.01);
+    assert!(rows[0]["updated_at"].is_string() && rows[0]["speaker"].is_null());
+    assert_eq!(rows[1]["clip_id"], a);
+    assert_eq!(rows[1]["has_transcript"], false);
+
+    let (status, _) = delete(home.path(), &path(&a)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = delete(home.path(), &path(&a)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "no_project");
+    let (status, _) = get(home.path(), &path(&a)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Deleting the clip deletes its project.
+    let (status, _) = delete(home.path(), &format!("/v1/audio/prep/clips/{b}")).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, listed) = get(home.path(), "/v1/audio/prep/projects").await;
+    assert_eq!(listed["projects"], json!([]));
+    assert!(!home.path().join("prep/clips").join(&b).exists());
+}

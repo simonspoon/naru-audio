@@ -24,10 +24,12 @@ use super::{AppState, RequestId, manager_error, registry_error};
 use crate::backend;
 use crate::error::ApiError;
 use crate::prep::diarize::ClusterOptions;
+use crate::prep::edit::{self, Segment};
 use crate::prep::pipeline::{self, Analysis, ModelSteps, Select, Step};
+use crate::prep::takes::{self, TakeOptions};
 use crate::prep::{
-    self, ClipMeta, EngineUsed, PrepError, SampleMeta, SampleRange, SpeakerSpan, Transcript,
-    TranscriptWord,
+    self, ClipMeta, EngineUsed, PrepError, Project, SampleMeta, SampleRange, SpeakerSpan,
+    Transcript, TranscriptWord,
 };
 use crate::registry::manifest::{Kind, Manifest};
 use crate::stt::SttError;
@@ -117,6 +119,7 @@ fn sample_json(home: &Path, m: &SampleMeta) -> Value {
         "transcript": transcript,
         "steps": m.steps,
         "analysis": m.analysis,
+        "segments": m.segments,
     })
 }
 
@@ -142,13 +145,17 @@ fn safe_extension(filename: Option<&str>) -> String {
 // ---- clips ----------------------------------------------------------
 
 /// `POST /v1/audio/prep/clips`: uploads a raw clip (`file`, any format
-/// `afconvert` reads). Stores it verbatim as `raw.<ext>` next to a decoded
-/// `working.wav` (naru task 1461 §8); the clip's length must be positive.
+/// `afconvert` reads). Streams it to disk verbatim as `raw.<ext>` (never held
+/// in memory: a recording can be hours long) next to a decoded `working.wav`
+/// (naru task 1461 §8); the clip's length must be positive and within
+/// [`crate::stt::audio::Limits::PREP`].
 pub(super) async fn upload_clip(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<Response, ApiError> {
+    use tokio::io::AsyncWriteExt;
+
     let mut multipart = multipart.map_err(|e| {
         bad_request(
             "file",
@@ -156,22 +163,52 @@ pub(super) async fn upload_clip(
             format!("the body must be multipart/form-data: {}", e.body_text()),
         )
     })?;
-    let (mut file, mut filename, mut content_type) = (None, None, None);
-    while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
-        if field.name().unwrap_or_default() == "file" {
-            filename = field.file_name().map(str::to_string);
-            content_type = field.content_type().map(str::to_string);
-            file = Some(field.bytes().await.map_err(multipart_error)?);
-        }
-    }
-    let file = file
-        .ok_or_else(|| bad_request("file", "invalid_request", "the \"file\" field is required"))?;
-
     let home = st.registry.home().to_path_buf();
-    let result =
-        tokio::task::spawn_blocking(move || create_clip(&home, file, filename, content_type))
-            .await
-            .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+    let id = prep::new_id();
+    let dir = prep::clip_dir(&home, &id);
+
+    let streamed = async {
+        let mut saved: Option<(String, Option<String>, Option<String>)> = None;
+        while let Some(mut field) = multipart.next_field().await.map_err(upload_error)? {
+            if field.name().unwrap_or_default() != "file" {
+                continue;
+            }
+            let filename = field.file_name().map(str::to_string);
+            let content_type = field.content_type().map(str::to_string);
+            let raw_filename = format!("raw.{}", safe_extension(filename.as_deref()));
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+            let mut out = tokio::fs::File::create(dir.join(&raw_filename))
+                .await
+                .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+            while let Some(chunk) = field.chunk().await.map_err(upload_error)? {
+                out.write_all(&chunk)
+                    .await
+                    .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+            }
+            out.flush()
+                .await
+                .map_err(|e| internal(&st, &req_id, e.to_string()))?;
+            saved = Some((raw_filename, filename, content_type));
+        }
+        saved
+            .ok_or_else(|| bad_request("file", "invalid_request", "the \"file\" field is required"))
+    }
+    .await;
+    let (raw_filename, filename, content_type) = match streamed {
+        Ok(saved) => saved,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e);
+        }
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        create_clip(&home, id, raw_filename, filename, content_type)
+    })
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))?;
     let meta = result.map_err(|e| match e {
         CreateClipError::Prep(e) => prep_error(&st, &req_id, e),
         CreateClipError::BadAudio(m) => bad_request("file", "invalid_request", m),
@@ -179,25 +216,40 @@ pub(super) async fn upload_clip(
     Ok((StatusCode::CREATED, Json(clip_json(&meta))).into_response())
 }
 
+/// A multipart read error: the body cap trips as 413, anything else is 400.
+fn upload_error(e: axum::extract::multipart::MultipartError) -> ApiError {
+    if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return ApiError {
+            param: Some("file"),
+            ..ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                format!(
+                    "the request exceeds the {} GiB clip upload cap",
+                    super::MAX_PREP_UPLOAD_BYTES / 1024 / 1024 / 1024
+                ),
+            )
+        };
+    }
+    multipart_error(e)
+}
+
 enum CreateClipError {
     Prep(PrepError),
     BadAudio(String),
 }
 
+/// Decodes the streamed-in `raw_filename` of clip `id` to `working.wav` and
+/// writes `meta.json`; the clip's directory is removed on any failure.
 fn create_clip(
     home: &Path,
-    file: Bytes,
+    id: String,
+    raw_filename: String,
     filename: Option<String>,
     content_type: Option<String>,
 ) -> Result<ClipMeta, CreateClipError> {
-    let id = prep::new_id();
     let dir = prep::clip_dir(home, &id);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| CreateClipError::Prep(PrepError::Io(e.to_string())))?;
-    let raw_filename = format!("raw.{}", safe_extension(filename.as_deref()));
     let raw_path = dir.join(&raw_filename);
-    std::fs::write(&raw_path, &file)
-        .map_err(|e| CreateClipError::Prep(PrepError::Io(e.to_string())))?;
     let working = dir.join(prep::WORKING_WAV);
     let duration_secs = match prep::ingest_to_wav(&raw_path, &working) {
         Ok(secs) if secs > 0.0 => secs,
@@ -358,7 +410,11 @@ struct TranscribeRequest {
 }
 
 fn word_json(w: &TranscriptWord) -> Value {
-    json!({"start": w.start, "end": w.end, "text": w.text})
+    let mut v = json!({"start": w.start, "end": w.end, "text": w.text});
+    if let Some(c) = w.confidence {
+        v["confidence"] = json!(c);
+    }
+    v
 }
 
 fn speaker_json(s: &SpeakerSpan) -> Value {
@@ -369,6 +425,7 @@ fn transcript_json(t: &Transcript) -> Value {
     json!({
         "words": t.words.iter().map(word_json).collect::<Vec<_>>(),
         "speakers": t.speakers.iter().map(speaker_json).collect::<Vec<_>>(),
+        "overlaps": t.overlaps,
         "language": t.language,
         "x_stt_model": t.stt_model,
         "x_diarization_model": t.diarization_model,
@@ -444,9 +501,12 @@ pub(super) async fn transcribe_clip(
 
     let home = st.registry.home().to_path_buf();
     let id2 = id.clone();
-    let pcm = tokio::task::spawn_blocking(move || -> Result<Vec<f32>, ApiError> {
+    // Shared by the recogniser and the diarizer: a long clip's samples are
+    // held once.
+    let pcm = tokio::task::spawn_blocking(move || -> Result<Arc<Vec<f32>>, ApiError> {
         let _meta = load_clip_meta(&home, &id2)?;
         prep::read_wav(&prep::clip_dir(&home, &id2).join(prep::WORKING_WAV))
+            .map(Arc::new)
             .map_err(prep_error_to_api)
     })
     .await
@@ -480,7 +540,7 @@ pub(super) async fn transcribe_clip(
         .await
         .map_err(|e| manager_error(&st, &req_id, e))?;
 
-    let pcm_for_decode = pcm.clone();
+    let pcm_for_decode = Arc::clone(&pcm);
     let (words, used_language) = tokio::task::spawn_blocking(move || {
         guard.stt().decode_words_in(
             &pcm_for_decode,
@@ -504,11 +564,11 @@ pub(super) async fn transcribe_clip(
     let diarization_model = req
         .diarization_model
         .unwrap_or_else(|| prep::DEFAULT_DIARIZE_MODEL.to_string());
-    let speakers = if req.diarize {
+    let speakers: Vec<SpeakerSpan> = if req.diarize {
         let (st2, req_id2, diarization_model2) =
             (st.clone(), req_id.clone(), diarization_model.clone());
         let home = st.registry.home().to_path_buf();
-        let pcm_for_diarize = pcm.clone();
+        let pcm_for_diarize = Arc::clone(&pcm);
         let cluster_options = ClusterOptions {
             num_speakers: req.num_speakers,
             threshold: req.cluster_threshold,
@@ -533,6 +593,7 @@ pub(super) async fn transcribe_clip(
         Vec::new()
     };
 
+    let overlaps = edit::overlaps_of(&speakers);
     let transcript = Transcript {
         words: words
             .into_iter()
@@ -540,9 +601,11 @@ pub(super) async fn transcribe_clip(
                 start: w.start,
                 end: w.end,
                 text: w.text,
+                confidence: w.confidence,
             })
             .collect(),
         speakers,
+        overlaps,
         stt_model,
         // The language the model used (the request's, else the one it
         // detected), or for a model with no notion of one, the manifest's.
@@ -596,6 +659,345 @@ pub(super) async fn get_transcript(
     Ok(Json(transcript_json(&transcript)))
 }
 
+// ---- peaks, takes -------------------------------------------------------
+
+/// Most buckets one `GET .../peaks` returns.
+const MAX_PEAK_BUCKETS: usize = 8192;
+/// Buckets when `buckets` is not given.
+const DEFAULT_PEAK_BUCKETS: usize = 2000;
+
+fn query_f64(q: &HashMap<String, String>, param: &'static str) -> Result<Option<f64>, ApiError> {
+    q.get(param)
+        .map(|v| {
+            v.trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|n| n.is_finite())
+                .ok_or_else(|| {
+                    bad_request(
+                        param,
+                        "invalid_request",
+                        format!("{param} must be a number, not {v:?}"),
+                    )
+                })
+        })
+        .transpose()
+}
+
+/// `GET /v1/audio/prep/clips/{id}/peaks?start=&end=&buckets=`: min/max
+/// waveform peaks of `working.wav`'s `start..end` (default the whole clip) in
+/// `buckets` buckets (default 2000, at most 8192), so a browser can draw a
+/// long clip without downloading it. Reads only that range of the file.
+pub(super) async fn clip_peaks(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    AxumPath(id): AxumPath<String>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let (start, end) = (query_f64(&q, "start")?, query_f64(&q, "end")?);
+    let buckets = match q.get("buckets") {
+        None => DEFAULT_PEAK_BUCKETS,
+        Some(v) => v
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=MAX_PEAK_BUCKETS).contains(n))
+            .ok_or_else(|| {
+                bad_request(
+                    "buckets",
+                    "invalid_request",
+                    format!("buckets must be an integer in 1..={MAX_PEAK_BUCKETS}, not {v:?}"),
+                )
+            })?,
+    };
+    if let (Some(s), Some(e)) = (start, end)
+        && e <= s
+    {
+        return Err(bad_request(
+            "end",
+            "invalid_request",
+            format!("the range {s}-{e} is empty"),
+        ));
+    }
+    let home = st.registry.home().to_path_buf();
+    let peaks = tokio::task::spawn_blocking(move || -> Result<edit::Peaks, ApiError> {
+        load_clip_meta(&home, &id)?;
+        edit::peaks(
+            &prep::clip_dir(&home, &id).join(prep::WORKING_WAV),
+            start,
+            end,
+            buckets,
+        )
+        .map_err(|e| match e {
+            PrepError::BadAudio(m) => bad_request("start", "invalid_request", m),
+            e => prep_error_to_api(e),
+        })
+    })
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    Ok(Json(json!(peaks)))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct TakesRequest {
+    speaker: Option<i32>,
+    /// The kept region; the whole clip when absent.
+    segments: Option<Vec<Segment>>,
+    target_min: Option<f64>,
+    target_max: Option<f64>,
+    exclude_overlaps: Option<bool>,
+}
+
+/// `POST /v1/audio/prep/clips/{id}/takes`: scores the clip's candidate takes
+/// and picks the best ones ([`takes::plan_takes`]). Needs the clip's
+/// transcript (409 `transcript_not_run` otherwise); a `speaker` the
+/// transcript has no spans for is a 400. Defaults: `target_min` 10 s,
+/// `target_max` 20 s, `exclude_overlaps` true.
+pub(super) async fn clip_takes(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    AxumPath(id): AxumPath<String>,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let req: TakesRequest = if body.is_empty() {
+        TakesRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| bad_request("body", "invalid_request", e.to_string()))?
+    };
+    let target_min = req.target_min.unwrap_or(10.0);
+    let target_max = req.target_max.unwrap_or(20.0);
+    if !(target_min.is_finite() && target_min > 0.0 && target_min <= target_max)
+        || !target_max.is_finite()
+        || target_max > 3600.0
+    {
+        return Err(bad_request(
+            "target_max",
+            "invalid_request",
+            "need 0 < target_min <= target_max <= 3600",
+        ));
+    }
+    let exclude_overlaps = req.exclude_overlaps.unwrap_or(true);
+    let home = st.registry.home().to_path_buf();
+    let out = tokio::task::spawn_blocking(move || -> Result<takes::Takes, ApiError> {
+        let meta = load_clip_meta(&home, &id)?;
+        let path = prep::clip_dir(&home, &id).join(prep::TRANSCRIPT_JSON);
+        if !path.is_file() {
+            return Err(transcript_not_found(&id));
+        }
+        let transcript: Transcript = prep::load_json(&path).map_err(prep_error_to_api)?;
+        if let Some(sp) = req.speaker
+            && !transcript.speakers.iter().any(|s| s.speaker == sp)
+        {
+            return Err(bad_request(
+                "speaker",
+                "invalid_request",
+                format!("no diarized speaker {sp} in this clip's transcript"),
+            ));
+        }
+        let kept = match &req.segments {
+            Some(raw) => Some(
+                edit::normalize_segments(raw, meta.duration_secs)
+                    .map_err(|m| bad_request("segments", "invalid_request", m))?,
+            ),
+            None => None,
+        };
+        let pcm = prep::read_wav(&prep::clip_dir(&home, &id).join(prep::WORKING_WAV))
+            .map_err(prep_error_to_api)?;
+        Ok(takes::plan_takes(
+            &pcm,
+            &transcript.words,
+            &transcript.speakers,
+            &transcript.overlaps,
+            &TakeOptions {
+                speaker: req.speaker,
+                kept: kept.as_deref(),
+                target_min,
+                target_max,
+                exclude_overlaps,
+            },
+        ))
+    })
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    Ok(Json(json!(out)))
+}
+
+// ---- projects ---------------------------------------------------------------
+
+/// Largest `PUT .../project` body: 1 MiB (a project holds a transcript and
+/// the last takes result, both text).
+const MAX_PROJECT_BYTES: usize = 1024 * 1024;
+const MAX_PROJECT_NAME_CHARS: usize = 200;
+
+fn no_project(id: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        "no_project",
+        format!("clip {id:?} has no saved project"),
+    )
+}
+
+fn project_json(clip_id: &str, p: &Project) -> Value {
+    let mut v = json!(p);
+    v["clip_id"] = json!(clip_id);
+    v
+}
+
+/// `GET /v1/audio/prep/clips/{id}/project`: the clip's saved project, or 404
+/// `no_project`.
+pub(super) async fn get_project(
+    State(st): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    let home = st.registry.home().to_path_buf();
+    let value = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
+        load_clip_meta(&home, &id)?;
+        let path = prep::clip_dir(&home, &id).join(prep::PROJECT_JSON);
+        if !path.is_file() {
+            return Err(no_project(&id));
+        }
+        let project: Project = prep::load_json(&path).map_err(prep_error_to_api)?;
+        Ok(project_json(&id, &project))
+    })
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))??;
+    Ok(Json(value))
+}
+
+/// The client's side of a [`Project`]; the timestamps are the server's.
+#[derive(Debug, Deserialize)]
+struct ProjectRequest {
+    name: String,
+    #[serde(default)]
+    speaker: Option<i32>,
+    #[serde(default)]
+    segments: Vec<Segment>,
+    #[serde(default)]
+    cuts: Vec<Segment>,
+    #[serde(default)]
+    exclude_overlaps: bool,
+    #[serde(default)]
+    steps: Vec<Step>,
+    #[serde(default)]
+    transcript: Option<String>,
+    #[serde(default)]
+    takes: Option<Value>,
+}
+
+/// `PUT /v1/audio/prep/clips/{id}/project`: creates or replaces the clip's
+/// project and returns it. `steps` go through [`pipeline::validate`],
+/// `segments` and `cuts` are validated, sorted and merged against the clip's
+/// length; `created_at` is kept across a replace. Body at most 1 MiB (413).
+pub(super) async fn put_project(
+    State(st): State<Arc<AppState>>,
+    Extension(RequestId(req_id)): Extension<RequestId>,
+    AxumPath(id): AxumPath<String>,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    if body.len() > MAX_PROJECT_BYTES {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            format!("a project is at most {MAX_PROJECT_BYTES} bytes"),
+        ));
+    }
+    let req: ProjectRequest = serde_json::from_slice(&body)
+        .map_err(|e| bad_request("body", "invalid_request", e.to_string()))?;
+    let name = req.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > MAX_PROJECT_NAME_CHARS {
+        return Err(bad_request(
+            "name",
+            "invalid_request",
+            format!("\"name\" is required, at most {MAX_PROJECT_NAME_CHARS} characters"),
+        ));
+    }
+    pipeline::validate(&req.steps).map_err(|m| bad_request("steps", "invalid_request", m))?;
+    let home = st.registry.home().to_path_buf();
+    let value = tokio::task::spawn_blocking(move || -> Result<Value, ApiError> {
+        let meta = load_clip_meta(&home, &id)?;
+        let segments = edit::normalize_segments(&req.segments, meta.duration_secs)
+            .map_err(|m| bad_request("segments", "invalid_request", m))?;
+        let cuts = edit::normalize_segments(&req.cuts, meta.duration_secs)
+            .map_err(|m| bad_request("cuts", "invalid_request", m))?;
+        let path = prep::clip_dir(&home, &id).join(prep::PROJECT_JSON);
+        let now = prep::now_rfc3339();
+        let created_at = prep::load_json::<Project>(&path)
+            .map(|p| p.created_at)
+            .unwrap_or_else(|_| now.clone());
+        let project = Project {
+            name,
+            speaker: req.speaker,
+            segments,
+            cuts,
+            exclude_overlaps: req.exclude_overlaps,
+            steps: req.steps,
+            transcript: req.transcript,
+            takes: req.takes,
+            updated_at: now,
+            created_at,
+        };
+        prep::save_json(&path, &project).map_err(prep_error_to_api)?;
+        Ok(project_json(&id, &project))
+    })
+    .await
+    .map_err(|e| internal(&st, &req_id, e.to_string()))??;
+    Ok(Json(value))
+}
+
+/// `DELETE /v1/audio/prep/clips/{id}/project`: 204, or 404 `no_project`.
+pub(super) async fn delete_project(
+    State(st): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, ApiError> {
+    let home = st.registry.home().to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
+        load_clip_meta(&home, &id)?;
+        let path = prep::clip_dir(&home, &id).join(prep::PROJECT_JSON);
+        if !path.is_file() {
+            return Err(no_project(&id));
+        }
+        std::fs::remove_file(&path).map_err(prep_error_to_api_io)
+    })
+    .await
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))??;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /v1/audio/prep/projects`: every saved project, newest `updated_at`
+/// first, as `{"projects": [{clip_id, name, duration, updated_at, speaker,
+/// segment_count, has_transcript}]}`.
+pub(super) async fn list_projects(State(st): State<Arc<AppState>>) -> Json<Value> {
+    let home = st.registry.home().to_path_buf();
+    let mut rows = tokio::task::spawn_blocking(move || {
+        prep::list_projects(&home)
+            .into_iter()
+            .filter_map(|id| {
+                let dir = prep::clip_dir(&home, &id);
+                let project: Project = prep::load_json(&dir.join(prep::PROJECT_JSON)).ok()?;
+                let meta: ClipMeta = prep::load_json(&dir.join(prep::CLIP_META)).ok()?;
+                Some((
+                    project.updated_at.clone(),
+                    json!({
+                        "clip_id": id,
+                        "name": project.name,
+                        "duration": meta.duration_secs,
+                        "updated_at": project.updated_at,
+                        "speaker": project.speaker,
+                        "segment_count": project.segments.len(),
+                        "has_transcript": dir.join(prep::TRANSCRIPT_JSON).is_file(),
+                    }),
+                ))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    Json(json!({"projects": rows.into_iter().map(|r| r.1).collect::<Vec<_>>()}))
+}
+
 // ---- samples ------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -605,6 +1007,9 @@ struct ProcessRequest {
     start: Option<f64>,
     end: Option<f64>,
     speaker: Option<i32>,
+    /// Kept regions of the clip, spliced in order (see [`Edit`]); an
+    /// alternative to `start`/`end`/`speaker`, which are then ignored.
+    segments: Option<Vec<Segment>>,
     #[serde(default = "default_true")]
     denoise: bool,
     #[serde(default = "default_true")]
@@ -807,23 +1212,19 @@ pub(super) async fn create_sample(
     .await
     .map_err(|e| internal(&st, &req_id, e.to_string()))??;
 
-    let (start, end) = resolve_range(
+    let edit = resolve_edit(
         &st,
         &req_id,
         &home,
         &clip_id,
+        meta.duration_secs,
+        req.segments.as_deref(),
         req.start,
         req.end,
         req.speaker,
     )
     .await?;
-    if end <= start {
-        return Err(bad_request(
-            "end",
-            "invalid_request",
-            format!("the range {start}-{end} is empty"),
-        ));
-    }
+    let (start, end) = edit.bounds();
 
     let enabled: Vec<Step> = steps.iter().filter(|s| s.enabled()).cloned().collect();
     let plan = plan_models(&st, &req_id, enabled).await?;
@@ -834,7 +1235,7 @@ pub(super) async fn create_sample(
     let build = move || -> Result<Value, PrepError> {
         let working = prep::clip_dir(&home, &clip_id).join(prep::WORKING_WAV);
         let pcm = prep::read_wav(&working)?;
-        let cropped = prep::crop(&pcm, start, end);
+        let cropped = edit.crop(&pcm);
 
         let dir = prep::sample_dir(&home, &id);
         std::fs::create_dir_all(&dir).map_err(|e| PrepError::Io(e.to_string()))?;
@@ -859,7 +1260,7 @@ pub(super) async fn create_sample(
 
             let transcript_txt = match req.transcript.as_deref().map(str::trim) {
                 Some(text) if !text.is_empty() => text.to_string(),
-                _ => words_in_range(&home, &clip_id, start, end).unwrap_or_default(),
+                _ => words_in_segments(&home, &clip_id, &edit.segments()).unwrap_or_default(),
             };
             std::fs::write(dir.join(prep::TRANSCRIPT_TXT), transcript_txt)
                 .map_err(|e| PrepError::Io(e.to_string()))?;
@@ -876,6 +1277,10 @@ pub(super) async fn create_sample(
                 created_at: prep::now_rfc3339(),
                 steps,
                 analysis: Some(analysis),
+                segments: match &edit {
+                    Edit::Segments(segs) => segs.clone(),
+                    Edit::Range(..) => Vec::new(),
+                },
             };
             prep::save_json(&dir.join(prep::SAMPLE_META), &sample_meta)?;
             Ok(sample_meta)
@@ -898,6 +1303,8 @@ struct RenderRequest {
     start: Option<f64>,
     end: Option<f64>,
     speaker: Option<i32>,
+    /// As [`ProcessRequest::segments`].
+    segments: Option<Vec<Segment>>,
     steps: Vec<Step>,
     until: Option<usize>,
     solo: Option<usize>,
@@ -948,21 +1355,24 @@ pub(super) async fn render_clip(
     }
 
     let home = st.registry.home().to_path_buf();
-    {
+    let meta = {
         let (home, id) = (home.clone(), id.clone());
         tokio::task::spawn_blocking(move || load_clip_meta(&home, &id))
             .await
-            .map_err(|e| internal(&st, &req_id, e.to_string()))??;
-    }
-    let (start, end) =
-        resolve_range(&st, &req_id, &home, &id, req.start, req.end, req.speaker).await?;
-    if end <= start {
-        return Err(bad_request(
-            "end",
-            "invalid_request",
-            format!("the range {start}-{end} is empty"),
-        ));
-    }
+            .map_err(|e| internal(&st, &req_id, e.to_string()))??
+    };
+    let edit = resolve_edit(
+        &st,
+        &req_id,
+        &home,
+        &id,
+        meta.duration_secs,
+        req.segments.as_deref(),
+        req.start,
+        req.end,
+        req.speaker,
+    )
+    .await?;
 
     let running: Vec<Step> = select
         .indices(&req.steps)
@@ -975,7 +1385,7 @@ pub(super) async fn render_clip(
     let (bytes, analysis) =
         tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, Analysis), PrepError> {
             let working = prep::clip_dir(&home, &id).join(prep::WORKING_WAV);
-            let cropped = prep::crop(&prep::read_wav(&working)?, start, end);
+            let cropped = edit.crop(&prep::read_wav(&working)?);
             let mut runner = Runner {
                 home: &home,
                 plan: &plan,
@@ -1014,6 +1424,79 @@ pub(super) async fn render_clip(
 /// controls from.
 pub(super) async fn list_steps() -> Json<Value> {
     Json(pipeline::catalogue())
+}
+
+/// What part of a clip an edit keeps.
+enum Edit {
+    /// One `start..end` range, a plain crop.
+    Range(f64, f64),
+    /// Validated, sorted, merged segments, spliced in order with a short
+    /// crossfade ([`edit::splice`]).
+    Segments(Vec<Segment>),
+}
+
+impl Edit {
+    /// First start to last end.
+    fn bounds(&self) -> (f64, f64) {
+        match self {
+            Edit::Range(s, e) => (*s, *e),
+            Edit::Segments(segs) => (segs[0].start, segs[segs.len() - 1].end),
+        }
+    }
+
+    fn segments(&self) -> Vec<Segment> {
+        match self {
+            Edit::Range(start, end) => vec![Segment {
+                start: *start,
+                end: *end,
+            }],
+            Edit::Segments(segs) => segs.clone(),
+        }
+    }
+
+    fn crop(&self, pcm: &[f32]) -> Vec<f32> {
+        match self {
+            Edit::Range(start, end) => prep::crop(pcm, *start, *end),
+            Edit::Segments(segs) => edit::splice(pcm, segs),
+        }
+    }
+}
+
+/// `segments` (validated against the clip's `duration`) when given, else the
+/// [`resolve_range`] of `start`/`end`/`speaker`; 400 if the result is empty.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_edit(
+    st: &Arc<AppState>,
+    req_id: &str,
+    home: &Path,
+    clip_id: &str,
+    duration: f64,
+    segments: Option<&[Segment]>,
+    start: Option<f64>,
+    end: Option<f64>,
+    speaker: Option<i32>,
+) -> Result<Edit, ApiError> {
+    if let Some(raw) = segments {
+        if raw.is_empty() {
+            return Err(bad_request(
+                "segments",
+                "invalid_request",
+                "\"segments\" must not be empty",
+            ));
+        }
+        let segs = edit::normalize_segments(raw, duration)
+            .map_err(|m| bad_request("segments", "invalid_request", m))?;
+        return Ok(Edit::Segments(segs));
+    }
+    let (start, end) = resolve_range(st, req_id, home, clip_id, start, end, speaker).await?;
+    if end <= start {
+        return Err(bad_request(
+            "end",
+            "invalid_request",
+            format!("the range {start}-{end} is empty"),
+        ));
+    }
+    Ok(Edit::Range(start, end))
 }
 
 /// `start`/`end` when given directly, else `speaker`'s span from the
@@ -1069,16 +1552,20 @@ async fn resolve_range(
     Ok((start, end))
 }
 
-/// The cached transcript's words inside `start..end`, joined with a space;
-/// `""` if the clip has never been transcribed.
-fn words_in_range(home: &Path, clip_id: &str, start: f64, end: f64) -> Option<String> {
+/// The cached transcript's words inside any of `segments`, joined with a
+/// space; `None` if the clip has never been transcribed.
+fn words_in_segments(home: &Path, clip_id: &str, segments: &[Segment]) -> Option<String> {
     let path = prep::clip_dir(home, clip_id).join(prep::TRANSCRIPT_JSON);
     let transcript: Transcript = prep::load_json(&path).ok()?;
     Some(
         transcript
             .words
             .iter()
-            .filter(|w| w.start >= start && w.end <= end)
+            .filter(|w| {
+                segments
+                    .iter()
+                    .any(|s| w.start >= s.start && w.end <= s.end)
+            })
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
             .join(" "),

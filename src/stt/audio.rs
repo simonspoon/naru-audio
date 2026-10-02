@@ -13,6 +13,27 @@ pub const MAX_INPUT_BYTES: u64 = 256 * 1024 * 1024;
 /// Cap on decoded audio, in seconds.
 pub const MAX_DECODED_SECONDS: u32 = 10 * 60;
 
+/// Limits for [`decode_with`]. The STT endpoints use [`Limits::STT`]; voice
+/// prep decodes whole raw clips and uses [`Limits::PREP`].
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub max_bytes: u64,
+    pub max_seconds: u32,
+}
+
+impl Limits {
+    pub const STT: Limits = Limits {
+        max_bytes: MAX_INPUT_BYTES,
+        max_seconds: MAX_DECODED_SECONDS,
+    };
+    /// Voice prep's own cap: 4 hours. `working.wav` is 16 kHz 16-bit mono
+    /// (115 MB/hour), so the byte cap is 4 h of that with headroom (1 GiB).
+    pub const PREP: Limits = Limits {
+        max_bytes: 1024 * 1024 * 1024,
+        max_seconds: 4 * 60 * 60,
+    };
+}
+
 /// What the recognizer and the VAD are built for.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
 
@@ -191,12 +212,12 @@ fn downmix_to_mono(interleaved: &[f32], channels: u16) -> Vec<f32> {
 }
 
 /// Checked at the native rate, before paying for a resample.
-fn check_duration(mono: &[f32], sample_rate: u32) -> Result<(), AudioError> {
+fn check_duration(mono: &[f32], sample_rate: u32, max_seconds: u32) -> Result<(), AudioError> {
     if mono.is_empty() {
         return Err(AudioError::Empty);
     }
     let seconds = mono.len() as f64 / sample_rate as f64;
-    if seconds > MAX_DECODED_SECONDS as f64 {
+    if seconds > max_seconds as f64 {
         return Err(AudioError::TooLong);
     }
     Ok(())
@@ -243,6 +264,7 @@ pub const READ_CHUNK_FRAMES: usize = 4096;
 /// A WAV whose header has been parsed and validated; the body is read in
 /// chunks. auris streams from this; here only [`decode`] uses it.
 struct WavStream<R: Read> {
+    max_seconds: u32,
     wav: hound::WavReader<SniffedReader<R>>,
     channels: u16,
     sample_rate: u32,
@@ -252,8 +274,8 @@ struct WavStream<R: Read> {
 }
 
 impl<R: Read> WavStream<R> {
-    fn open(reader: R) -> Result<Self, AudioError> {
-        let mut limited = LimitedReader::new(reader, MAX_INPUT_BYTES);
+    fn open(reader: R, limits: Limits) -> Result<Self, AudioError> {
+        let mut limited = LimitedReader::new(reader, limits.max_bytes);
         let mut magic = [0u8; 8];
         let n = fill_as_much_as_possible(&mut limited, &mut magic).map_err(map_io_error)?;
 
@@ -285,6 +307,7 @@ impl<R: Read> WavStream<R> {
         };
 
         Ok(WavStream {
+            max_seconds: limits.max_seconds,
             wav,
             channels: spec.channels,
             sample_rate: spec.sample_rate,
@@ -320,7 +343,7 @@ impl<R: Read> WavStream<R> {
         // A short read can stop mid-frame; the downmix drops the partial one.
         let mono = downmix_to_mono(&interleaved, self.channels);
         self.frames_read += mono.len() as u64;
-        if self.frames_read > MAX_DECODED_SECONDS as u64 * self.sample_rate as u64 {
+        if self.frames_read > self.max_seconds as u64 * self.sample_rate as u64 {
             return Err(AudioError::TooLong);
         }
         Ok(mono)
@@ -336,7 +359,7 @@ impl<R: Read> WavStream<R> {
             }
             mono.extend_from_slice(&chunk);
         }
-        check_duration(&mono, self.sample_rate)?;
+        check_duration(&mono, self.sample_rate, self.max_seconds)?;
         resample_to_target(&mono, self.sample_rate)
     }
 }
@@ -377,7 +400,12 @@ fn fill_as_much_as_possible(reader: &mut impl Read, buf: &mut [u8]) -> std::io::
 
 /// Decodes a whole WAV stream to 16 kHz mono.
 pub fn decode(reader: impl Read) -> Result<Vec<f32>, AudioError> {
-    WavStream::open(reader)?.rest_resampled()
+    decode_with(reader, Limits::STT)
+}
+
+/// [`decode`] under other [`Limits`].
+pub fn decode_with(reader: impl Read, limits: Limits) -> Result<Vec<f32>, AudioError> {
+    WavStream::open(reader, limits)?.rest_resampled()
 }
 
 #[cfg(test)]

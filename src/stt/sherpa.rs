@@ -154,6 +154,7 @@ fn merge_words(tokens: &[String], timestamps: &[f32], utt_start: f64, utt_end: f
                         start: b.start,
                         end: start,
                         text: b.text,
+                        confidence: None,
                     });
                 }
                 building = Some(Building {
@@ -177,6 +178,7 @@ fn merge_words(tokens: &[String], timestamps: &[f32], utt_start: f64, utt_end: f
             start: b.start,
             end: utt_end,
             text: b.text,
+            confidence: None,
         });
     }
     words

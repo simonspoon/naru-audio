@@ -406,6 +406,7 @@ mod tests {
             start: 0.0,
             end: 1.0,
             text: text.to_string(),
+            confidence: None,
         }
     }
 
@@ -540,6 +541,7 @@ mod tests {
             start,
             end: start + 0.5,
             text: text.to_string(),
+            confidence: None,
         };
         let words = annotate(&[
             w(0.0, "for"),
@@ -574,11 +576,13 @@ mod tests {
                 start: 0.5,
                 end: 0.9,
                 text: "um,".into(),
+                confidence: None,
             },
             Word {
                 start: 1.0,
                 end: 1.4,
                 text: "42".into(),
+                confidence: None,
             },
         ]);
         assert_eq!(words[0].start, 0.5);

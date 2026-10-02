@@ -140,6 +140,7 @@ impl SttModel for MlxStt {
                     start: offset + w.start,
                     end: offset + w.end,
                     text: w.text,
+                    confidence: w.confidence,
                 }));
             }
         }

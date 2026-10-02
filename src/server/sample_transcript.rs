@@ -258,6 +258,7 @@ mod tests {
             start: 0.0,
             end: 0.1,
             text: t.to_string(),
+            confidence: None,
         };
         let t = build(
             vec![

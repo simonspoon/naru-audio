@@ -325,6 +325,7 @@ impl Sidecar {
                                 start: w["start"].as_f64()?,
                                 end: w["end"].as_f64()?,
                                 text: w["text"].as_str()?.to_string(),
+                                confidence: w["probability"].as_f64().map(|p| p as f32),
                             })
                         })
                         .collect(),

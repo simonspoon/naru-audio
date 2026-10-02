@@ -37,6 +37,9 @@ pub struct Word {
     pub start: f64,
     pub end: f64,
     pub text: String,
+    /// The engine's confidence in the word, 0..=1; `None` where the engine
+    /// reports none (only MLX Whisper does).
+    pub confidence: Option<f32>,
 }
 
 pub trait SttModel: Send + Sync {

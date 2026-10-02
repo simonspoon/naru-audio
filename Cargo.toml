@@ -22,7 +22,7 @@ sherpa-onnx = "=1.13.6"
 # Not used directly: sherpa-onnx 1.13.6 does not build against sys 1.13.8.
 sherpa-onnx-sys = "=1.13.6"
 tar = "0.4"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "fs", "io-util"] }
 tokio-tungstenite = "0.29"
 toml = "1"
 toml_edit = "0.25"

@@ -36,6 +36,12 @@ use crate::registry::manifest::Kind;
 use crate::registry::{Progress, Registry, RegistryError};
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7870";
+/// Body cap of `POST /v1/audio/prep/clips`: 4 GiB. A prep clip is a whole
+/// recording of up to [`crate::stt::audio::Limits::PREP`]'s 4 hours; that is
+/// ~0.5 GB as 16 kHz WAV but up to ~2.5 GB as 44.1 kHz stereo 16-bit WAV, the
+/// largest ordinary source. The upload is streamed to disk, so the cap bounds
+/// disk, not memory.
+const MAX_PREP_UPLOAD_BYTES: usize = 4 * 1024 * 1024 * 1024 + 1024 * 1024;
 const REQUEST_ID: &str = "x-request-id";
 
 pub struct AppState {
@@ -103,7 +109,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/audio/prep/clips",
             get(prep::list_clips)
                 .post(prep::upload_clip)
-                .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
+                .layer(DefaultBodyLimit::max(MAX_PREP_UPLOAD_BYTES)),
         )
         .route(
             "/v1/audio/prep/clips/{id}",
@@ -119,6 +125,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(prep::get_transcript),
         )
         .route("/v1/audio/prep/clips/{id}/render", post(prep::render_clip))
+        .route("/v1/audio/prep/clips/{id}/peaks", get(prep::clip_peaks))
+        .route("/v1/audio/prep/clips/{id}/takes", post(prep::clip_takes))
+        .route(
+            "/v1/audio/prep/clips/{id}/project",
+            get(prep::get_project)
+                .put(prep::put_project)
+                .delete(prep::delete_project),
+        )
+        .route("/v1/audio/prep/projects", get(prep::list_projects))
         .route("/v1/audio/prep/steps", get(prep::list_steps))
         .route(
             "/v1/audio/samples",

@@ -20,8 +20,10 @@
 pub mod denoise;
 pub mod diarize;
 pub mod dsp;
+pub mod edit;
 pub mod isolate;
 pub mod pipeline;
+pub mod takes;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -130,6 +132,10 @@ pub struct TranscriptWord {
     pub start: f64,
     pub end: f64,
     pub text: String,
+    /// The engine's confidence in the word (MLX Whisper's), `None` for an
+    /// engine that reports none or a transcript cached before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +155,11 @@ pub struct Transcript {
     /// The diarization model that produced `speakers`, `None` if diarization
     /// was skipped.
     pub diarization_model: Option<String>,
+    /// Time ranges where spans of two or more different speakers overlap
+    /// (crosstalk). `#[serde(default)]` so a `transcript.json` cached before
+    /// this field existed still loads, with none.
+    #[serde(default)]
+    pub overlaps: Vec<edit::Segment>,
 }
 
 /// One engine a sample's pipeline actually ran, for `meta.json`'s
@@ -187,7 +198,43 @@ pub struct SampleMeta {
     /// before analysis existed.
     #[serde(default)]
     pub analysis: Option<pipeline::Analysis>,
+    /// The kept segments when the sample was made from a multi-segment edit
+    /// (spliced in order); empty for a plain `range`. `range` is then the
+    /// first segment's start to the last one's end.
+    #[serde(default)]
+    pub segments: Vec<edit::Segment>,
 }
+
+/// A saved Sample Studio edit of one clip (`project.json` in the clip's
+/// directory): everything needed to reopen the studio where it was left.
+/// The raw upload and `working.wav` are never touched by an edit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub name: String,
+    #[serde(default)]
+    pub speaker: Option<i32>,
+    /// The kept regions of `working.wav`, sorted and merged; empty = whole
+    /// clip.
+    #[serde(default)]
+    pub segments: Vec<edit::Segment>,
+    /// Ranges the user cut out (the studio's own bookkeeping).
+    #[serde(default)]
+    pub cuts: Vec<edit::Segment>,
+    #[serde(default)]
+    pub exclude_overlaps: bool,
+    #[serde(default)]
+    pub steps: Vec<pipeline::Step>,
+    /// The corrected transcript, if the user fixed it.
+    #[serde(default)]
+    pub transcript: Option<String>,
+    /// The last best-takes result, stored as the client sent it.
+    #[serde(default)]
+    pub takes: Option<serde_json::Value>,
+    pub updated_at: String,
+    pub created_at: String,
+}
+
+pub const PROJECT_JSON: &str = "project.json";
 
 pub fn now_rfc3339() -> String {
     humantime::format_rfc3339_seconds(SystemTime::now()).to_string()
@@ -235,9 +282,7 @@ pub fn ingest_to_wav(src: &Path, dst: &Path) -> Result<f64, PrepError> {
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    let samples =
-        crate::stt::audio::decode(std::fs::File::open(dst).map_err(io_err("open converted wav"))?)
-            .map_err(|e| PrepError::BadAudio(e.to_string()))?;
+    let samples = decode_wav(std::fs::File::open(dst).map_err(io_err("open converted wav"))?)?;
     Ok(samples.len() as f64 / TARGET_SAMPLE_RATE as f64)
 }
 
@@ -245,7 +290,20 @@ pub fn ingest_to_wav(src: &Path, dst: &Path) -> Result<f64, PrepError> {
 /// or a sample's `cropped.wav`.
 pub fn read_wav(path: &Path) -> Result<Vec<f32>, PrepError> {
     let file = std::fs::File::open(path).map_err(io_err("open wav"))?;
-    crate::stt::audio::decode(file).map_err(|e| PrepError::BadAudio(e.to_string()))
+    decode_wav(file)
+}
+
+/// Decodes under [`Limits::PREP`] (4 hours), not the STT endpoints' 10
+/// minutes: a raw clip is the whole recording.
+fn decode_wav(reader: impl std::io::Read) -> Result<Vec<f32>, PrepError> {
+    use crate::stt::audio::{AudioError, Limits, decode_with};
+    decode_with(reader, Limits::PREP).map_err(|e| match e {
+        AudioError::TooLong => PrepError::BadAudio(format!(
+            "audio exceeds the {}-hour clip cap",
+            Limits::PREP.max_seconds / 3600
+        )),
+        e => PrepError::BadAudio(e.to_string()),
+    })
 }
 
 /// Writes `samples` (16 kHz mono) as a 16-bit PCM WAV.
@@ -429,6 +487,20 @@ pub fn load_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, PrepErr
 /// skipped rather than failing the listing.
 pub fn list_clips(home: &Path) -> Vec<String> {
     list_ids(&clips_dir(home), CLIP_META)
+}
+
+/// The ids of clips in `home` that have a saved [`Project`], sorted.
+pub fn list_projects(home: &Path) -> Vec<String> {
+    let dir = clips_dir(home);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|id| check_id(id).is_ok() && dir.join(id).join(PROJECT_JSON).is_file())
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// The sample ids in `home`, sorted, as [`list_clips`].
