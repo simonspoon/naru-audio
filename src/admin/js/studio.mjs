@@ -13,11 +13,25 @@
 // belong to the saved sample's audio, so they are placed proportionally on
 // whatever length is on screen. "Use as clone sample" posts a new sample with
 // the chain and the corrected transcript, then opens the clone tab on it.
+//
+// `#studio?clip=<id>[&model=<model>]` (naru task 1576) opens a raw uploaded
+// clip of any length as a sample *project*: `studio-clip.mjs` is the editor
+// on top (waveform, speakers, crosstalk, best takes, crop/cuts, undo, saved
+// project) and this file renders its kept segments through the same chain
+// (`render` with `segments`), as long as they fit `RENDER_MAX_S`. The words
+// are the clip transcript's, within the kept segments, placed on the result's
+// timeline; the project stores the fixes by word start time.
 
 import { getJson, postJson, request, del } from './api.mjs';
 import { el, toast, decodeWav, peaks } from './ui.mjs';
+import { createClipEditor, CLONE_MIN_S, CLONE_MAX_S } from './studio-clip.mjs';
+import { totalSecs } from './studio-edit.mjs';
 
 const RENDER_DEBOUNCE_MS = 500;
+/** Longest kept audio a clip project renders through the chain for preview (the browser decodes the result). */
+const RENDER_MAX_S = 60;
+/** The words list is a DOM node per word; past this it is not shown. */
+const WORDS_MAX = 400;
 const BAR_PX = 5;
 const KNOB_DRAG_PX = 160; // pixels of vertical drag for a knob's full range
 // Meter verdict thresholds (the clone-sample ideal).
@@ -63,6 +77,10 @@ function stepTitle(type) {
 export function mount(view, params) {
   let disposed = false;
   const sampleId = params.sample ?? null;
+  const clipId = sampleId ? null : (params.clip ?? null);
+  const clipMode = !!clipId;
+  let editor = null; // clip mode: the raw-clip editor
+  let fixes = new Map(); // clip mode: transcript fixes by word start time
   const isDraft = params.draft === '1';
   const cloneModel = params.model ?? null;
 
@@ -70,6 +88,7 @@ export function mount(view, params) {
   let catalogue = null; // GET /v1/audio/prep/steps
   let steps = []; // the chain on screen
   let rawWave = null; // {sampleRate, samples}
+  let rawObjectUrl = null;
   let procWave = null;
   let rawUrl = null;
   let procUrl = null;
@@ -180,6 +199,7 @@ export function mount(view, params) {
   const useBtn = el('button', { class: 'studio-use', type: 'button', onclick: useAsCloneSample }, [
     'USE AS CLONE SAMPLE →',
   ]);
+  const clipHost = el('div', { class: 'card studio-card' });
 
   view.append(
     el('div', { class: 'studio' }, [
@@ -189,7 +209,9 @@ export function mount(view, params) {
         el('div', { class: 'studio-ab' }, [abA, abB]),
         useBtn,
       ]),
+      clipMode ? clipHost : null,
       el('div', { class: 'card studio-card' }, [
+        clipMode ? el('div', { class: 'lab' }, ['RESULT · THE KEPT AUDIO THROUGH THE PIPELINE']) : null,
         el('div', { class: 'studio-wave-head' }, [playBtn, clock, legend]),
         waveWrap,
         el('div', { class: 'studio-trans-head' }, [
@@ -329,6 +351,11 @@ export function mount(view, params) {
       if (save) {
         w.value = input.value.trim() || w.value; // emptying a word keeps it
         w.differs = false; // seen and confirmed, edited or not
+        if (clipMode) {
+          if (w.value === w.text) fixes.delete(w.key);
+          else fixes.set(w.key, w.value);
+          editor.touch();
+        }
       }
       renderWords();
     };
@@ -343,7 +370,15 @@ export function mount(view, params) {
   }
 
   function renderWords() {
-    if (transcriptState === 'loading') {
+    if (clipMode && words && words.length > WORDS_MAX) {
+      wordHost.replaceChildren(
+        el('span', { class: 'studio-note' }, [`${words.length} words in the kept audio — narrow the edit to read and fix them`]),
+      );
+    } else if (clipMode && !words) {
+      wordHost.replaceChildren(
+        el('span', { class: 'studio-note' }, ['no transcript yet — separate speakers (above) to transcribe the clip']),
+      );
+    } else if (transcriptState === 'loading') {
       wordHost.replaceChildren(el('span', { class: 'studio-note' }, ['transcribing… (first open runs the speech model)']));
     } else if (transcriptState === 'failed') {
       wordHost.replaceChildren(
@@ -359,11 +394,47 @@ export function mount(view, params) {
   }
 
   function transcriptText() {
-    if (!words) return meta?.transcript ?? '';
+    if (!words) return clipMode ? '' : (meta?.transcript ?? '');
     return words
       .map((w) => w.value)
       .filter(Boolean)
       .join(' ');
+  }
+
+  /** Clip mode: the clip transcript's words inside the kept segments, on the result's timeline. */
+  function rebuildClipWords() {
+    const t = editor.transcript();
+    if (!t) {
+      words = null;
+      transcriptState = 'ready';
+      return;
+    }
+    const kept = editor.kept();
+    const out = [];
+    let offset = 0;
+    let k = 0;
+    for (const w of t.words) {
+      const mid = (w.start + w.end) / 2;
+      while (k < kept.length && kept[k].end <= mid) {
+        offset += kept[k].end - kept[k].start;
+        k++;
+      }
+      if (k >= kept.length) break;
+      if (mid < kept[k].start) continue;
+      const key = w.start.toFixed(2);
+      out.push({
+        start: offset + Math.max(0, w.start - kept[k].start),
+        end: offset + Math.max(0, w.end - kept[k].start),
+        text: w.text,
+        key,
+        value: fixes.get(key) ?? w.text,
+        differs: false,
+        filler: false,
+      });
+    }
+    words = out;
+    wordsDur = totalSecs(kept);
+    transcriptState = 'ready';
   }
 
   async function loadTranscript() {
@@ -675,6 +746,11 @@ export function mount(view, params) {
 
   /** An aborted render (superseded by a newer one) rejects without a toast. */
   async function renderChain(extra = {}, signal) {
+    if (clipMode && totalSecs(editor.kept()) > RENDER_MAX_S) {
+      const err = new Error(`kept audio is over ${RENDER_MAX_S} s — narrow it first`);
+      toast(err.message, true);
+      throw err;
+    }
     let res;
     try {
       res = await request(
@@ -682,7 +758,11 @@ export function mount(view, params) {
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ start: meta.range.start, end: meta.range.end, steps, ...extra }),
+          body: JSON.stringify({
+            ...(clipMode ? { segments: editor.kept() } : { start: meta.range.start, end: meta.range.end }),
+            steps,
+            ...extra,
+          }),
           signal,
         },
         { silent: true },
@@ -697,6 +777,7 @@ export function mount(view, params) {
 
   function chainChanged() {
     renderPipeline();
+    editor?.touch();
     clearTimeout(renderTimer);
     renderTimer = setTimeout(renderFull, RENDER_DEBOUNCE_MS);
     setStatus('chain changed — rendering…');
@@ -704,13 +785,14 @@ export function mount(view, params) {
 
   /** Length of the processed audio on screen (the saved sample's before it loads). */
   function audioSecs() {
+    if (clipMode) return totalSecs(editor?.kept() ?? []);
     if (procWave) return procWave.samples.length / procWave.sampleRate;
     return meta?.analysis?.duration_secs ?? (meta ? meta.range.end - meta.range.start : 0);
   }
 
   function setStatus(text) {
     subtitle.replaceChildren(
-      el('b', {}, [meta?.name ?? '']),
+      el('b', {}, [(clipMode ? editor?.name() || editor?.clip()?.original_filename : meta?.name) ?? '']),
       ` · ${audioSecs().toFixed(1)} s · 16 kHz mono`,
       ...(text ? [el('em', {}, [` · ${text}`])] : []),
     );
@@ -722,6 +804,21 @@ export function mount(view, params) {
     const ctl = new AbortController();
     renderAbort = ctl;
     let out;
+    if (clipMode) {
+      const kept = editor.kept();
+      if (!kept.length || totalSecs(kept) > RENDER_MAX_S) {
+        // Too long to preview in the browser (or nothing kept): leave the result empty until the edit narrows.
+        renderAbort = null;
+        procWave = rawWave = null;
+        procUrl = rawUrl = null;
+        analysis = rawAnalysis = null;
+        if (audio && !audition) stopAudio();
+        setStatus(kept.length ? `kept audio is over ${RENDER_MAX_S} s — narrow it to preview the pipeline` : 'nothing kept');
+        drawAll();
+        renderMeters();
+        return;
+      }
+    }
     try {
       out = await renderChain({}, ctl.signal);
     } catch {
@@ -730,6 +827,18 @@ export function mount(view, params) {
     }
     if (disposed || gen !== renderGen) return;
     renderAbort = null;
+    if (clipMode) {
+      // The kept audio with no steps: the A side, and the "was" hints.
+      const rawOut = await renderChain({ steps: [] }, ctl.signal).catch(() => null);
+      if (disposed || gen !== renderGen) return;
+      if (rawOut) {
+        rawWave = decodeWav(rawOut.buffer);
+        if (rawObjectUrl) URL.revokeObjectURL(rawObjectUrl);
+        rawObjectUrl = URL.createObjectURL(new Blob([rawOut.buffer], { type: 'audio/wav' }));
+        rawUrl = rawObjectUrl;
+        rawAnalysis = rawOut.analysis;
+      }
+    }
     procWave = decodeWav(out.buffer);
     if (procObjectUrl) URL.revokeObjectURL(procObjectUrl);
     procObjectUrl = URL.createObjectURL(new Blob([out.buffer], { type: 'audio/wav' }));
@@ -775,7 +884,45 @@ export function mount(view, params) {
 
   // ---- save -----------------------------------------------------------------
 
+  async function useClipAsCloneSample() {
+    const name = editor.name();
+    if (!name) {
+      toast('name the project first', true);
+      return;
+    }
+    const kept = editor.kept();
+    const secs = totalSecs(kept);
+    if (secs < CLONE_MIN_S || secs > CLONE_MAX_S) {
+      toast(`a clone sample needs ${CLONE_MIN_S}–${CLONE_MAX_S} s; ${secs.toFixed(1)} s is kept`, true);
+      return;
+    }
+    saving = true;
+    useBtn.disabled = true;
+    stopAudio();
+    clearTimeout(renderTimer);
+    try {
+      await editor.save();
+      const created = await postJson('/v1/audio/samples', {
+        clip_id: clipId,
+        name,
+        segments: kept,
+        steps,
+        transcript: transcriptText(),
+      });
+      toast(`${name} saved as a clone sample`);
+      const modelPart = cloneModel ? `model=${encodeURIComponent(cloneModel)}&` : '';
+      location.hash = `#clone?${modelPart}sample=${encodeURIComponent(created.id)}`;
+    } catch {
+      saving = false;
+      useBtn.disabled = false;
+    }
+  }
+
   async function useAsCloneSample() {
+    if (clipMode) {
+      if (!saving && editor?.clip()) await useClipAsCloneSample();
+      return;
+    }
     if (saving || !meta) return;
     saving = true;
     useBtn.disabled = true;
@@ -803,7 +950,44 @@ export function mount(view, params) {
 
   // ---- boot -----------------------------------------------------------------
 
+  async function bootClip() {
+    try {
+      catalogue = await getJson('/v1/audio/prep/steps');
+      editor = createClipEditor({
+        clipId,
+        getExtras: () => ({ steps, transcript: transcriptText(), fixes: Object.fromEntries(fixes) }),
+        onChange: clipChanged,
+      });
+      clipHost.append(el('div', { class: 'lab' }, ['CLIP EDITOR · RAW AUDIO']), editor.root);
+      await editor.ready;
+    } catch {
+      if (!disposed) {
+        view.replaceChildren(el('div', { class: 'placeholder' }, ['could not open that clip — ', el('a', { href: '#samples' }, ['back to samples'])]));
+      }
+      return;
+    }
+    if (disposed) return;
+    const project = editor.project();
+    steps = structuredClone(project?.steps?.length ? project.steps : catalogue.default_chain);
+    const saved = project?.takes?.fixes;
+    if (saved && typeof saved === 'object') fixes = new Map(Object.entries(saved));
+    meta = { name: editor.name(), source_clip_id: clipId, engines: [] };
+    renderPipeline();
+    clipChanged();
+  }
+
+  /** Clip mode: the edit (or the transcript) changed what is kept. */
+  function clipChanged() {
+    if (!meta || disposed) return;
+    rebuildClipWords();
+    renderWords();
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(renderFull, RENDER_DEBOUNCE_MS);
+    setStatus('rendering…');
+  }
+
   async function boot() {
+    if (clipMode) return bootClip();
     if (!sampleId) {
       view.replaceChildren(el('div', { class: 'placeholder' }, ['open a sample from the ', el('a', { href: '#samples' }, ['samples tab'])]));
       return;
@@ -864,5 +1048,7 @@ export function mount(view, params) {
     if (audio) audio.pause();
     if (auditionUrl) URL.revokeObjectURL(auditionUrl);
     if (procObjectUrl) URL.revokeObjectURL(procObjectUrl);
+    if (rawObjectUrl) URL.revokeObjectURL(rawObjectUrl);
+    editor?.dispose();
   };
 }

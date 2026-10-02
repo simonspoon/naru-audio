@@ -1,24 +1,25 @@
-// Samples tab (naru task 1462, board 126): the voice-prep pipeline (feat
-// 0315e3b, `/v1/audio/prep/clips*` and `/v1/audio/samples*`) turns a raw
-// upload into a model-agnostic clean clip. Library view lists what's
-// already prepped (name, length, cleaned-or-raw); "+ new clip" walks
-// upload -> transcript (words + speakers) -> crop (click words or drag the
-// waveform) -> speaker -> name -> Sample Studio (`studio.mjs`), which owns the
-// cleaning chain, the A/B preview and saving the clone sample.
+// Samples tab (naru task 1462, board 126; reworked in task 1576): the
+// voice-prep library. Picking, dropping or recording a voice file of any
+// length uploads it as a raw clip (`POST /v1/audio/prep/clips`) and opens it
+// straight in Sample Studio (`studio.mjs`, `#studio?clip=<id>`), which does
+// the speaker separation, crop/cuts, best takes and cleaning chain. The tab
+// lists the saved sample projects (`GET /v1/audio/prep/projects`: reopen or
+// delete) and the finished samples, with the A/B preview, rename and delete.
 //
 // Exposes `window.naruAdmin.samples.loadFile(file)` so a headless test
 // without a file picker can drive the upload path directly.
 //
-// `#samples?clip=<id>&return=clone&model=<model>` (naru task 1463): the
-// clone tab routes a raw drop/recording here first instead of trimming it
-// itself. `clip` opens the prep flow directly on that already-uploaded
-// clip (reusing `loadClipWave`/`runTranscribe`, no re-upload); `model` rides
-// along to the studio so its "use as clone sample" returns to that model.
+// `#samples?clip=<id>&model=<model>` is the old hand-off from the clone tab;
+// it now forwards to the studio.
 
-import { getJson, postJson, request, del } from './api.mjs';
-import { el, toast, decodeWav, waveformSvg, peaks, playButton } from './ui.mjs';
+import { getJson, request, del, uploadClip } from './api.mjs';
+import { el, toast, playButton } from './ui.mjs';
 
-const SPEAKER_COLORS = ['var(--cyan)', 'var(--violet)', 'var(--amber)', 'var(--green)', 'var(--magenta)'];
+/** A sample's audio length: its kept segments when it has them (its `range` then only brackets them). */
+function sampleSecs(s) {
+  if (s.segments?.length) return s.segments.reduce((sum, g) => sum + (g.end - g.start), 0);
+  return s.range ? s.range.end - s.range.start : null;
+}
 
 function fmtMmSs(secs) {
   if (secs == null || Number.isNaN(secs)) return '—';
@@ -28,60 +29,28 @@ function fmtMmSs(secs) {
   return `${m}:${String(r).padStart(2, '0')}`;
 }
 
-function speakerColor(id) {
-  return SPEAKER_COLORS[((id % SPEAKER_COLORS.length) + SPEAKER_COLORS.length) % SPEAKER_COLORS.length];
-}
-
-/** Which diarized speaker (if any) a word's midpoint falls inside. */
-function speakerForWord(word, speakers) {
-  const mid = (word.start + word.end) / 2;
-  const span = speakers.find((s) => mid >= s.start && mid < s.end);
-  return span ? span.speaker : null;
-}
-
 export function mount(view, params) {
-  let disposed = false;
+  // The clone tab's old hand-off: forward to the studio.
+  if (params.clip) {
+    const modelPart = params.model ? `&model=${encodeURIComponent(params.model)}` : '';
+    location.hash = `#studio?clip=${encodeURIComponent(params.clip)}${modelPart}`;
+    return () => {};
+  }
 
-  // ---- library state ------------------------------------------------------
+  let disposed = false;
   let samples = []; // [{id, name, range, engines, ...}]
-  let mode = 'library'; // 'library' | 'prep'
+  let projects = []; // [{clip_id, name, duration, updated_at, speaker, segment_count, has_transcript}]
   let selectedId = params.sample ?? null;
   let renameValue = '';
-  // The clone tab's model, handed on to the studio (see header).
+  let uploading = false;
+  // The clone tab's model, handed on to the studio.
   const cloneModel = params.model ?? null;
 
-  // ---- prep-flow state ------------------------------------------------------
-  let clip = null; // ClipMeta json
-  let transcript = null; // {words, speakers}
-  let clipWave = null; // {sampleRate, samples} decoded working.wav, for the crop fallback
-  let wordSel = null; // {start: idx, end: idx} into transcript.words
-  let wordAnchor = null;
-  let range = null; // {start, end} in seconds, the crop actually used
-  let selectedSpeaker = null;
-  let sampleName = '';
-  let busy = false;
-  // Bumped by every entry point into the prep flow (startPrep, loadFile,
-  // startPrepForClip) so a stale continuation — e.g. params.clip's own
-  // fetch still in flight when the user hits "+ new clip" or drops a file
-  // — can tell it is no longer the current attempt and bail out instead of
-  // overwriting clip/clipWave/transcript out from under the newer one.
-  let prepGen = 0;
-
+  const uploadCard = el('div', { class: 'card' });
+  const projectsCard = el('div', { class: 'card' });
   const listCard = el('div', { class: 'card' });
   const sidePanel = el('div', { class: 'card' });
-  const prepCard = el('div', { class: 'card' });
-  // Persistent across renderPrep() calls (unlike prepCard's other children,
-  // which are rebuilt wholesale each render): a drag needs the wrap it
-  // measures with getBoundingClientRect() to stay attached to the DOM for
-  // the whole gesture, the same way clone.mjs's own `waveWrap` does.
-  const waveWrap = el('div', { class: 'trim-wrap' });
-  view.append(el('div', { class: 'side' }, [listCard, sidePanel]));
-
-  // ---- library --------------------------------------------------------------
-
-  function statusOf(s) {
-    return s.engines?.length ? '✓ cleaned' : 'raw, not cleaned yet';
-  }
+  view.append(el('div', { class: 'side' }, [el('div', {}, [uploadCard, projectsCard, listCard]), sidePanel]));
 
   /** `node.replaceChildren(...)` is the native DOM method, not `el()`'s own
    * child list (ui.mjs:21, which drops `null`/`undefined` entries) — passed
@@ -93,6 +62,131 @@ export function mount(view, params) {
     node.replaceChildren(...children.filter((c) => c != null));
   }
 
+  function openStudioClip(clipId) {
+    const modelPart = cloneModel ? `&model=${encodeURIComponent(cloneModel)}` : '';
+    location.hash = `#studio?clip=${encodeURIComponent(clipId)}${modelPart}`;
+  }
+
+  function openStudio(id) {
+    const modelPart = cloneModel ? `&model=${encodeURIComponent(cloneModel)}` : '';
+    location.hash = `#studio?sample=${encodeURIComponent(id)}${modelPart}`;
+  }
+
+  // ---- upload ---------------------------------------------------------------
+
+  /** Any length: the clip is streamed up, then opened raw in the studio. */
+  async function loadFile(file) {
+    if (uploading) return;
+    uploading = true;
+    renderUpload();
+    try {
+      const clip = await uploadClip(file);
+      toast(`uploaded · ${fmtMmSs(clip.duration_secs)}`);
+      openStudioClip(clip.id);
+    } catch {
+      uploading = false;
+      if (!disposed) renderUpload();
+    }
+  }
+
+  function renderUpload() {
+    const input = el('input', { type: 'file', accept: 'audio/*', style: 'display:none' });
+    input.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) loadFile(file);
+      e.target.value = '';
+    });
+    const browse = el('span', { style: 'color:var(--cyan);cursor:pointer' }, ['browse']);
+    browse.addEventListener('click', () => input.click());
+    const drop = el('div', { class: 'drop' }, [
+      uploading
+        ? el('span', {}, ['uploading… the studio opens when it is in'])
+        : el('span', {}, ['⇪ drop a voice file (any length) or ', browse, input]),
+    ]);
+    drop.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      drop.classList.add('over');
+    });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault();
+      drop.classList.remove('over');
+      const file = e.dataTransfer.files[0];
+      if (file) loadFile(file);
+    });
+    setChildren(uploadCard, [
+      el('h3', {}, ['NEW SAMPLE PROJECT']),
+      drop,
+      el('div', { class: 'studio-note', style: 'margin-top:6px' }, [
+        'WAV / MP3 / M4A, up to 4 h. It opens raw in Sample Studio — separate speakers, cut, pick the best takes, clean.',
+      ]),
+    ]);
+  }
+
+  // ---- projects -------------------------------------------------------------
+
+  async function deleteProjectFor(p) {
+    if (!confirm(`Delete the project "${p.name}"? The uploaded clip stays; its edits are lost.`)) return;
+    try {
+      await del(`/v1/audio/prep/clips/${encodeURIComponent(p.clip_id)}/project`);
+      toast(`${p.name} deleted`);
+    } catch {
+      return;
+    }
+    refresh();
+  }
+
+  function projectRow(p) {
+    return el('div', { class: 'row' }, [
+      el('b', {}, [p.name]),
+      el('span', { style: 'color:var(--muted);font-size:11px' }, [
+        `${fmtMmSs(p.duration)} · ${p.speaker != null ? `speaker ${p.speaker}` : 'all speakers'} · ${p.segment_count} segment${p.segment_count === 1 ? '' : 's'} · ${
+          p.updated_at ? new Date(p.updated_at).toLocaleString() : ''
+        }`,
+      ]),
+      el('button', { class: 'btn', onclick: () => openStudioClip(p.clip_id) }, ['open']),
+      el('button', { class: 'btn r', onclick: () => deleteProjectFor(p) }, ['delete']),
+    ]);
+  }
+
+  function renderProjects() {
+    setChildren(projectsCard, [
+      el('h3', {}, ['SAMPLE PROJECTS']),
+      ...projects.map(projectRow),
+      projects.length ? null : el('div', { class: 'placeholder' }, ['no saved projects yet']),
+    ]);
+  }
+
+  // ---- samples library --------------------------------------------------------
+
+  function statusOf(s) {
+    return s.engines?.length ? '✓ cleaned' : 'raw, not cleaned yet';
+  }
+
+  function libraryRow(s) {
+    return el(
+      'div',
+      { class: `row${s.id === selectedId ? ' sel' : ''}`, style: 'cursor:pointer', onclick: () => selectSample(s.id) },
+      [
+        el('b', {}, [s.name]),
+        el('span', { style: 'color:var(--muted);width:50px;text-align:right' }, [
+          fmtMmSs(sampleSecs(s)),
+        ]),
+        el('span', { style: `color:${s.engines?.length ? 'var(--green)' : 'var(--amber)'};font-size:11px` }, [
+          statusOf(s),
+        ]),
+      ],
+    );
+  }
+
+  function renderList() {
+    setChildren(listCard, [
+      el('h3', {}, ['SAMPLES']),
+      ...samples.map(libraryRow),
+      samples.length ? null : el('div', { class: 'placeholder' }, ['no samples yet']),
+    ]);
+  }
+
   /** A `.row` that hosts a `playButton()` needs `position:relative` — `.play`
    * positions itself `absolute` against the nearest positioned ancestor, and
    * plain `.row` (unlike `.vc`/`.cmp`, which other tabs use for this) has
@@ -102,46 +196,11 @@ export function mount(view, params) {
     return el('div', { class: 'row', style: 'position:relative;padding-right:30px' }, [playButton(getSrc), label]);
   }
 
-  function libraryRow(s) {
-    const tr = el(
-      'div',
-      { class: `row${s.id === selectedId ? ' sel' : ''}`, style: 'cursor:pointer', onclick: () => selectSample(s.id) },
-      [
-        el('b', {}, [s.name]),
-        el('span', { style: 'color:var(--muted);width:50px;text-align:right' }, [
-          fmtMmSs(s.range ? s.range.end - s.range.start : null),
-        ]),
-        el('span', { style: `color:${s.engines?.length ? 'var(--green)' : 'var(--amber)'};font-size:11px` }, [
-          statusOf(s),
-        ]),
-      ],
-    );
-    return tr;
-  }
-
-  function renderList() {
-    setChildren(listCard, [
-      el('h3', {}, ['SAMPLES']),
-      el(
-        'button',
-        { class: 'big', onclick: startPrep },
-        ['+ new clip'],
-      ),
-      ...samples.map(libraryRow),
-      samples.length ? null : el('div', { class: 'placeholder' }, ['no samples yet']),
-    ]);
-  }
-
   function kv(label, value) {
     return el('div', { class: 'kv' }, [el('span', {}, [label]), el('span', {}, [String(value)])]);
   }
 
   function renderSide() {
-    if (mode === 'prep') {
-      sidePanel.replaceChildren(prepCard);
-      renderPrep();
-      return;
-    }
     const s = samples.find((x) => x.id === selectedId);
     if (!s) {
       sidePanel.replaceChildren(el('div', { class: 'placeholder' }, ['select a sample']));
@@ -153,14 +212,14 @@ export function mount(view, params) {
     const rawUrl = `/v1/audio/samples/${encodeURIComponent(s.id)}/audio?variant=cropped`;
     setChildren(sidePanel, [
       el('h3', {}, [s.name]),
-      kv('length', fmtMmSs(s.range.end - s.range.start)),
+      kv('length', fmtMmSs(sampleSecs(s))),
       kv('status', statusOf(s)),
       kv('speaker', s.speaker ?? '—'),
       s.warnings?.length ? el('div', { class: 'warn' }, [s.warnings.join('; ')]) : null,
       el('div', { class: 'lab', style: 'margin-top:10px' }, ['A/B PREVIEW']),
       playRow(() => rawUrl, 'raw crop'),
       playRow(() => cleanUrl, 'cleaned'),
-      el('button', { class: 'big', onclick: () => openStudio(s.id, false) }, ['OPEN IN SAMPLE STUDIO']),
+      el('button', { class: 'big', onclick: () => openStudio(s.id) }, ['OPEN IN SAMPLE STUDIO']),
       el('div', { class: 'lab', style: 'margin-top:10px' }, ['RENAME']),
       el('div', { class: 'row' }, [
         renameInput,
@@ -171,18 +230,10 @@ export function mount(view, params) {
   }
 
   function selectSample(id) {
-    mode = 'library';
     selectedId = id;
     renameValue = '';
     renderList();
     renderSide();
-  }
-
-  /** `draft`: the sample was just made for the studio, which replaces it
-   * with the final one when the user saves. */
-  function openStudio(id, draft) {
-    const modelPart = cloneModel ? `&model=${encodeURIComponent(cloneModel)}` : '';
-    location.hash = `#studio?sample=${encodeURIComponent(id)}${draft ? '&draft=1' : ''}${modelPart}`;
   }
 
   async function renameSample(s) {
@@ -213,363 +264,17 @@ export function mount(view, params) {
     refresh();
   }
 
-  // ---- prep flow: 1. upload --------------------------------------------------
-
-  function resetPrep() {
-    clip = null;
-    transcript = null;
-    clipWave = null;
-    wordSel = null;
-    wordAnchor = null;
-    range = null;
-    selectedSpeaker = null;
-    sampleName = '';
-    busy = false;
-  }
-
-  function startPrep() {
-    mode = 'prep';
-    prepGen++;
-    resetPrep();
-    renderList();
-    renderSide();
-  }
-
-  /** Opens the prep flow on a clip the clone tab already uploaded
-   * (`#samples?clip=<id>`, naru task 1463) — reuses `loadClipWave`/
-   * `runTranscribe` same as a fresh upload, but skips `loadFile`'s own
-   * `POST /v1/audio/prep/clips` since the clip already exists.
-   *
-   * This runs automatically from `params.clip` and can race a user who
-   * hits "+ new clip" or drops a file while its own fetch is still in
-   * flight; `gen` lets it notice it's been superseded and bail rather than
-   * overwrite `clip`/`clipWave`/`transcript` out from under the newer
-   * attempt. */
-  async function startPrepForClip(clipId) {
-    mode = 'prep';
-    const gen = ++prepGen;
-    resetPrep();
-    renderList();
-    renderSide();
-    busy = true;
-    renderPrep();
-    let fetchedClip;
-    try {
-      fetchedClip = await getJson(`/v1/audio/prep/clips/${encodeURIComponent(clipId)}`);
-    } catch {
-      if (gen !== prepGen) return;
-      busy = false;
-      renderPrep();
-      return;
-    }
-    if (gen !== prepGen) return;
-    clip = fetchedClip;
-    busy = false;
-    await loadClipWave();
-    if (gen !== prepGen) return;
-    await runTranscribe();
-  }
-
-  function backToLibrary() {
-    mode = 'library';
-    renderList();
-    refresh();
-  }
-
-  async function loadFile(file) {
-    prepGen++;
-    const form = new FormData();
-    form.append('file', file, file.name || 'clip');
-    busy = true;
-    renderPrep();
-    try {
-      // A multipart upload needs `request` directly; `postJson` always sends JSON.
-      const res = await request('/v1/audio/prep/clips', { method: 'POST', body: form });
-      clip = await res.json();
-      toast(`uploaded · ${fmtMmSs(clip.duration_secs)}`);
-    } catch {
-      busy = false;
-      renderPrep();
-      return;
-    }
-    busy = false;
-    await loadClipWave();
-    await runTranscribe();
-  }
-
-  async function loadClipWave() {
-    if (!clip) return;
-    try {
-      const res = await fetch(`/v1/audio/prep/clips/${encodeURIComponent(clip.id)}/audio`);
-      if (!res.ok) return;
-      const buffer = await res.arrayBuffer();
-      clipWave = decodeWav(buffer);
-    } catch {
-      clipWave = null;
-    }
-    renderPrep();
-  }
-
-  // ---- prep flow: 2. transcribe ----------------------------------------------
-
-  async function runTranscribe() {
-    if (!clip) return;
-    busy = true;
-    renderPrep();
-    try {
-      transcript = await request(`/v1/audio/prep/clips/${encodeURIComponent(clip.id)}/transcribe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      }).then((r) => r.json());
-    } catch {
-      transcript = null;
-    }
-    busy = false;
-    renderPrep();
-  }
-
-  // ---- prep flow: 3. crop -----------------------------------------------------
-
-  function setRangeFromWords() {
-    if (!wordSel || !transcript) return;
-    const words = transcript.words.slice(wordSel.start, wordSel.end + 1);
-    if (!words.length) return;
-    range = { start: words[0].start, end: words[words.length - 1].end };
-    renderPrep();
-  }
-
-  function onWordClick(idx, shiftKey) {
-    if (shiftKey && wordAnchor != null) {
-      wordSel = { start: Math.min(wordAnchor, idx), end: Math.max(wordAnchor, idx) };
-    } else {
-      wordAnchor = idx;
-      wordSel = { start: idx, end: idx };
-    }
-    setRangeFromWords();
-  }
-
-  function renderTranscript() {
-    if (!transcript) return el('div', { class: 'placeholder' }, ['transcribing…']);
-    return el(
-      'div',
-      { class: 'cmp' },
-      transcript.words.map((w, i) => {
-        const speaker = speakerForWord(w, transcript.speakers);
-        const inSel = wordSel && i >= wordSel.start && i <= wordSel.end;
-        return el(
-          'span',
-          {
-            style: `cursor:pointer;padding:1px 2px;margin-right:2px;display:inline-block;${
-              speaker != null ? `color:${speakerColor(speaker)};` : ''
-            }${inSel ? 'background:rgba(0,229,255,0.18);' : ''}`,
-            onclick: (e) => onWordClick(i, e.shiftKey),
-          },
-          [w.text],
-        );
-      }),
-    );
-  }
-
-  function renderWaveformCrop() {
-    if (!clipWave) return el('div', { class: 'placeholder' }, ['no waveform yet']);
-    const duration = clipWave.samples.length / clipWave.sampleRate;
-    const start = range?.start ?? 0;
-    const end = range?.end ?? duration;
-    const startHandle = el('div', { class: 'trim-handle', style: `left:${(start / duration) * 100}%` });
-    const endHandle = el('div', { class: 'trim-handle', style: `left:${(end / duration) * 100}%` });
-    wireDrag(startHandle, 'start', duration);
-    wireDrag(endHandle, 'end', duration);
-    // Mutates the persistent `waveWrap` in place — a fresh `trim-wrap` div
-    // here would detach mid-drag the moment the first pointermove calls
-    // renderPrep() (naru task 1462 review).
-    waveWrap.replaceChildren(
-      waveformSvg(peaks(clipWave.samples, 140)),
-      startHandle,
-      endHandle,
-      el('div', { style: 'display:flex;justify-content:space-between;color:var(--muted);font-size:10px' }, [
-        el('span', {}, [`${(end - start).toFixed(1)} s selected`]),
-        el('span', {}, ['drag the cyan handles to crop (fallback for clicking words)']),
-      ]),
-    );
-    return waveWrap;
-  }
-
-  function wireDrag(handle, which, duration) {
-    handle.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      const onMove = (ev) => {
-        const rect = waveWrap.getBoundingClientRect();
-        const frac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
-        const t = frac * duration;
-        const start = range?.start ?? 0;
-        const end = range?.end ?? duration;
-        if (which === 'start') range = { start: Math.min(t, end - 0.2), end };
-        else range = { start, end: Math.max(t, start + 0.2) };
-        wordSel = null; // dragging the waveform supersedes a word selection
-        renderPrep();
-      };
-      const onUp = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-    });
-  }
-
-  // ---- prep flow: 4. speaker --------------------------------------------------
-
-  function speakerIds() {
-    if (!transcript) return [];
-    return [...new Set(transcript.speakers.map((s) => s.speaker))].sort((a, b) => a - b);
-  }
-
-  function pickSpeaker(id) {
-    selectedSpeaker = selectedSpeaker === id ? null : id;
-    if (selectedSpeaker != null && transcript) {
-      const spans = transcript.speakers.filter((s) => s.speaker === selectedSpeaker);
-      const start = Math.min(...spans.map((s) => s.start));
-      const end = Math.max(...spans.map((s) => s.end));
-      range = { start, end };
-      wordSel = null;
-    }
-    renderPrep();
-  }
-
-  function renderSpeakerChips() {
-    const ids = speakerIds();
-    if (!ids.length) return el('div', { style: 'color:var(--muted);font-size:11px' }, ['no diarized speakers']);
-    return el(
-      'div',
-      { class: 'filt' },
-      ids.map((id) =>
-        el(
-          'span',
-          {
-            class: id === selectedSpeaker ? 'on' : '',
-            style: `color:${speakerColor(id)};border-color:${speakerColor(id)}`,
-            onclick: () => pickSpeaker(id),
-          },
-          [`speaker ${id}`],
-        ),
-      ),
-    );
-  }
-
-  // ---- prep flow: 5. isolate + clean -----------------------------------------
-
-  async function runProcess() {
-    if (!clip || !range) {
-      toast('crop a range first', true);
-      return;
-    }
-    const name = sampleName.trim();
-    if (!name) {
-      toast('name the sample first', true);
-      return;
-    }
-    busy = true;
-    renderPrep();
-    let created;
-    try {
-      // No `steps`: the server builds its default chain, which the studio then edits.
-      created = await postJson('/v1/audio/samples', {
-        clip_id: clip.id,
-        name,
-        start: range.start,
-        end: range.end,
-        speaker: selectedSpeaker,
-      });
-    } catch {
-      busy = false;
-      renderPrep();
-      return;
-    }
-    busy = false;
-    openStudio(created.id, true);
-  }
-
-  function renderPrep() {
-    setChildren(prepCard, [
-      el('h3', {}, ['+ NEW CLIP']),
-      el('div', { class: 'step' }, [
-        el('span', { class: 'num' }, ['1']),
-        el('div', { style: 'flex:1' }, [
-          el('div', { class: 'lab' }, ['UPLOAD · WAV / MP3 / M4A']),
-          clip
-            ? playRow(
-                () => `/v1/audio/prep/clips/${encodeURIComponent(clip.id)}/audio`,
-                `${clip.original_filename ?? clip.id} · ${fmtMmSs(clip.duration_secs)}`,
-              )
-            : el('div', { class: 'drop' }, [
-                el('span', {}, ['⇪ drop an audio file or ']),
-                (() => {
-                  const input = el('input', { type: 'file', accept: 'audio/*', style: 'display:none' });
-                  input.addEventListener('change', (e) => {
-                    const file = e.target.files[0];
-                    if (file) loadFile(file);
-                    e.target.value = '';
-                  });
-                  const browse = el('span', { style: 'color:var(--cyan);cursor:pointer' }, ['browse']);
-                  browse.addEventListener('click', () => input.click());
-                  return el('span', {}, [browse, input]);
-                })(),
-              ]),
-        ]),
-      ]),
-      clip
-        ? el('div', { class: 'step' }, [
-            el('span', { class: 'num' }, ['2']),
-            el('div', { style: 'flex:1' }, [
-              el('div', { class: 'lab' }, ['TRANSCRIPT · WORDS + SPEAKER']),
-              busy && !transcript ? el('div', { class: 'placeholder' }, ['working…']) : renderTranscript(),
-            ]),
-          ])
-        : null,
-      transcript
-        ? el('div', { class: 'step' }, [
-            el('span', { class: 'num' }, ['3']),
-            el('div', { style: 'flex:1' }, [
-              el('div', { class: 'lab' }, ['CROP · CLICK A WORD, SHIFT-CLICK THE LAST ONE']),
-              renderWaveformCrop(),
-            ]),
-          ])
-        : null,
-      transcript
-        ? el('div', { class: 'step' }, [
-            el('span', { class: 'num' }, ['4']),
-            el('div', { style: 'flex:1' }, [el('div', { class: 'lab' }, ['SPEAKER']), renderSpeakerChips()]),
-          ])
-        : null,
-      transcript
-        ? el('div', { class: 'step' }, [
-            el('span', { class: 'num' }, ['5']),
-            el('div', { style: 'flex:1;display:flex;gap:14px;align-items:center;flex-wrap:wrap' }, [
-              el('div', {}, [
-                el('div', { class: 'lab' }, ['NAME']),
-                el('input', {
-                  class: 'inp',
-                  value: sampleName,
-                  oninput: (e) => (sampleName = e.target.value),
-                }),
-              ]),
-              el(
-                'button',
-                { class: 'big', style: 'margin:0 0 0 auto;max-width:220px', disabled: busy || undefined, onclick: runProcess },
-                [busy ? 'working…' : '▶ OPEN IN SAMPLE STUDIO'],
-              ),
-            ]),
-          ])
-        : null,
-      el('button', { class: 'btn x', style: 'margin-top:10px', onclick: backToLibrary }, ['‹ back to library']),
-    ]);
-  }
-
   // ---- boot -------------------------------------------------------------------
 
   async function refresh() {
     if (disposed) return;
+    getJson('/v1/audio/prep/projects')
+      .then((r) => {
+        if (disposed) return;
+        projects = r.projects;
+        renderProjects();
+      })
+      .catch(() => {});
     let ids;
     try {
       ids = (await getJson('/v1/audio/samples')).samples;
@@ -587,12 +292,10 @@ export function mount(view, params) {
   window.naruAdmin = window.naruAdmin ?? {};
   window.naruAdmin.samples = { loadFile };
 
-  if (params.clip) {
-    startPrepForClip(params.clip);
-  } else {
-    renderList();
-    renderSide();
-  }
+  renderUpload();
+  renderProjects();
+  renderList();
+  renderSide();
   refresh();
   return () => {
     disposed = true;

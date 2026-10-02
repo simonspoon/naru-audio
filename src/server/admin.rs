@@ -105,6 +105,21 @@ const ASSETS: &[Asset] = &[
         content_type: "text/javascript; charset=utf-8",
         bytes: include_bytes!("../admin/js/studio.mjs"),
     },
+    Asset {
+        path: "js/studio-edit.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../admin/js/studio-edit.mjs"),
+    },
+    Asset {
+        path: "js/studio-wave.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../admin/js/studio-wave.mjs"),
+    },
+    Asset {
+        path: "js/studio-clip.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../admin/js/studio-clip.mjs"),
+    },
 ];
 
 const INDEX: &[u8] = include_bytes!("../admin/index.html");

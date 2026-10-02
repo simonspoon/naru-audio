@@ -5,10 +5,10 @@
 // voice. The right panel plays the original and previews the clone saying
 // a test line before anything is saved.
 //
-// A dropped/recorded file is a *raw* clip: it is uploaded to
-// `POST /v1/audio/prep/clips` and handed to the samples tab
-// (`#samples?clip=<id>&return=clone&model=<model>`) to go through voice-prep
-// first, rather than trimmed here directly. Picking a sample from the
+// A dropped/recorded file is a *raw* clip of any length: it is uploaded to
+// `POST /v1/audio/prep/clips` and opened straight in Sample Studio
+// (`#studio?clip=<id>&model=<model>`) to be edited and prepped there, rather
+// than trimmed here directly. Picking a sample from the
 // library, by contrast, is already a cleaned single-speaker clip: its audio
 // is fetched and loaded through the same local decode/trim path as before,
 // and its saved transcript pre-fills the transcript box (skipping
@@ -19,7 +19,7 @@
 // `window.naruAdmin.clone.pickSample(id)` so a headless test without a file
 // picker or a live samples library can drive either path directly.
 
-import { getJson, request } from './api.mjs';
+import { getJson, request, uploadClip } from './api.mjs';
 import { el, toast, encodeWav, waveformSvg, peaks, playButton } from './ui.mjs';
 
 const MIN_S = 3;
@@ -226,21 +226,19 @@ export function mount(view, params) {
     }
   }
 
-  /** Raw upload (drop/browse/record): routes through voice-prep instead of
-   * trimming here directly (naru task 1463) — upload the clip, then hand
-   * off to the samples tab to transcribe/crop/clean it. */
+  /** Raw upload (drop/browse/record), any length: uploads the clip and opens
+   * it straight in Sample Studio (`#studio?clip=<id>`, naru task 1576), which
+   * edits it raw; its "use as clone sample" comes back to this tab. */
   async function uploadRawClip(file) {
-    const form = new FormData();
-    form.append('file', file, file.name || 'clip');
+    toast('uploading…');
     let clip;
     try {
-      const res = await request('/v1/audio/prep/clips', { method: 'POST', body: form });
-      clip = await res.json();
+      clip = await uploadClip(file);
     } catch {
       return;
     }
     const modelPart = selectedModel ? `&model=${encodeURIComponent(selectedModel)}` : '';
-    location.hash = `#samples?clip=${encodeURIComponent(clip.id)}&return=clone${modelPart}`;
+    location.hash = `#studio?clip=${encodeURIComponent(clip.id)}${modelPart}`;
   }
 
   function renderSampleSelect() {

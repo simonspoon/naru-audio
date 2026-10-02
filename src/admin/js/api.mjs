@@ -70,6 +70,13 @@ export async function postJson(path, body, opts) {
   ).json();
 }
 
+/** Uploads a voice file (any length) as a prep clip: `POST /v1/audio/prep/clips`, multipart. Resolves with the clip JSON. */
+export async function uploadClip(file) {
+  const form = new FormData();
+  form.append('file', file, file.name || 'clip');
+  return (await request('/v1/audio/prep/clips', { method: 'POST', body: form })).json();
+}
+
 export async function del(path, opts) {
   return request(path, { method: 'DELETE' }, opts);
 }
