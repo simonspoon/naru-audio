@@ -105,6 +105,13 @@ body {
   min-height: 100vh;
 }
 
+a {
+  color: var(--cyan);
+  text-decoration: none;
+  transition: text-shadow 0.15s;
+}
+a:hover { text-shadow: 0 0 8px var(--cyan); }
+
 h1, h2, h3 {
   font-family: var(--font-sans);
   font-weight: 600;
@@ -311,8 +318,8 @@ h1, h2, h3 {
 }
 .cap.y { color: var(--violet); background: rgba(176, 107, 255, 0.12); }
 
-.st { font-size: 13px; }
-.lic { font: 12px var(--font-mono); padding: 0 6px; border: 1px solid; border-radius: var(--r-sm); }
+.st { font-size: 13px; white-space: nowrap; }
+.lic { font: 12px var(--font-mono); padding: 0 6px; border: 1px solid transparent; border-radius: var(--r-sm); background: var(--surface-raised); box-shadow: var(--ring); }
 .bar { height: 6px; background: var(--surface-raised); border-radius: var(--r-pill); overflow: hidden; width: 110px; display: inline-block; vertical-align: middle; }
 .bar i { display: block; height: 100%; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
 
@@ -502,7 +509,7 @@ textarea.inp { resize: vertical; }
 /* Sample Studio (naru task 1571; mockup: sample-studio) */
 .studio-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
 .studio-head h2 { margin: 0; font-size: 22px; }
-.studio-sub { color: var(--muted); font: 13px var(--font-mono); flex: 1; }
+.studio-sub { color: var(--muted); font: 13px var(--font-sans); flex: 1; }
 .studio-sub b { color: var(--cyan); font-weight: normal; }
 .studio-sub em { color: var(--amber); font-style: normal; }
 .studio-ab { display: flex; gap: 2px; padding: 2px; border-radius: var(--r-sm); background: var(--surface-raised); }

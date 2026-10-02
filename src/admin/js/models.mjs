@@ -101,7 +101,7 @@ export function mount(view, params) {
   function licenseChip(m) {
     const nc = m.x_non_commercial;
     const color = nc ? 'var(--amber)' : 'var(--green)';
-    return el('span', { class: 'lic', style: `color:${color};border-color:${color}` }, [
+    return el('span', { class: 'lic', style: `color:${color}` }, [
       nc ? 'NC' : m.x_license ?? '—',
     ]);
   }
