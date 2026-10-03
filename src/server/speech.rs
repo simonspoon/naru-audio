@@ -133,6 +133,39 @@ pub(super) async fn speech(
     if !manifest.instructs() {
         job.options.instructions = None;
     }
+    let reference = job
+        .options
+        .reference
+        .as_ref()
+        .map(|(wav, _)| wav.clone())
+        .or_else(|| {
+            voices::find(st.registry.home(), &voice)
+                .filter(|c| c.model == manifest.model.name)
+                .map(|c| c.wav)
+        });
+    // A sampling knob the request did not send is the backend's own default.
+    let knob = |name: &str| {
+        job.options
+            .knobs
+            .get(name)
+            .map_or_else(|| "default".to_string(), |v| v.to_string())
+    };
+    st.log.line(
+        "info",
+        Some(&req_id),
+        &format!(
+            "tts_request voice={voice} reference={} model={} temperature={} top_p={} seed=none chars={} sentences={}",
+            reference.as_ref().map_or("none".into(), |p| p.display().to_string()),
+            manifest.model.name,
+            knob("temperature"),
+            knob("top_p"),
+            job.input.chars().count(),
+            job.input
+                .split(['.', '!', '?', '。', '！', '？', '\n'])
+                .filter(|s| !s.trim().is_empty())
+                .count(),
+        ),
+    );
     // Only a model that takes `exaggeration` sees it.
     if !manifest.exaggerates() {
         job.options.exaggeration = None;
