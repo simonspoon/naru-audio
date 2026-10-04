@@ -24,6 +24,10 @@ use crate::registry::manifest::Voice;
 /// synthesised.
 pub type Sink = Box<dyn FnMut(&[f32]) -> bool + Send>;
 
+/// The sampling seed a request that sends no `seed` gets: fixed, so a
+/// cloned voice does not wander from one reply to the next.
+pub const DEFAULT_SEED: u64 = 0;
+
 /// The per-request knobs (§2.3 `speed` and `instructions`, and the
 /// `gap`/`level`/`exaggeration` extensions).
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +59,10 @@ pub struct SynthOptions {
     /// `sherpa-onnx` backend has no knob but `speed` (its own field), so it
     /// ignores this.
     pub knobs: BTreeMap<String, f64>,
+    /// The sampling seed (`POST /v1/audio/speech` `seed`); the MLX sidecar
+    /// seeds its random state with it before each generate. Other backends
+    /// ignore it.
+    pub seed: u64,
 }
 
 impl Default for SynthOptions {
@@ -67,6 +75,7 @@ impl Default for SynthOptions {
             exaggeration: None,
             reference: None,
             knobs: BTreeMap::new(),
+            seed: DEFAULT_SEED,
         }
     }
 }

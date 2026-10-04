@@ -8,6 +8,7 @@ needs it."""
 import argparse
 import gc
 import os
+import re
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
@@ -224,16 +225,59 @@ def synth(model, header):
         and "ref_text" in kwargs
         and hasattr(model, "speech_tokenizer")
     )
-    with primed(model) if cloned else nullcontext():
-        for result in model.generate(
-            text=header["text"],
-            voice=header.get("voice"),
-            speed=speed,
-            stream=True,
-            streaming_interval=STREAMING_INTERVAL,
-            **kwargs,
-        ):
-            yield np.asarray(result.audio, dtype="<f4").tobytes()
+    # A cloned voice drifts over a long reply, so each sentence is its own
+    # `generate` with the reference applied afresh; anything else is one call.
+    sentences = split_sentences(header["text"]) if cloned else [header["text"]]
+    seed = header.get("seed")
+    for sentence in sentences:
+        # MLX's global random state is what sampling draws from, and
+        # `generate` has no seed parameter.
+        if seed is not None:
+            mx.random.seed(seed)
+        with primed(model) if cloned else nullcontext():
+            for result in model.generate(
+                text=sentence,
+                voice=header.get("voice"),
+                speed=speed,
+                stream=True,
+                streaming_interval=STREAMING_INTERVAL,
+                **kwargs,
+            ):
+                yield np.asarray(result.audio, dtype="<f4").tobytes()
+
+
+# A sentence shorter than this many characters joins its neighbour.
+MIN_SENTENCE = 12
+
+
+def _join(a, b):
+    """`a` and `b` as one sentence: a space between, but not after a CJK
+    terminator, which has none."""
+    return a + b if not a or a[-1] in "。！？" else f"{a} {b}"
+
+
+def split_sentences(text):
+    """`text` as sentences, each keeping its terminator (`. ! ?` followed
+    by whitespace, `。 ！ ？`, or a newline, which is dropped). Empty pieces
+    vanish, and one under MIN_SENTENCE characters merges into the next
+    sentence (the last into the one before)."""
+    pieces = [p.strip() for p in re.split(r"(?<=[.!?])\s+|(?<=[。！？])|\n+", text)]
+    out, carry = [], ""
+    for piece in pieces:
+        if not piece:
+            continue
+        piece = _join(carry, piece)
+        if len(piece) < MIN_SENTENCE:
+            carry = piece
+        else:
+            out.append(piece)
+            carry = ""
+    if carry:
+        if out:
+            out[-1] = _join(out[-1], carry)
+        else:
+            out.append(carry)
+    return out or [text]
 
 
 @contextmanager

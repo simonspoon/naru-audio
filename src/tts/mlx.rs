@@ -126,7 +126,7 @@ impl TtsModel for MlxTts {
         mut sink: Sink,
     ) -> Result<(), TtsError> {
         check(text, options)?;
-        let mut request = json!({"text": text, "speed": options.speed});
+        let mut request = json!({"text": text, "speed": options.speed, "seed": options.seed});
         if let Some((wav, ref_text)) = &options.reference {
             // §2.6 `POST /api/voices/preview` (naru task 1458): an explicit
             // reference clip wins over any named voice, including an empty

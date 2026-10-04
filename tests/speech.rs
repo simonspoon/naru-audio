@@ -20,7 +20,7 @@ use naru_audio::profile::Profile;
 use naru_audio::registry::manifest::{Manifest, Voice};
 use naru_audio::registry::{self, Registry};
 use naru_audio::server::{AppState, router};
-use naru_audio::tts::{Sink, SynthOptions, TtsError, TtsModel};
+use naru_audio::tts::{DEFAULT_SEED, Sink, SynthOptions, TtsError, TtsModel};
 use serde_json::{Value, json};
 
 /// Samples per sentence the fake gives, and their value.
@@ -562,8 +562,87 @@ fn aliases_defaults_and_options_reach_the_model() {
         exaggeration: None,
         reference: None,
         knobs: BTreeMap::new(),
+        seed: DEFAULT_SEED,
     };
     assert_eq!(last(), ("bm_george".to_string(), expected));
+}
+
+/// `seed` defaults to the fixed constant, an explicit one reaches the
+/// model, and anything but a non-negative integer is a 400 before a load.
+#[test]
+fn seed_defaults_to_the_constant_and_is_validated() {
+    let server = Server::fake();
+    let seed = || server.record.last.lock().unwrap().clone().unwrap().1.seed;
+    assert_eq!(server.speech(json!({"input": "Hi."})).status, 200);
+    assert_eq!(seed(), DEFAULT_SEED);
+    assert_eq!(
+        server.speech(json!({"input": "Hi.", "seed": 1234})).status,
+        200
+    );
+    assert_eq!(seed(), 1234);
+    assert_eq!(
+        server.speech(json!({"input": "Hi.", "seed": null})).status,
+        200
+    );
+    assert_eq!(seed(), DEFAULT_SEED);
+    let loads = server.record.loads.load(Ordering::SeqCst);
+    for bad in [json!(-1), json!(1.5), json!("7"), json!(true)] {
+        let reply = server.speech(json!({"input": "Hi.", "seed": bad}));
+        assert_eq!(reply.status, 400, "{bad}");
+        let error = &reply.json()["error"];
+        assert_eq!(error["code"], "invalid_request");
+        assert_eq!(error["param"], "seed");
+    }
+    assert_eq!(server.record.loads.load(Ordering::SeqCst), loads);
+}
+
+/// Each speech request leaves its audio as `recent/<id>.wav` under the
+/// home (a real wav of what was sent), and only the newest 50 stay.
+#[test]
+fn recent_wavs_are_written_and_pruned_to_fifty() {
+    let server = Server::fake();
+    let recent = server._home.path().join("recent");
+    std::fs::create_dir_all(&recent).unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    for i in 0..60 {
+        let f = std::fs::File::create(recent.join(format!("old-{i}.wav"))).unwrap();
+        f.set_modified(old + Duration::from_secs(i)).unwrap();
+    }
+    // No audio, no file: a failure leaves the recordings alone, so the one
+    // new wav below is the only addition.
+    assert_eq!(server.speech(json!({"input": "fail first"})).status, 500);
+    let reply = server.speech(json!({"input": "One. Two."}));
+    assert_eq!(reply.status, 200);
+    let wavs = || -> Vec<PathBuf> {
+        std::fs::read_dir(&recent)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect()
+    };
+    // Written once synthesis ends, which is just after the body does.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while wavs().len() != 50 || !wavs().iter().any(|p| !p.to_string_lossy().contains("old-")) {
+        assert!(
+            Instant::now() < deadline,
+            "no pruned recent dir: {:?}",
+            wavs()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let new: Vec<_> = wavs()
+        .into_iter()
+        .filter(|p| !p.to_string_lossy().contains("old-"))
+        .collect();
+    assert_eq!(new.len(), 1);
+    // The oldest eleven went; the newest old ones stayed.
+    assert!(!recent.join("old-0.wav").exists());
+    assert!(!recent.join("old-10.wav").exists());
+    assert!(recent.join("old-11.wav").exists());
+    let wav = std::fs::read(&new[0]).unwrap();
+    assert_eq!(&wav[..4], b"RIFF");
+    assert_eq!(u32_at(&wav, 24), 24_000);
+    assert_eq!(u32_at(&wav, 40) as usize, wav.len() - 44);
+    assert_eq!(wav.len() - 44, 2 * 2 * PIECE);
 }
 
 /// A model that instructs and has no voices (VoiceDesign) is handed the

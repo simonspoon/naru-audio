@@ -11,7 +11,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from naru_audio_mlx.__main__ import _indextts_load_dir, synth
+from naru_audio_mlx.__main__ import _indextts_load_dir, split_sentences, synth
 
 REFERENCE = mx.full((1, 16, 3), 7)
 GENERATED = mx.full((1, 16, 2), 1)
@@ -79,11 +79,59 @@ class Synth(unittest.TestCase):
         self.assertNotIn("reset_streaming_state", vars(module))
         self.assertNotIn("_prepare_icl_generation_inputs", vars(model))
 
+    def test_cloned_voice_is_primed_afresh_for_each_sentence(self):
+        model = Model()
+        header = {"reference": "ref.wav", "reference_text": "Hello there."}
+        text = "This is the first sentence. And this is the second one!"
+        chunks = b"".join(synth(model, {"text": text, **header}))
+        self.assertEqual(len(chunks), 16)
+        self.assertEqual(
+            model.calls, ["reset", 3, 2, "reset", "reset", 3, 2, "reset"]
+        )
+
+    def test_seed_is_set_before_each_generate(self):
+        seeds = []
+        real = mx.random.seed
+        mx.random.seed = seeds.append
+        try:
+            model = Model()
+            header = {"reference": "ref.wav", "reference_text": "Hi.", "seed": 7}
+            text = "This is the first sentence. And this is the second one!"
+            b"".join(synth(model, {"text": text, **header}))
+            self.assertEqual(seeds, [7, 7])
+            seeds.clear()
+            b"".join(synth(Model(), {"text": text}))
+            self.assertEqual(seeds, [])
+        finally:
+            mx.random.seed = real
+
     def test_other_voices_are_not_primed(self):
         for header in [{}, {"voice": "ryan"}, {"reference": "ref.wav"}]:
             model = Model()
             self.assertEqual(audio(model, header), [1.0, 1.0])
             self.assertEqual(model.calls, ["reset", 2, "reset"], header)
+
+
+class SplitSentences(unittest.TestCase):
+    def test_terminators_stay_with_their_sentence(self):
+        self.assertEqual(
+            split_sentences("The first one. Is this second? Yes, it is! Done"),
+            ["The first one.", "Is this second?", "Yes, it is! Done"],
+        )
+
+    def test_cjk_and_newlines_split_without_whitespace(self):
+        self.assertEqual(
+            split_sentences("今天天气非常好啊。我们去公园玩吧！\n\nA line of text here"),
+            ["今天天气非常好啊。我们去公园玩吧！", "A line of text here"],
+        )
+
+    def test_short_fragments_merge_and_blanks_vanish(self):
+        self.assertEqual(
+            split_sentences("Hi. This is a longer sentence.\n \nOk."),
+            ["Hi. This is a longer sentence. Ok."],
+        )
+        self.assertEqual(split_sentences("Hi."), ["Hi."])
+        self.assertEqual(split_sentences("3.14 is pi, said the teacher."), ["3.14 is pi, said the teacher."])
 
 
 class Chatterbox:

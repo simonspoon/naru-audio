@@ -22,7 +22,9 @@ Requests, one at a time, each answered before the next is sent:
      "speed": X, "reference": PATH (optional), "reference_text": TEXT
      (optional, the reference's transcript), "instruct": TEXT (optional,
      the voice's description or style direction), "exaggeration": X
-     (optional, 0-1, Chatterbox's emotion-exaggeration dial)}
+     (optional, 0-1, Chatterbox's emotion-exaggeration dial), "seed": N
+     (optional, a non-negative integer: `mx.random.seed` before each
+     generate; a cloned voice is generated a sentence at a time)}
     {"op": "stats"}
 
 Answers are {"ok": true, ...} or {"ok": false, "error": MESSAGE}. A `load`

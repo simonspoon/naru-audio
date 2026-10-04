@@ -150,20 +150,19 @@ pub(super) async fn speech(
             .get(name)
             .map_or_else(|| "default".to_string(), |v| v.to_string())
     };
+    let recent_id = recent_id();
     st.log.line(
         "info",
         Some(&req_id),
         &format!(
-            "tts_request voice={voice} reference={} model={} temperature={} top_p={} seed=none chars={} sentences={}",
+            "tts_request id={recent_id} voice={voice} reference={} model={} temperature={} top_p={} seed={} chars={} sentences={}",
             reference.as_ref().map_or("none".into(), |p| p.display().to_string()),
             manifest.model.name,
             knob("temperature"),
             knob("top_p"),
+            job.options.seed,
             job.input.chars().count(),
-            job.input
-                .split(['.', '!', '?', '。', '！', '？', '\n'])
-                .filter(|s| !s.trim().is_empty())
-                .count(),
+            sentence_count(&job.input),
         ),
     );
     // Only a model that takes `exaggeration` sees it.
@@ -177,7 +176,13 @@ pub(super) async fn speech(
         .map_err(|e| manager_error(&st, &req_id, e))?;
     let sample_rate = model.tts().sample_rate();
 
-    let mut rx = synthesise(model, job.input, voice, job.options);
+    let recent = Some(Recent {
+        home: st.registry.home().to_path_buf(),
+        id: recent_id,
+        log: st.log.clone(),
+        req_id: req_id.clone(),
+    });
+    let mut rx = synthesise(model, job.input, voice, job.options, recent);
     if !job.stream {
         let mut pcm = Vec::new();
         while let Some(piece) = rx.recv().await {
@@ -240,21 +245,31 @@ pub(super) async fn speech(
 /// Synthesises on the blocking pool, sending each sentence as s16le bytes,
 /// or the failure's text last. When the receiver is dropped (the client went
 /// away and hyper dropped the body) the next send fails and the sink cancels
-/// the rest; the model is released when synthesis returns.
+/// the rest; the model is released when synthesis returns. With `recent`
+/// (`home`, id), what was synthesised, even if cut short, is then written
+/// to `<home>/recent/<id>.wav` ([`save_recent`]).
 fn synthesise(
     model: Guard,
     input: String,
     voice: String,
     options: SynthOptions,
+    recent: Option<Recent>,
 ) -> tokio::sync::mpsc::Receiver<Result<Bytes, Failure>> {
     let (tx, rx) = tokio::sync::mpsc::channel(QUEUED_PIECES);
     tokio::task::spawn_blocking(move || {
+        let sample_rate = model.tts().sample_rate();
         let sink_tx = tx.clone();
+        // The audio so far as s16le, kept for `save_recent` only.
+        let kept = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink_kept = recent.is_some().then(|| kept.clone());
         let sink = Box::new(move |samples: &[f32]| {
             let bytes: Vec<u8> = samples
                 .iter()
                 .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes())
                 .collect();
+            if let Some(kept) = &sink_kept {
+                kept.lock().unwrap().extend_from_slice(&bytes);
+            }
             sink_tx.blocking_send(Ok(Bytes::from(bytes))).is_ok()
         });
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -275,8 +290,115 @@ fn synthesise(
         if let Err(e) = result {
             let _ = tx.blocking_send(Err(e));
         }
+        // The response ends and the model is free before the file is written.
+        drop(tx);
+        drop(model);
+        if let Some(r) = recent {
+            let pcm = std::mem::take(&mut *kept.lock().unwrap());
+            // No audio, nothing worth evicting a recording for.
+            if pcm.is_empty() {
+                return;
+            }
+            if let Err(e) = save_recent(&r.home, &r.id, sample_rate, &pcm) {
+                r.log.line(
+                    "error",
+                    Some(&r.req_id),
+                    &format!("recent_save_failed id={} {e}", r.id),
+                );
+            }
+        }
     });
     rx
+}
+
+/// How many sentences the MLX sidecar's `split_sentences` makes of `text`:
+/// split after `. ! ?` before whitespace, after `。！？`, and at newlines;
+/// a piece under 12 characters joins the next (a short last one, the
+/// previous), so it only ever counts once.
+fn sentence_count(text: &str) -> usize {
+    const MIN_SENTENCE: usize = 12;
+    let mut pieces = Vec::new();
+    let mut cur = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\n' {
+            pieces.push(std::mem::take(&mut cur));
+            continue;
+        }
+        cur.push(c);
+        let ends = match c {
+            '。' | '！' | '？' => true,
+            '.' | '!' | '?' => chars.peek().is_some_and(|n| n.is_whitespace()),
+            _ => false,
+        };
+        if ends {
+            pieces.push(std::mem::take(&mut cur));
+        }
+    }
+    pieces.push(cur);
+    let (mut count, mut carry) = (0, 0);
+    for piece in pieces.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        // A joined piece is the carry, a space, and this piece.
+        let len = if carry > 0 { carry + 1 } else { 0 } + piece.chars().count();
+        if len < MIN_SENTENCE {
+            carry = len;
+        } else {
+            count += 1;
+            carry = 0;
+        }
+    }
+    // A short last piece joins the previous sentence, or is the only one.
+    if carry > 0 && count == 0 {
+        count = 1;
+    }
+    count
+}
+
+/// Where and as what [`synthesise`] saves a request's audio.
+struct Recent {
+    home: PathBuf,
+    id: String,
+    log: Arc<crate::log::Logger>,
+    req_id: String,
+}
+
+/// How many wavs `<home>/recent` keeps.
+const RECENT_KEPT: usize = 50;
+
+/// A short unique id for one speech request: unix seconds and a counter.
+fn recent_id() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{secs}-{n}")
+}
+
+/// Writes `pcm` (s16le mono) as `<home>/recent/<id>.wav`, then deletes all
+/// but the newest [`RECENT_KEPT`] wavs there.
+fn save_recent(
+    home: &std::path::Path,
+    id: &str,
+    sample_rate: u32,
+    pcm: &[u8],
+) -> std::io::Result<()> {
+    let dir = home.join("recent");
+    std::fs::create_dir_all(&dir)?;
+    let mut wav = wav_header(sample_rate, pcm.len() as u32).to_vec();
+    wav.extend_from_slice(pcm);
+    std::fs::write(dir.join(format!("{id}.wav")), wav)?;
+    let mut files: Vec<_> = std::fs::read_dir(&dir)?
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "wav"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    files.sort();
+    let excess = files.len().saturating_sub(RECENT_KEPT);
+    for (_, path) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
 }
 
 /// A failed synthesis, classified where the [`TtsError`] is still at hand.
@@ -493,6 +615,15 @@ fn validate(body: &[u8], default_model: &str) -> Result<Job, ApiError> {
             ));
         }
         options.exaggeration = Some(exaggeration as f32);
+    }
+    if let Some(seed) = field("seed") {
+        options.seed = seed.as_u64().ok_or_else(|| {
+            bad_request(
+                "seed",
+                "invalid_request",
+                "seed must be a non-negative integer",
+            )
+        })?;
     }
     let stream = boolean("stream", true)?;
     let knobs = parse_knobs(field("knobs"))?;
@@ -1298,6 +1429,7 @@ pub(super) async fn generate_voice_sample(
         PREVIEW_TEXT.to_string(),
         voice.clone(),
         SynthOptions::default(),
+        None,
     );
     let mut pcm = Vec::new();
     while let Some(piece) = rx.recv().await {
@@ -1473,7 +1605,7 @@ pub(super) async fn preview_voice(
         }
     };
     let sample_rate = guard.tts().sample_rate();
-    let mut rx = synthesise(guard, input, String::new(), options);
+    let mut rx = synthesise(guard, input, String::new(), options, None);
     let mut pcm = Vec::new();
     let mut failure = None;
     while let Some(piece) = rx.recv().await {
@@ -1492,4 +1624,26 @@ pub(super) async fn preview_voice(
     let mut wav = wav_header(sample_rate, pcm.len() as u32).to_vec();
     wav.extend_from_slice(&pcm);
     Ok(audio_response(Format::Wav, sample_rate, wav))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sentence_count;
+
+    #[test]
+    fn sentences_are_counted_as_the_sidecar_splits_them() {
+        // "Dr." is short and joins the next piece; "3.14" has no space.
+        assert_eq!(sentence_count("Dr. Smith paid 3.14 dollars."), 1);
+        assert_eq!(
+            sentence_count("The first one. Is this second? Yes, it is! Done"),
+            3
+        );
+        assert_eq!(
+            sentence_count("今天天气非常好啊。我们去公园玩吧！\n\nA line of text here"),
+            2
+        );
+        assert_eq!(sentence_count("Hi."), 1);
+        assert_eq!(sentence_count("Hi. This is a longer sentence.\n \nOk."), 1);
+        assert_eq!(sentence_count(" \n "), 0);
+    }
 }

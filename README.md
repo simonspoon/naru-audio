@@ -197,6 +197,12 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   /v1/audio/speech` and `POST /api/voices/preview` take them as
   `"knobs":{"<name>":<number>}`; a name not in `x_prompt_format.knobs` or a
   value outside its range is 400 ([docs/design.md §2.7](docs/design.md)).
+- `POST /v1/audio/speech` also takes `"seed":<non-negative integer>`
+  (default 0, so a voice sounds the same from one reply to the next); the
+  MLX backend seeds its sampling with it before each generate, and speaks a
+  cloned voice a sentence at a time with the reference re-applied to each.
+  Every request's audio is also saved as `~/.naru-audio/recent/<id>.wav`
+  (the `id=` in its `tts_request` log line); the newest 50 are kept.
 - `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
   entirely — a non-1.0 `--speed` with it fails the request instead of
   quietly synthesising at normal speed. It takes `--exaggeration` (0-1, an
