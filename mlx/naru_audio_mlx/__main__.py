@@ -17,6 +17,13 @@ import numpy as np
 
 from .protocol import serve
 
+# Sampling for a cloned Qwen3-TTS voice, where a request's `knobs` do not
+# say otherwise. mlx-audio's own (temperature 0.9, top_p 1.0, top_k 50) is
+# loose enough that the timbre wanders from one chunk to the next. The
+# base catalog TOMLs (`catalog/qwen3-tts-*-base-mlx.toml`) carry the same
+# defaults for the UI and must stay in sync with these.
+CLONE_SAMPLING = {"temperature": 0.55, "top_p": 0.8, "top_k": 20}
+
 # The seconds of audio in each `synth` chunk: mlx-audio's streaming
 # interval, so the first audio is out after this much is generated.
 STREAMING_INTERVAL = 0.32
@@ -225,11 +232,15 @@ def synth(model, header):
         and "ref_text" in kwargs
         and hasattr(model, "speech_tokenizer")
     )
-    # A cloned voice drifts over a long reply, so each sentence is its own
-    # `generate` with the reference applied afresh; anything else is one call.
-    sentences = split_sentences(header["text"]) if cloned else [header["text"]]
+    if cloned:
+        for name, value in CLONE_SAMPLING.items():
+            kwargs.setdefault(name, value)
+    # A cloned voice drifts over a long reply, so each chunk of a couple of
+    # sentences is its own `generate` with the reference applied afresh;
+    # anything else is one call.
+    chunks = split_chunks(header["text"]) if cloned else [header["text"]]
     seed = header.get("seed")
-    for sentence in sentences:
+    for sentence in chunks:
         # MLX's global random state is what sampling draws from, and
         # `generate` has no seed parameter.
         if seed is not None:
@@ -278,6 +289,40 @@ def split_sentences(text):
         else:
             out.append(carry)
     return out or [text]
+
+
+# A chunk is closed once it holds this many words: short sentences are
+# synthesised together, since a clip of a few words gives the sampler too
+# little to hold the voice steady.
+MIN_CHUNK_WORDS = 15
+
+# Han, kana and hangul run together without spaces, so `split` sees a whole
+# sentence as one word: each such character counts as half a word.
+_CJK = re.compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+
+
+def _words(text):
+    return len(text.split()) + len(_CJK.findall(text)) // 2
+
+
+def split_chunks(text):
+    """`text` as chunks of whole sentences (`split_sentences`) for one
+    `generate` each: sentences join until the chunk holds MIN_CHUNK_WORDS
+    words, so a long sentence stands alone and short ones pair up, and a
+    short last chunk merges into the one before. The first chunk, which
+    sets the time to first audio, is at most one sentence past the minimum."""
+    chunks, current = [], ""
+    for sentence in split_sentences(text):
+        current = _join(current, sentence)
+        if _words(current) >= MIN_CHUNK_WORDS:
+            chunks.append(current)
+            current = ""
+    if current:
+        if chunks:
+            chunks[-1] = _join(chunks[-1], current)
+        else:
+            chunks.append(current)
+    return chunks
 
 
 @contextmanager

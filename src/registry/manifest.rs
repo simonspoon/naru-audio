@@ -19,6 +19,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/chatterbox-tts-8bit-mlx.toml"),
     ),
     (
+        "chatterbox-turbo-8bit-mlx.toml",
+        include_str!("../../catalog/chatterbox-turbo-8bit-mlx.toml"),
+    ),
+    (
         "indextts-1.5-mlx.toml",
         include_str!("../../catalog/indextts-1.5-mlx.toml"),
     ),
@@ -611,6 +615,7 @@ mod tests {
             [
                 "breeze-tts-2-mlx",
                 "chatterbox-tts-8bit-mlx",
+                "chatterbox-turbo-8bit-mlx",
                 "indextts-1.5-mlx",
                 "kokoro-v1.0",
                 "omnivoice-bf16-mlx",
@@ -1129,9 +1134,21 @@ mod tests {
             assert!(pf.style.is_none(), "{name}");
             assert_eq!(
                 pf.knobs.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
-                ["temperature", "top_p"],
+                ["temperature", "top_p", "top_k"],
                 "{name}"
             );
+        }
+
+        // The Base pair's defaults are the tighter sampling the sidecar
+        // applies to a cloned voice; CustomVoice keeps mlx-audio's own.
+        for name in ["qwen3-tts-0.6b-base-mlx", "qwen3-tts-1.7b-base-mlx"] {
+            let pf = cat.models[name].prompt_format().unwrap();
+            assert_eq!(
+                pf.knobs.iter().map(|k| k.default).collect::<Vec<_>>(),
+                [Some(0.55), Some(0.8), Some(20.0)],
+                "{name}"
+            );
+            assert_eq!(pf.knobs[2].step, Some(1.0), "{name}");
         }
 
         // IndexTTS and Pocket TTS have no style control at all, but

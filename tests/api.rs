@@ -29,6 +29,7 @@ const HOSTPORT: &str = "127.0.0.1:7870";
 const MLX: &[&str] = &[
     "breeze-tts-2-mlx",
     "chatterbox-tts-8bit-mlx",
+    "chatterbox-turbo-8bit-mlx",
     "indextts-1.5-mlx",
     "omnivoice-bf16-mlx",
     "parakeet-tdt-0.6b-v2-mlx",
@@ -970,8 +971,9 @@ async fn v1_models_names_cloning_and_voice_design_capability() {
         assert_eq!(
             base["x_prompt_format"]["knobs"],
             json!([
-                {"name": "temperature", "default": 0.9, "min": 0.0, "max": 2.0},
-                {"name": "top_p", "default": 1.0, "min": 0.0, "max": 1.0},
+                {"name": "temperature", "default": 0.55, "min": 0.0, "max": 2.0},
+                {"name": "top_p", "default": 0.8, "min": 0.0, "max": 1.0},
+                {"name": "top_k", "default": 20.0, "min": 0.0, "max": 200.0, "step": 1.0},
             ])
         );
 

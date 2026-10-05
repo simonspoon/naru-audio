@@ -29,13 +29,17 @@ clone = true
 # ref_text is not None`).
 clone_requires_transcript = true
 
-# No `instruct`; `temperature`/`top_p` are `Model.generate`'s own sampling
-# knobs (`qwen3_tts.py`), shared by every route including Base's, not
-# currently sent by naru-audio.
+# No `instruct`; `temperature`/`top_p`/`top_k` are `Model.generate`'s own
+# sampling knobs (`qwen3_tts.py`), shared by every route including Base's.
+# The defaults here are the sidecar's for a cloned voice (`CLONE_SAMPLING`
+# in `naru_audio_mlx/__main__.py`), tighter than mlx-audio's own (0.9 / 1.0
+# / 50) because a loose draw drifts the timbre from one sentence to the
+# next; a request's `knobs` override them.
 [backend.mlx.prompt_format]
 knobs = [
-    { name = "temperature", default = 0.9, min = 0.0, max = 2.0 },
-    { name = "top_p", default = 1.0, min = 0.0, max = 1.0 },
+    { name = "temperature", default = 0.55, min = 0.0, max = 2.0 },
+    { name = "top_p", default = 0.8, min = 0.0, max = 1.0 },
+    { name = "top_k", default = 20, min = 0, max = 200, step = 1 },
 ]
 
 [[file]]

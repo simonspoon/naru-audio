@@ -11,10 +11,22 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from naru_audio_mlx.__main__ import _indextts_load_dir, split_sentences, synth
+from naru_audio_mlx.__main__ import (
+    CLONE_SAMPLING,
+    _indextts_load_dir,
+    split_chunks,
+    split_sentences,
+    synth,
+)
 
 REFERENCE = mx.full((1, 16, 3), 7)
 GENERATED = mx.full((1, 16, 2), 1)
+
+# Two sentences of more than 15 words each: a chunk apiece.
+LONG_TEXT = (
+    "This is the first sentence and it goes on for quite a few words indeed. "
+    "And this is the second one, which is also long enough to stand by itself!"
+)
 
 
 class Decoder(nn.Module):
@@ -46,12 +58,14 @@ class Model:
 
     def __init__(self):
         self.calls = []
+        self.requests = []
         self.speech_tokenizer = Tokenizer(self.calls)
 
     def _prepare_icl_generation_inputs(self, **kwargs):
         return None, None, None, REFERENCE
 
     def generate(self, text, ref_audio=None, ref_text=None, **kwargs):
+        self.requests.append((text, kwargs))
         if ref_audio is not None and ref_text is not None:
             self._prepare_icl_generation_inputs(ref_audio=ref_audio, ref_text=ref_text)
         decoder = self.speech_tokenizer.decoder
@@ -79,11 +93,10 @@ class Synth(unittest.TestCase):
         self.assertNotIn("reset_streaming_state", vars(module))
         self.assertNotIn("_prepare_icl_generation_inputs", vars(model))
 
-    def test_cloned_voice_is_primed_afresh_for_each_sentence(self):
+    def test_cloned_voice_is_primed_afresh_for_each_chunk(self):
         model = Model()
         header = {"reference": "ref.wav", "reference_text": "Hello there."}
-        text = "This is the first sentence. And this is the second one!"
-        chunks = b"".join(synth(model, {"text": text, **header}))
+        chunks = b"".join(synth(model, {"text": LONG_TEXT, **header}))
         self.assertEqual(len(chunks), 16)
         self.assertEqual(
             model.calls, ["reset", 3, 2, "reset", "reset", 3, 2, "reset"]
@@ -96,20 +109,93 @@ class Synth(unittest.TestCase):
         try:
             model = Model()
             header = {"reference": "ref.wav", "reference_text": "Hi.", "seed": 7}
-            text = "This is the first sentence. And this is the second one!"
-            b"".join(synth(model, {"text": text, **header}))
+            b"".join(synth(model, {"text": LONG_TEXT, **header}))
             self.assertEqual(seeds, [7, 7])
             seeds.clear()
-            b"".join(synth(Model(), {"text": text}))
+            b"".join(synth(Model(), {"text": LONG_TEXT}))
             self.assertEqual(seeds, [])
         finally:
             mx.random.seed = real
+
+    def test_cloned_voice_gets_the_tight_sampling_by_default(self):
+        model = Model()
+        header = {"reference": "ref.wav", "reference_text": "Hello there."}
+        audio(model, header)
+        kwargs = model.requests[0][1]
+        for name, value in CLONE_SAMPLING.items():
+            self.assertEqual(kwargs[name], value)
+        self.assertEqual(
+            (kwargs["temperature"], kwargs["top_p"], kwargs["top_k"]),
+            (0.55, 0.8, 20),
+        )
+
+    def test_a_request_knob_overrides_the_default_sampling(self):
+        model = Model()
+        header = {
+            "reference": "ref.wav",
+            "reference_text": "Hello there.",
+            "knobs": {"temperature": 0.9, "top_k": 50},
+        }
+        audio(model, header)
+        kwargs = model.requests[0][1]
+        self.assertEqual(
+            (kwargs["temperature"], kwargs["top_p"], kwargs["top_k"]),
+            (0.9, 0.8, 50),
+        )
+
+    def test_other_voices_get_no_default_sampling(self):
+        for header in [{}, {"voice": "ryan"}, {"reference": "ref.wav"}]:
+            model = Model()
+            audio(model, header)
+            kwargs = model.requests[0][1]
+            for name in CLONE_SAMPLING:
+                self.assertNotIn(name, kwargs, header)
 
     def test_other_voices_are_not_primed(self):
         for header in [{}, {"voice": "ryan"}, {"reference": "ref.wav"}]:
             model = Model()
             self.assertEqual(audio(model, header), [1.0, 1.0])
             self.assertEqual(model.calls, ["reset", 2, "reset"], header)
+
+
+class SplitChunks(unittest.TestCase):
+    def test_short_sentences_pair_up_until_fifteen_words(self):
+        text = "We went to the shop today. It was closed. So we came home again, tired."
+        self.assertEqual(
+            split_chunks(text),
+            [
+                "We went to the shop today. It was closed."
+                " So we came home again, tired."
+            ],
+        )
+        a = "One two three four five six seven eight."
+        b = "Nine ten eleven twelve thirteen fourteen fifteen sixteen."
+        c = "Then a third sentence follows that is long enough to stand on its own too."
+        self.assertEqual(split_chunks(f"{a} {b} {c}"), [f"{a} {b}", c])
+
+    def test_a_long_sentence_stands_alone(self):
+        self.assertEqual(len(split_chunks(LONG_TEXT)), 2)
+
+    def test_a_short_last_chunk_merges_into_the_one_before(self):
+        long = "This sentence runs on for well over fifteen words so that it is a chunk of its own."
+        self.assertEqual(
+            split_chunks(f"{long} Then it ends."), [f"{long} Then it ends."]
+        )
+
+    def test_a_short_text_is_one_chunk(self):
+        self.assertEqual(split_chunks("Hello there."), ["Hello there."])
+        self.assertEqual(split_chunks("Hi"), ["Hi"])
+
+    def test_cjk_characters_count_as_half_a_word(self):
+        # 16 characters (8 words) a sentence: two to a chunk, not all in one.
+        sentence = "今天天气非常好啊我们去公园玩吧。"
+        self.assertEqual(
+            split_chunks(sentence * 4), [sentence * 2, sentence * 2]
+        )
+
+    def test_tags_pass_through_untouched(self):
+        text = "That was [laugh] really something, wasn't it? [sigh] Anyway."
+        self.assertEqual(split_chunks(text), [text])
 
 
 class SplitSentences(unittest.TestCase):

@@ -134,8 +134,8 @@ enum Command {
     },
     /// Cloned voices in $NARU_AUDIO_HOME/voices, spoken by any cloning model
     /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx,
-    /// chatterbox-tts-8bit-mlx, indextts-1.5-mlx, voxcpm2-8bit-mlx,
-    /// omnivoice-bf16-mlx, breeze-tts-2-mlx).
+    /// chatterbox-tts-8bit-mlx, chatterbox-turbo-8bit-mlx, indextts-1.5-mlx,
+    /// voxcpm2-8bit-mlx, omnivoice-bf16-mlx, breeze-tts-2-mlx).
     Voice {
         #[command(subcommand)]
         action: VoiceAction,

@@ -30,13 +30,14 @@ resident_bytes = 2_600_000_000
 # emotion/style (CustomVoice) or voice description (VoiceDesign)"), but
 # naru-audio has never turned it on for this model, so `instructs()` stays
 # `false` and `instructions` is stripped before reaching the sidecar
-# (`server/speech.rs`). `temperature`/`top_p` are `Model.generate`'s own
+# (`server/speech.rs`). `temperature`/`top_p`/`top_k` are `Model.generate`'s own
 # sampling knobs, shared by every route, not currently sent by
 # naru-audio.
 [backend.mlx.prompt_format]
 knobs = [
     { name = "temperature", default = 0.9, min = 0.0, max = 2.0 },
     { name = "top_p", default = 1.0, min = 0.0, max = 1.0 },
+    { name = "top_k", default = 50, min = 0, max = 200, step = 1 },
 ]
 
 [[voice]]

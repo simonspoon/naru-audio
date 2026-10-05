@@ -1,0 +1,77 @@
+# Chatterbox Turbo (ResembleAI, ~350M), mlx-community's 8-bit conversion,
+# served by mlx-audio in the MLX sidecar (§5.3), alongside the original
+# chatterbox-tts-8bit-mlx. English only; it clones a reference recording
+# (`ref_audio`, no transcript) from the same voices under
+# $NARU_AUDIO_HOME/voices/, and reads paralinguistic tags in the text
+# itself (`[laugh]`, `[sigh]`, ...), which are added tokens of its
+# tokenizer and pass through the daemon and sidecar untouched. Unlike the
+# original it has no `exaggeration` or `cfg_weight` (mlx-audio's
+# `chatterbox_turbo.py` warns and ignores both). `speed` is not supported:
+# the sidecar shim errors on a non-1.0 speed, as for Chatterbox. Its first
+# load fetches the same shared mlx-community/S3TokenizerV2 from the Hub as
+# Chatterbox does (see `naru_audio_mlx/__main__.py`).
+#
+# Every [[file]] of the repo at the pinned commit but README.md and
+# .gitattributes; sizes and LFS hashes from the HF API, the small files'
+# hashes computed 2026-10-05 from the files at the pinned commit.
+
+[model]
+name        = "chatterbox-turbo-8bit-mlx"
+kind        = "tts"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["en"]
+license     = "MIT"
+license_url = "https://huggingface.co/ResembleAI/chatterbox-turbo"
+# An estimate, not measured: the 0.96 GB model.safetensors plus the shared
+# S3Tokenizer. What a load measures replaces it: the load's delta in `stats`.
+resident_bytes = 1_400_000_000
+
+[backend.mlx]
+# Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
+clone = true
+
+# The tag list is the paralinguistic subset of the added tokens in the
+# repo's tokenizer_config.json (it also has emotion/style tokens such as
+# `[angry]`).
+# The knobs and their defaults are `chatterbox_turbo.py`'s own
+# `Model.generate`.
+[backend.mlx.prompt_format]
+inline = { syntax = "[tag]", tags = ["laugh", "chuckle", "sigh", "cough", "clear throat", "gasp", "groan", "sniff", "shush"], example = "That is hilarious [laugh] honestly." }
+knobs = [
+    { name = "temperature", default = 0.8, min = 0.0, max = 2.0 },
+    { name = "top_p", default = 0.95, min = 0.0, max = 1.0 },
+    { name = "top_k", default = 1000, min = 0, max = 1000, step = 1 },
+    { name = "repetition_penalty", default = 1.2, min = 1.0, max = 2.0 },
+]
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/Chatterbox-Turbo-TTS-8bit/resolve/a8e6f3d1afaa2458065c2a6fa7c69c751d977441/config.json"
+sha256 = "6ab2063a121a482185be58fa7f0088e3b88f8ba03d1f07de66758a0eae0db5b4"
+size   = 196
+
+[[file]]
+path   = "conds.safetensors"
+url    = "https://huggingface.co/mlx-community/Chatterbox-Turbo-TTS-8bit/resolve/a8e6f3d1afaa2458065c2a6fa7c69c751d977441/conds.safetensors"
+sha256 = "4304e325697569fc0fa064925196edd2aa9a1d4da93f8a3cca042343abce0206"
+size   = 167_380
+
+[[file]]
+path   = "model.safetensors"
+url    = "https://huggingface.co/mlx-community/Chatterbox-Turbo-TTS-8bit/resolve/a8e6f3d1afaa2458065c2a6fa7c69c751d977441/model.safetensors"
+sha256 = "a4892ec59e75e23d0d6579ee6f0355b2f8dbcca35b7666da8d4d3146ea26dc55"
+size   = 962_555_906
+
+[[file]]
+path   = "tokenizer.json"
+url    = "https://huggingface.co/mlx-community/Chatterbox-Turbo-TTS-8bit/resolve/a8e6f3d1afaa2458065c2a6fa7c69c751d977441/tokenizer.json"
+sha256 = "addb40d27e90362f5b1c78b457654dee6fbcce2ac45a2f66b46b9593053ab899"
+size   = 2_397_603
+
+[[file]]
+path   = "tokenizer_config.json"
+url    = "https://huggingface.co/mlx-community/Chatterbox-Turbo-TTS-8bit/resolve/a8e6f3d1afaa2458065c2a6fa7c69c751d977441/tokenizer_config.json"
+sha256 = "bca16a2ac1ddbd78b8d6228f0031884cc74b6ea54b967d6f6d2ebae9ccde23e6"
+size   = 3_878

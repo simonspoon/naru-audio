@@ -386,7 +386,7 @@ in `GET /v1/models`) name a model's generation controls beyond `speed` and
 `exaggeration`, each declared with a `min`, `max` and `default` a client can
 build a slider from, and a `step` only where the underlying kwarg takes an
 integer (mlx-audio's `num_steps`, `inference_timesteps`): Qwen3-TTS's
-`temperature`/`top_p`, Chatterbox's `cfg_weight` (alongside `exaggeration`,
+`temperature`/`top_p`/`top_k`, Chatterbox's `cfg_weight` (alongside `exaggeration`,
 which is also a declared knob), Breeze's `cfg_scale`, OmniVoice's
 `num_steps`/`guidance_scale`, VoxCPM2's `cfg_value`/`inference_timesteps`,
 and Kokoro's `speed` (documented here too, even though it travels as the

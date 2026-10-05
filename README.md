@@ -122,6 +122,7 @@ used.
 | `qwen3-tts-1.7b-base-mlx` | TTS, speaks cloned voices | mlx | 3.1 GB |
 | `qwen3-tts-1.7b-voicedesign-mlx` | TTS, voice from a text description | mlx | 3.1 GB |
 | `chatterbox-tts-8bit-mlx` | TTS, speaks cloned voices | mlx | 1.3 GB |
+| `chatterbox-turbo-8bit-mlx` | TTS, speaks cloned voices, inline `[laugh]`-style tags, English | mlx | 1.0 GB |
 | `indextts-1.5-mlx` | TTS, speaks cloned voices, does not stream | mlx | 1.4 GB |
 | `voxcpm2-8bit-mlx` | TTS, clones or designs a voice, 48 kHz | mlx | 3.2 GB |
 | `omnivoice-bf16-mlx` | TTS, clones or designs a voice, 646 languages, does not stream, **non-commercial** | mlx | 1.6 GB |
@@ -169,6 +170,22 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
 - The clip is one speaker, 5–15 s for best results (3–30 s accepted), in WAV,
   MP3 or anything else `afconvert` reads. `--text` must be its exact
   transcript.
+- Recording a reference that clones well (a Qwen3-TTS Base voice leans on it
+  for the whole timbre, and a flaw in it is copied into every sentence):
+  - 8–12 s of one speaker in a quiet room without echo, close to the
+    microphone at a steady distance; no music, no second voice, no
+    clipping, no noise-reduction artefacts. Speak in the register you want
+    the voice to have, at an even pace, not read stiffly.
+  - Start and end on a beat of silence (a few hundred ms), and end on a
+    finished sentence, not mid-word; a clip cut off mid-phrase makes the
+    clone trail off or ramble.
+  - `--text` is the exact transcript of the clip, word for word, with the
+    punctuation as spoken, numbers written the way they were said, and
+    nothing added or left out. A wrong transcript misaligns the in-context
+    clone; Qwen3-TTS Base reads it, Chatterbox ignores it.
+  - Record mono at 24 kHz or more (any rate is converted); the stored
+    `ref.wav` is 24 kHz mono 16-bit, so there is nothing to gain from
+    more. Prefer WAV or another lossless source over a re-encoded MP3.
 - The voice is stored as `~/.naru-audio/voices/<name>/ref.wav` (24 kHz mono),
   `ref.txt` and `model.txt`, the model it was made for. An existing voice is
   never replaced; delete its directory to redo it. Voices are read on each
@@ -176,6 +193,7 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
 - `voice add` (the CLI) always records `qwen3-tts-0.6b-base-mlx`; it has no
   `--model` yet. `POST /v1/audio/voices` takes one (§2.5 below), for
   `-m qwen3-tts-1.7b-base-mlx`, `-m chatterbox-tts-8bit-mlx`,
+  `-m chatterbox-turbo-8bit-mlx`,
   `-m indextts-1.5-mlx`, `-m voxcpm2-8bit-mlx`, `-m omnivoice-bf16-mlx` or
   `-m breeze-tts-2-mlx` instead. `say` with a cloned voice and no `-m` picks
   the model it was made for; an explicit `-m` that voice was not made for
@@ -191,7 +209,7 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   §2.5](docs/design.md)).
 - `GET /v1/models`' `x_prompt_format.knobs` names each model's own
   generation knobs beyond `speed`/`exaggeration` — Qwen3-TTS's
-  `temperature`/`top_p`, Chatterbox's `cfg_weight`, VoxCPM2's
+  `temperature`/`top_p`/`top_k`, Chatterbox's `cfg_weight`, VoxCPM2's
   `cfg_value`/`inference_timesteps`, and so on — each with `min`, `max`,
   `default` and, for one that takes an integer, `step`. `POST
   /v1/audio/speech` and `POST /api/voices/preview` take them as
@@ -200,7 +218,11 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
 - `POST /v1/audio/speech` also takes `"seed":<non-negative integer>`
   (default 0, so a voice sounds the same from one reply to the next); the
   MLX backend seeds its sampling with it before each generate, and speaks a
-  cloned voice a sentence at a time with the reference re-applied to each.
+  cloned voice in chunks of whole sentences (a chunk closes at 15 words, so
+  short sentences pair up) with the reference re-applied to each. A cloned
+  Qwen3-TTS voice samples at `temperature` 0.55, `top_p` 0.8, `top_k` 20,
+  tighter than mlx-audio's own, which lets the timbre drift between
+  sentences; `knobs` override them.
   Every request's audio is also saved as `~/.naru-audio/recent/<id>.wav`
   (the `id=` in its `tts_request` log line); the newest 50 are kept.
 - `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
@@ -210,6 +232,12 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   fetches a small shared tokenizer from Hugging Face, so it needs network
   access once even though every other model runs fully offline after
   `pull`.
+- `chatterbox-turbo-8bit-mlx` (MIT, English) is Chatterbox Turbo: it clones
+  from the reference alone and reads tags in the text itself, passed
+  through untouched: `[laugh]`, `[chuckle]`, `[sigh]`, `[cough]`,
+  `[clear throat]`, `[gasp]`, `[groan]`, `[sniff]`, `[shush]`. It has no
+  `exaggeration` or `cfg_weight`, ignores `speed` as Chatterbox does, and
+  needs the same one-time network fetch of the shared tokenizer.
 - `voxcpm2-8bit-mlx` (Apache-2.0) also needs no transcript and, like
   Chatterbox, does not support `speed` (mlx-audio has no `speed` parameter
   for it at all) — a non-1.0 `--speed` fails the request the same way. It
