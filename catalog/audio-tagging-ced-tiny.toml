@@ -1,0 +1,31 @@
+# CED-tiny (RicherMans/CED, mispeech/ced-tiny, Apache-2.0), sherpa-onnx's
+# int8 AudioSet tagger. Not an STT dependency: when it is pulled, the
+# sherpa-onnx and MLX STT backends tag each utterance and refuse a dog bark,
+# a clap or a bang before the recognizer invents words for it
+# (src/stt/gate.rs); when it is not, they transcribe as before. `kind` is
+# "vad" because it is a speech/non-speech gate. Size and hash computed
+# 2026-10-06 from the upstream release.
+
+[model]
+name        = "audio-tagging-ced-tiny"
+kind        = "vad"
+backend     = "sherpa-onnx"
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+license     = "Apache-2.0"
+license_url = "https://huggingface.co/mispeech/ced-tiny"
+
+[[archive]]
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/audio-tagging-models/sherpa-onnx-ced-tiny-audio-tagging-2024-04-19.tar.bz2"
+sha256 = "84baf315b57d61aa69480c4fee878dab54cbc7be3e877db334e65d8b087e23c3"
+size   = 28_531_989
+strip  = 1                                    # sherpa-onnx-ced-tiny-audio-tagging-2024-04-19/
+
+[[file]]
+path   = "model.int8.onnx"
+sha256 = "73aa22e783115f6a4ae169b36089907e07d0fd44795595eddea9c1bfc74cc945"
+size   = 6_133_417
+
+[[file]]
+path   = "class_labels_indices.csv"
+sha256 = "cdd1049833c4b86127c2773ac0d14a2754b6a6d0d1798002ed5c66e699708429"
+size   = 14_675

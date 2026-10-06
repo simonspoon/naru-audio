@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use naru_audio::backend::load_stt;
 use naru_audio::registry::{self, Registry};
 use naru_audio::stt::audio::{self, AudioError};
+use naru_audio::stt::gate::{self, SpeechGate};
 use naru_audio::stt::{Segment, SttModel, VadConfig, Vocabulary};
 
 const MODEL: &str = "parakeet-tdt-0.6b-v2-int8";
@@ -252,4 +253,47 @@ fn multi_utterance_buffer_yields_a_segment_per_utterance() {
         .map(|s| (s.start, s.end, s.text.as_str()))
         .collect();
     assert_eq!(actual, expected);
+}
+
+/// The speech gate's tagger, shared; skips like `model()` when
+/// `audio-tagging-ced-tiny` is not pulled.
+fn speech_gate() -> Option<&'static SpeechGate> {
+    static GATE: OnceLock<Option<SpeechGate>> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let home = std::env::var_os("NARU_AUDIO_TEST_HOME")
+            .map(PathBuf::from)
+            .or_else(registry::default_home)?;
+        let gate = SpeechGate::load(&home.join("models"));
+        if gate.is_none() {
+            let message = format!("{} not pulled under {}", gate::MODEL_NAME, home.display());
+            if std::env::var_os("NARU_AUDIO_REQUIRE_MODELS").is_some_and(|v| v == "1") {
+                panic!("{message}; NARU_AUDIO_REQUIRE_MODELS=1 forbids skipping");
+            }
+            eprintln!("skip: {message}");
+        }
+        gate
+    })
+    .as_ref()
+}
+
+/// Speech passes the gate, including a short word.
+#[test]
+fn speech_gate_allows_speech() {
+    let Some(gate) = speech_gate() else { return };
+    for name in ["plain.wav", "stereo-44100.wav", "mesa-names.wav"] {
+        assert!(gate.allows(&samples(name)), "{name} was refused");
+    }
+    let word = &samples("plain.wav")[..16_000 * 7 / 10];
+    assert!(gate.allows(word), "a 0.7 s word was refused");
+}
+
+/// The tagger hears the silence fixture as Silence 0.68 and refuses it; an
+/// empty or over-long buffer is never gated.
+#[test]
+fn speech_gate_refuses_a_clear_non_speech_sound() {
+    let Some(gate) = speech_gate() else { return };
+    assert!(!gate.allows(&samples("silence.wav")));
+    assert!(gate.allows(&[]));
+    assert!(gate.allows(&[0.1; 100]));
+    assert!(gate.allows(&vec![0.0; 16_000 * 11]));
 }

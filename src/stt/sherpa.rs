@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::audio::{self, READ_CHUNK_FRAMES, TARGET_SAMPLE_RATE};
 use super::engine::{EngineConfig, EngineError, Recognizer};
+use super::gate::SpeechGate;
 use super::vad::{Span, Vad, VadConfig};
 use super::vocabulary::{Vocabulary, looks_manufactured};
 use super::{Segment, SttError, SttModel, Word};
@@ -17,6 +18,7 @@ pub const VAD_FILENAME: &str = "silero_vad.onnx";
 pub struct SherpaStt {
     recognizer: Recognizer,
     vad_model: PathBuf,
+    gate: Option<SpeechGate>,
 }
 
 impl SherpaStt {
@@ -29,6 +31,7 @@ impl SherpaStt {
         Ok(SherpaStt {
             recognizer,
             vad_model,
+            gate: load_gate(dir),
         })
     }
 
@@ -79,7 +82,7 @@ impl SttModel for SherpaStt {
         let hotwords = vocabulary.map(Vocabulary::hotwords_string);
 
         let rate = TARGET_SAMPLE_RATE as f64;
-        for (span, from, to) in utterances(pcm16k, &self.vad_model, vad)? {
+        for (span, from, to) in utterances(pcm16k, &self.vad_model, self.gate.as_ref(), vad)? {
             if let Some(text) =
                 self.decode_utterance(&pcm16k[from..to], vocabulary, hotwords.as_deref())?
             {
@@ -105,7 +108,7 @@ impl SttModel for SherpaStt {
     fn decode_words(&self, pcm16k: &[f32], vad: Option<&VadConfig>) -> Result<Vec<Word>, SttError> {
         let rate = TARGET_SAMPLE_RATE as f64;
         let mut words = Vec::new();
-        for (span, from, to) in utterances(pcm16k, &self.vad_model, vad)? {
+        for (span, from, to) in utterances(pcm16k, &self.vad_model, self.gate.as_ref(), vad)? {
             let recognized = self.recognizer.decode_with_tokens(&pcm16k[from..to])?;
             let utt_start = span.start as f64 / rate;
             let utt_end = (span.start + span.len) as f64 / rate;
@@ -199,11 +202,18 @@ pub(super) fn vad_model(manifest: &Manifest, dir: &Path) -> Result<PathBuf, SttE
         .ok_or_else(|| SttError::NoVadModel(manifest.model.name.clone()))
 }
 
+/// The speech gate from the models directory `dir` (`models/<name>/`) sits
+/// in; `None` when the tagger is not pulled.
+pub(super) fn load_gate(dir: &Path) -> Option<SpeechGate> {
+    SpeechGate::load(dir.parent()?)
+}
+
 /// The gates in front of the recognizer, shared with the MLX model: the
 /// utterances of `pcm16k` to decode, as (utterance, slice start, slice end).
 pub(super) fn utterances(
     pcm16k: &[f32],
     vad_model: &Path,
+    gate: Option<&SpeechGate>,
     vad: Option<&VadConfig>,
 ) -> Result<Vec<(Span, usize, usize)>, SttError> {
     // Parakeet hallucinates on digital silence, so the recognizer (and
@@ -251,6 +261,14 @@ pub(super) fn utterances(
                 slice_start = cut;
             }
         }
+    }
+
+    // The speech gate: an utterance the tagger hears as another sound is
+    // dropped like one Silero never found. It tags the slice the recognizer
+    // would decode, not Silero's tight span: the context around a transient
+    // is what names it (a cough cropped to its burst tags as music).
+    if let Some(gate) = gate {
+        utterances.retain(|&(_, from, to)| gate.allows(&pcm16k[from..to]));
     }
     Ok(utterances)
 }

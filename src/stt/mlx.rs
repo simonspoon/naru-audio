@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::audio::TARGET_SAMPLE_RATE;
-use super::sherpa::{utterances, vad_model};
+use super::gate::SpeechGate;
+use super::sherpa::{load_gate, utterances, vad_model};
 use super::vad::VadConfig;
 use super::vocabulary::Vocabulary;
 use super::{Segment, SttError, SttModel, Word};
@@ -21,6 +22,7 @@ pub struct MlxStt {
     /// Which load of `name` this is, for [`Sidecar::unload`].
     instance: u64,
     vad_model: PathBuf,
+    gate: Option<SpeechGate>,
     /// What the load added to the sidecar's MLX active memory.
     resident_bytes: u64,
 }
@@ -38,6 +40,7 @@ impl MlxStt {
             name,
             instance,
             vad_model,
+            gate: load_gate(dir),
             resident_bytes,
         })
     }
@@ -68,7 +71,7 @@ impl SttModel for MlxStt {
     ) -> Result<Option<String>, SttError> {
         let rate = TARGET_SAMPLE_RATE as f64;
         let mut language = language.map(str::to_string);
-        for (span, from, to) in utterances(pcm16k, &self.vad_model, vad)? {
+        for (span, from, to) in utterances(pcm16k, &self.vad_model, self.gate.as_ref(), vad)? {
             let done = self.sidecar.transcribe(
                 &self.name,
                 &pcm16k[from..to],
@@ -120,7 +123,7 @@ impl SttModel for MlxStt {
         let rate = TARGET_SAMPLE_RATE as f64;
         let mut language = language.map(str::to_string);
         let mut words = Vec::new();
-        for (_, from, to) in utterances(pcm16k, &self.vad_model, vad)? {
+        for (_, from, to) in utterances(pcm16k, &self.vad_model, self.gate.as_ref(), vad)? {
             let done = self.sidecar.transcribe(
                 &self.name,
                 &pcm16k[from..to],

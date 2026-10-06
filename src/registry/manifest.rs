@@ -11,6 +11,10 @@ use super::RegistryError;
 /// Built-in manifests, `(file name, contents)`, compiled in from `catalog/`.
 const BUILTIN: &[(&str, &str)] = &[
     (
+        "audio-tagging-ced-tiny.toml",
+        include_str!("../../catalog/audio-tagging-ced-tiny.toml"),
+    ),
+    (
         "breeze-tts-2-mlx.toml",
         include_str!("../../catalog/breeze-tts-2-mlx.toml"),
     ),
@@ -617,6 +621,7 @@ mod tests {
         assert_eq!(
             cat.models.keys().collect::<Vec<_>>(),
             [
+                "audio-tagging-ced-tiny",
                 "breeze-tts-2-mlx",
                 "chatterbox-tts-8bit-mlx",
                 "chatterbox-turbo-8bit-mlx",
@@ -659,18 +664,21 @@ mod tests {
 
         let stt = &cat.models["parakeet-tdt-0.6b-v2-int8"];
         assert_eq!(stt.model.kind, Kind::Stt);
-        assert_eq!(stt.model.requires, ["silero-vad"]);
+        assert_eq!(stt.model.requires, ["silero-vad", "audio-tagging-ced-tiny"]);
         assert_eq!(stt.derive(), [BPE_VOCAB]);
         assert_eq!(stt.files.len(), 4);
         let mlx = &cat.models["parakeet-tdt-0.6b-v2-mlx"];
         assert_eq!(mlx.model.kind, Kind::Stt);
         assert_eq!(mlx.model.backend, "mlx");
-        assert_eq!(mlx.model.requires, ["silero-vad"]);
+        assert_eq!(mlx.model.requires, ["silero-vad", "audio-tagging-ced-tiny"]);
         assert_eq!(mlx.files.len(), 2);
         let whisper = &cat.models["whisper-large-v3-turbo-mlx"];
         assert_eq!(whisper.model.kind, Kind::Stt);
         assert_eq!(whisper.model.backend, "mlx");
-        assert_eq!(whisper.model.requires, ["silero-vad"]);
+        assert_eq!(
+            whisper.model.requires,
+            ["silero-vad", "audio-tagging-ced-tiny"]
+        );
         assert_eq!(whisper.model.platforms, mlx.model.platforms);
         assert_eq!(whisper.languages().unwrap().len(), 99);
         assert_eq!(whisper.languages().unwrap()[0], "en");

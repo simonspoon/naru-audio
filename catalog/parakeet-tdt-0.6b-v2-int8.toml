@@ -9,7 +9,7 @@ languages   = ["en"]
 license     = "CC-BY-4.0"
 license_url = "https://creativecommons.org/licenses/by/4.0/"
 resident_bytes = 1_600_000_000           # estimate; state/measured.json corrects it
-requires    = ["silero-vad"]
+requires    = ["silero-vad", "audio-tagging-ced-tiny"]
 
 [backend.sherpa-onnx]
 model_type = "nemo_transducer"

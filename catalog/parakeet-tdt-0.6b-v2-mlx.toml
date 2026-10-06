@@ -11,7 +11,7 @@ languages   = ["en"]
 license     = "CC-BY-4.0"
 license_url = "https://creativecommons.org/licenses/by/4.0/"
 resident_bytes = 2_600_000_000           # estimate; the sidecar's `stats` corrects it
-requires    = ["silero-vad"]
+requires    = ["silero-vad", "audio-tagging-ced-tiny"]
 
 [[file]]
 path   = "model.safetensors"

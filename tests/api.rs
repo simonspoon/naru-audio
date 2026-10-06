@@ -171,6 +171,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     assert_eq!(
         ids,
         [
+            "audio-tagging-ced-tiny",
             "kokoro-v1.0",
             "odd",
             "parakeet-tdt-0.6b-v2-int8",
@@ -202,6 +203,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         .filter(|m| {
             let id = m["id"].as_str().unwrap();
             ![
+                "audio-tagging-ced-tiny",
                 "kokoro-v1.0",
                 "parakeet-tdt-0.6b-v2-int8",
                 "pocket-tts-int8",
@@ -434,6 +436,7 @@ async fn unreadable_manifest_json_is_skipped() {
     assert_eq!(
         ids,
         [
+            "audio-tagging-ced-tiny",
             "kokoro-v1.0",
             "parakeet-tdt-0.6b-v2-int8",
             "pocket-tts-int8",

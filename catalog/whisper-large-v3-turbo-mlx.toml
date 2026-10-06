@@ -23,7 +23,7 @@ languages   = [
 license     = "MIT"
 license_url = "https://github.com/openai/whisper/blob/main/LICENSE"
 resident_bytes = 1_800_000_000           # estimate; the sidecar's `stats` corrects it
-requires    = ["silero-vad"]
+requires    = ["silero-vad", "audio-tagging-ced-tiny"]
 
 [[file]]
 path   = "weights.safetensors"
