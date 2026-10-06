@@ -406,7 +406,7 @@ fn every_builtin_model_has_a_non_empty_license_and_url() {
 /// research/non-commercial-only grant (catalog/breeze-tts-2-mlx.toml).
 /// Nothing else in the built-in catalog is restricted.
 #[test]
-fn only_pocket_tts_omnivoice_and_breeze_are_flagged_non_commercial() {
+fn only_known_models_are_flagged_non_commercial() {
     let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
     let nc: Vec<&str> = cat
         .models
@@ -416,7 +416,12 @@ fn only_pocket_tts_omnivoice_and_breeze_are_flagged_non_commercial() {
         .collect();
     assert_eq!(
         nc,
-        ["breeze-tts-2-mlx", "omnivoice-bf16-mlx", "pocket-tts-int8"]
+        [
+            "breeze-tts-2-mlx",
+            "omnivoice-bf16-mlx",
+            "pocket-tts-int8",
+            "speaker-diarization-reverb-titanet"
+        ]
     );
 }
 

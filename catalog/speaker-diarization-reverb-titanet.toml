@@ -1,0 +1,43 @@
+# Rev's Reverb diarization v1 segmentation (pyannote-3.0 architecture,
+# fine-tuned by Rev; sherpa-onnx's ONNX export) plus NVIDIA NeMo's English
+# TitaNet-small speaker embedding. The default diarization model: on a real
+# 2-speaker clip (num_speakers=2) it scored 5.2% DER against 35% for the
+# pyannote-3.0 + CAM++ pair in `speaker-diarization-en`. Same sherpa-onnx
+# pipeline as that entry (src/prep/diarize.rs), only the files differ.
+# Licences: Reverb v1 is the "Rev Model Non-Production License", so the
+# model is flagged `non_commercial`; TitaNet is CC-BY-4.0. Sizes and hashes
+# computed 2026-10-06 from the upstream releases.
+
+[model]
+name        = "speaker-diarization-reverb-titanet"
+kind        = "diarization"
+backend     = "sherpa-onnx"
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+languages   = ["en"]
+license     = "Rev Model Non-Production License AND CC-BY-4.0"  # segmentation Rev, embedding CC-BY-4.0
+license_url = "https://huggingface.co/Revai/reverb-diarization-v1"
+non_commercial = true                        # Reverb v1 is non-production only
+
+[[archive]]
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-reverb-diarization-v1.tar.bz2"
+sha256 = "615761e980be1688da0ef81618c056134d63aa55ea0a5f1494c47393b9398eab"
+size   = 10_918_585
+strip  = 1                                    # sherpa-onnx-reverb-diarization-v1/
+
+[[file]]
+path   = "model.onnx"
+sha256 = "8249e2e323f8fb0566a387d94b40a73d0b75d54ee60d02dcd729a56a5ba8ecea"
+size   = 9_512_223
+
+[[file]]
+path   = "LICENSE"
+sha256 = "68791425f9885ba32b7db32f7fcec7b309dd5a2453f220dea2f0cb39b756b180"
+size   = 11_111
+
+# NVIDIA NeMo English TitaNet-small speaker embedding, CC-BY-4.0; a direct
+# [[file]], not part of the archive above.
+[[file]]
+path   = "embedding.onnx"
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_small.onnx"
+sha256 = "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e"
+size   = 40_257_283

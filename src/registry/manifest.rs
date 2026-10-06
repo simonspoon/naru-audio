@@ -71,6 +71,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/speaker-diarization-en.toml"),
     ),
     (
+        "speaker-diarization-reverb-titanet.toml",
+        include_str!("../../catalog/speaker-diarization-reverb-titanet.toml"),
+    ),
+    (
         "speech-denoiser-gtcrn.toml",
         include_str!("../../catalog/speech-denoiser-gtcrn.toml"),
     ),
@@ -629,6 +633,7 @@ mod tests {
                 "silero-vad",
                 "source-separation-spleeter-2stems-int8",
                 "speaker-diarization-en",
+                "speaker-diarization-reverb-titanet",
                 "speech-denoiser-gtcrn",
                 "voxcpm2-8bit-mlx",
                 "whisper-large-v3-turbo-mlx"

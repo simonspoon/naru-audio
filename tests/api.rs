@@ -178,6 +178,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
             "silero-vad",
             "source-separation-spleeter-2stems-int8",
             "speaker-diarization-en",
+            "speaker-diarization-reverb-titanet",
             "speech-denoiser-gtcrn",
             "stt",
             "vad"
@@ -249,7 +250,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         // all "stt".
         let kind = match m["id"].as_str().unwrap() {
             "source-separation-spleeter-2stems-int8" => "separation",
-            "speaker-diarization-en" => "diarization",
+            "speaker-diarization-en" | "speaker-diarization-reverb-titanet" => "diarization",
             "speech-denoiser-gtcrn" => "denoise",
             _ => "stt",
         };
@@ -439,6 +440,7 @@ async fn unreadable_manifest_json_is_skipped() {
             "silero-vad",
             "source-separation-spleeter-2stems-int8",
             "speaker-diarization-en",
+            "speaker-diarization-reverb-titanet",
             "speech-denoiser-gtcrn",
             "vad"
         ]

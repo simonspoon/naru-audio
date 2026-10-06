@@ -87,10 +87,12 @@ pub const TRANSCRIPT_TXT: &str = "transcript.txt";
 pub const CLIP_META: &str = "meta.json";
 pub const SAMPLE_META: &str = "meta.json";
 
-/// The catalog's default diarization model (naru task 1461 §8): pyannote
-/// segmentation (MIT) + 3D-Speaker's English embedding (Apache-2.0), both
-/// clean licences, so this is safe as a default.
-pub const DEFAULT_DIARIZE_MODEL: &str = "speaker-diarization-en";
+/// The catalog's default diarization model: Reverb v1 segmentation + NeMo
+/// TitaNet-small embedding (5.2% DER against 35% for `speaker-diarization-en`
+/// on a real 2-speaker clip). Reverb v1 is non-commercial, so a prep run using
+/// this default carries the `non_commercial` warning; `speaker-diarization-en`
+/// (pyannote MIT + 3D-Speaker Apache-2.0) is the clean-licence alternative.
+pub const DEFAULT_DIARIZE_MODEL: &str = "speaker-diarization-reverb-titanet";
 
 /// The catalog's default denoise model: GTCRN (MIT), also clean.
 pub const DEFAULT_DENOISE_MODEL: &str = "speech-denoiser-gtcrn";

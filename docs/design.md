@@ -1354,8 +1354,13 @@ residency, load queue or eviction.
 
 ### 8.3 Licence policy
 
-Every default engine here is a clean licence: `speaker-diarization-en`
-(pyannote segmentation, MIT; 3D-Speaker CAM++ embedding, Apache-2.0),
+The denoise and separation defaults are clean licences. The diarization
+default is `speaker-diarization-reverb-titanet` (Rev's Reverb v1
+segmentation, non-commercial; NeMo TitaNet-small embedding, CC-BY-4.0),
+chosen for accuracy (5.2% DER against 35% on a real 2-speaker clip), so it
+is flagged `non_commercial` and a prep run using it carries the warning
+below; `speaker-diarization-en` (pyannote segmentation, MIT; 3D-Speaker
+CAM++ embedding, Apache-2.0) stays selectable as the clean option.
 `speech-denoiser-gtcrn` (GTCRN, MIT) and `source-separation-spleeter-
 2stems-int8` (Deezer's Spleeter, MIT) — three new `catalog/*.toml`
 entries, `[model] kind = "diarization"` / `"denoise"` / `"separation"`
@@ -1363,8 +1368,7 @@ entries, `[model] kind = "diarization"` / `"denoise"` / `"separation"`
 flagged model for any of the three stages (the catalog's existing flag,
 reused rather than a new one) gets a `warnings` entry in the sample's
 response and `meta.json`, naming the model and its licence — not a
-refusal: naru-audio ships no non-commercial model as a *default*, but
-still supports one, warned.
+refusal: naru-audio supports a non-commercial model, warned.
 
 ### 8.4 Word timestamps: sherpa-onnx's tokens, and mlx-whisper on MLX
 
