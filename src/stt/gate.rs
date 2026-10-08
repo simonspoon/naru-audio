@@ -53,8 +53,11 @@ const SPEECH_PROB: f32 = 0.5;
 const MAX_GATED_SECONDS: usize = 10;
 
 /// Shorter audio is never gated: too little to tag, and the model needs
-/// some frames to hear anything.
-const MIN_GATED_SECONDS: f32 = 0.1;
+/// some frames to hear anything. Set at 0.6 s because a one-word reply
+/// ("no", "hi", "sure", 0.4–0.6 s) tags as Music, Synthesizer or Buzz at
+/// 0.4–0.7 with speech under 0.4, and the veto then drops a real answer
+/// (naru task 1685). A bark or clap shorter than this passes too.
+const MIN_GATED_SECONDS: f32 = 0.6;
 
 /// All 527 AudioSet classes, so the strongest of each side is always seen.
 const TOP_K: i32 = 527;
@@ -96,10 +99,7 @@ impl SpeechGate {
 
     /// Whether `samples` (16 kHz mono) may go to the recognizer.
     pub fn allows(&self, samples: &[f32]) -> bool {
-        let rate = TARGET_SAMPLE_RATE as usize;
-        if samples.len() < (MIN_GATED_SECONDS * rate as f32) as usize
-            || samples.len() > MAX_GATED_SECONDS * rate
-        {
+        if !is_gated_length(samples.len()) {
             return true;
         }
         let stream = self.tagger.create_stream();
@@ -120,6 +120,12 @@ impl SpeechGate {
         }
         allowed
     }
+}
+
+/// Whether a clip of `len` samples is long enough, and short enough, to gate.
+fn is_gated_length(len: usize) -> bool {
+    let rate = TARGET_SAMPLE_RATE as usize;
+    len >= (MIN_GATED_SECONDS * rate as f32) as usize && len <= MAX_GATED_SECONDS * rate
 }
 
 /// The rule over a tagger's scored labels; see the module doc. Measured with
@@ -199,6 +205,14 @@ mod tests {
     #[test]
     fn laughter_alone_is_refused() {
         assert!(!decide(&[ev(21, 0.6), ev(0, 0.1)]));
+    }
+
+    #[test]
+    fn only_clips_between_the_bounds_are_gated() {
+        let rate = TARGET_SAMPLE_RATE as usize;
+        assert!(!is_gated_length(rate / 2));
+        assert!(is_gated_length(rate));
+        assert!(!is_gated_length(MAX_GATED_SECONDS * rate + 1));
     }
 
     #[test]

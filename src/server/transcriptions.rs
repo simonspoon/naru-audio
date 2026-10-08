@@ -45,6 +45,9 @@ enum Format {
     VerboseJson,
 }
 
+/// `vad_min_speech` when the request gives none, in seconds.
+const DEFAULT_MIN_SPEECH: f32 = 0.1;
+
 /// The multipart fields, as sent.
 #[derive(Default)]
 struct Form {
@@ -277,7 +280,12 @@ fn validate(form: Form, default_model: &str) -> Result<Job, ApiError> {
         .map_err(|e| bad_request("hotwords", "invalid_request", e.to_string()))?;
 
     // The auris flag checks (auris src/cli.rs).
-    let mut cfg = VadConfig::default();
+    // Not Silero's 0.25 s: clients send already-cut clips, and a one-word
+    // reply ("no") is shorter than that (naru task 1685).
+    let mut cfg = VadConfig {
+        min_speech: DEFAULT_MIN_SPEECH,
+        ..VadConfig::default()
+    };
     if let Some(v) = parse_f32("vad_threshold", form.vad_threshold.as_deref())? {
         if !(0.0..=1.0).contains(&v) {
             return Err(bad_request(
