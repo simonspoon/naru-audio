@@ -9,6 +9,7 @@
 //! is usable at once.
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -418,26 +419,33 @@ pub fn convert_to_tmp(home: &Path, stem: &str, clip: &Path) -> Result<(PathBuf, 
 
 /// `afconvert`s `clip` to `wav` and returns its length in seconds.
 fn convert(clip: &Path, wav: &Path) -> Result<f64, AddError> {
-    let out = Command::new("afconvert")
-        .args([
-            "-f",
-            "WAVE",
-            "-d",
-            &format!("LEI16@{SAMPLE_RATE}"),
-            "-c",
-            "1",
-        ])
-        .arg(clip)
-        .arg(wav)
-        .output()
-        .map_err(|e| AddError::Io(format!("cannot run afconvert (macOS only): {e}")))?;
-    if !out.status.success() {
-        return Err(AddError::Clip(format!(
-            "afconvert cannot read {}: {}",
-            clip.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("afconvert")
+            .args([
+                "-f",
+                "WAVE",
+                "-d",
+                &format!("LEI16@{SAMPLE_RATE}"),
+                "-c",
+                "1",
+            ])
+            .arg(clip)
+            .arg(wav)
+            .output()
+            .map_err(|e| AddError::Io(format!("cannot run afconvert (macOS only): {e}")))?;
+        if !out.status.success() {
+            return Err(AddError::Clip(format!(
+                "afconvert cannot read {}: {}",
+                clip.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
     }
+    #[cfg(not(target_os = "macos"))]
+    // Cap well above MAX_SECS so an over-long clip still reports its length.
+    crate::transcode::to_wav(clip, wav, SAMPLE_RATE, 600)
+        .map_err(|e| AddError::Clip(format!("cannot read {}: {e}", clip.display())))?;
     let reader = hound::WavReader::open(wav)
         .map_err(|e| AddError::Io(format!("read the converted clip: {e}")))?;
     Ok(f64::from(reader.duration()) / f64::from(reader.spec().sample_rate))
@@ -676,7 +684,12 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("afconvert cannot read"), "{err}");
+        let want = if cfg!(target_os = "macos") {
+            "afconvert cannot read"
+        } else {
+            "cannot read"
+        };
+        assert!(err.contains(want), "{err}");
         assert!(add(home.path(), "../x", &ok, "t", CLONE_MODEL, true, None).is_err());
         assert!(add(home.path(), "blank", &ok, " \n", CLONE_MODEL, true, None).is_err());
         // Nothing half-made is left behind.

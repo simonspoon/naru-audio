@@ -90,7 +90,7 @@ fn ram_bytes() -> Option<u64> {
     sysctl::<u64>(c"hw.memsize")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn ram_bytes() -> Option<u64> {
     // SAFETY: sysconf has no preconditions.
     let (pages, size) = unsafe {
@@ -100,6 +100,40 @@ fn ram_bytes() -> Option<u64> {
         )
     };
     (pages > 0 && size > 0).then(|| pages as u64 * size as u64)
+}
+
+#[cfg(windows)]
+fn ram_bytes() -> Option<u64> {
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page_file: u64,
+        avail_page_file: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended_virtual: u64,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    }
+    let mut status = MemoryStatusEx {
+        length: std::mem::size_of::<MemoryStatusEx>() as u32,
+        memory_load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page_file: 0,
+        avail_page_file: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
+        avail_extended_virtual: 0,
+    };
+    // SAFETY: `status` is a MEMORYSTATUSEX with `length` set, as the call requires.
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+    (ok != 0 && status.total_phys > 0).then_some(status.total_phys)
 }
 
 /// The sysctl does not exist on Intel Macs that predate Rosetta 2: not
@@ -137,13 +171,19 @@ pub fn rss() -> Option<u64> {
 }
 
 /// This process's resident set size in bytes (`/proc/self/statm`).
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 pub fn rss() -> Option<u64> {
     let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
     // SAFETY: sysconf has no preconditions.
     let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     (size > 0).then(|| pages * size as u64)
+}
+
+/// No resident-size probe off unix yet.
+#[cfg(not(unix))]
+pub fn rss() -> Option<u64> {
+    None
 }
 
 #[cfg(test)]

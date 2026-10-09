@@ -11,5 +11,7 @@ pub mod profile;
 pub mod registry;
 pub mod server;
 pub mod stt;
+#[cfg(any(not(target_os = "macos"), test))]
+pub mod transcode;
 pub mod tts;
 pub mod voices;

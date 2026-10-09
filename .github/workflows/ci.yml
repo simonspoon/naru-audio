@@ -29,6 +29,22 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+  # Sherpa only: MLX is aarch64-macOS (cfg-gated), so a plain build is the
+  # sherpa-only feature set. Static CRT comes from .cargo/config.toml.
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
   fmt:
     runs-on: ubuntu-latest
     steps:

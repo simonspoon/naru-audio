@@ -188,7 +188,16 @@ pub struct Entry {
 pub fn default_home() -> Option<PathBuf> {
     match std::env::var_os("NARU_AUDIO_HOME") {
         Some(h) if !h.is_empty() => Some(h.into()),
-        _ => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".naru-audio")),
+        _ => {
+            let (first, second) = if cfg!(windows) {
+                ("USERPROFILE", "HOME")
+            } else {
+                ("HOME", "USERPROFILE")
+            };
+            std::env::var_os(first)
+                .or_else(|| std::env::var_os(second))
+                .map(|h| PathBuf::from(h).join(".naru-audio"))
+        }
     }
 }
 

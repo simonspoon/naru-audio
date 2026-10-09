@@ -1,0 +1,4 @@
+# sherpa-onnx-sys's Windows prebuilts (static and shared alike) are built
+# with /MT, so link the static CRT (Rust's msvc default is /MD).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1121,7 +1121,7 @@ pub(super) async fn add_voice(
             ..ApiError::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "unsupported_media_type",
-                "the clip is not audio afconvert can read, such as WAV or MP3",
+                CLIP_UNREADABLE,
             )
         },
         AddError::Length(_) => bad_request("file", "invalid_request", e.to_string()),
@@ -1575,7 +1575,7 @@ pub(super) async fn preview_voice(
             ..ApiError::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "unsupported_media_type",
-                "the clip is not audio afconvert can read, such as WAV or MP3",
+                CLIP_UNREADABLE,
             )
         },
         AddError::Length(_) => bad_request("file", "invalid_request", e.to_string()),
@@ -1625,6 +1625,11 @@ pub(super) async fn preview_voice(
     wav.extend_from_slice(&pcm);
     Ok(audio_response(Format::Wav, sample_rate, wav))
 }
+
+#[cfg(target_os = "macos")]
+const CLIP_UNREADABLE: &str = "the clip is not audio afconvert can read, such as WAV or MP3";
+#[cfg(not(target_os = "macos"))]
+const CLIP_UNREADABLE: &str = "the clip is not audio this build can decode, such as WAV or MP3";
 
 #[cfg(test)]
 mod tests {

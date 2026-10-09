@@ -26,6 +26,7 @@ pub mod pipeline;
 pub mod takes;
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -269,21 +270,33 @@ fn io_err(what: &str) -> impl FnOnce(std::io::Error) -> PrepError + '_ {
     move |e| PrepError::Io(format!("{what}: {e}"))
 }
 
-/// Converts `src` (anything `afconvert` reads) to a 16 kHz mono 16-bit WAV
+/// Converts `src` (anything `afconvert` reads on macOS; WAV, MP3, AAC/M4A
+/// elsewhere) to a 16 kHz mono 16-bit WAV
 /// at `dst`. Returns the decoded length in seconds.
 pub fn ingest_to_wav(src: &Path, dst: &Path) -> Result<f64, PrepError> {
-    let out = Command::new("afconvert")
-        .args(["-f", "WAVE", "-d", "LEI16@16000", "-c", "1"])
-        .arg(src)
-        .arg(dst)
-        .output()
-        .map_err(io_err("run afconvert"))?;
-    if !out.status.success() {
-        return Err(PrepError::BadAudio(format!(
-            "afconvert failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("afconvert")
+            .args(["-f", "WAVE", "-d", "LEI16@16000", "-c", "1"])
+            .arg(src)
+            .arg(dst)
+            .output()
+            .map_err(io_err("run afconvert"))?;
+        if !out.status.success() {
+            return Err(PrepError::BadAudio(format!(
+                "afconvert failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
     }
+    #[cfg(not(target_os = "macos"))]
+    crate::transcode::to_wav(
+        src,
+        dst,
+        TARGET_SAMPLE_RATE,
+        crate::stt::audio::Limits::PREP.max_seconds,
+    )
+    .map_err(|e| PrepError::BadAudio(format!("audio decode failed: {e}")))?;
     // The length comes from the WAV header; decoding a 4-hour clip just to
     // count it would hold ~1 GB of samples.
     let file = std::fs::File::open(dst).map_err(io_err("open converted wav"))?;

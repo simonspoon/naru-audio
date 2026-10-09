@@ -13,7 +13,6 @@ clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 hound = "3.5.1"
 humantime = "2"
-libc = "0.2"
 rubato = "5.0.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,7 +27,17 @@ toml = "1"
 toml_edit = "0.25"
 ureq = "3"
 
+# Calls sysconf (non-macOS unix) and the mach/sysctl APIs (macOS).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Replaces macOS `afconvert` where it does not exist (src/transcode.rs).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "alac", "flac", "aiff", "caf", "wav", "pcm"] }
+
 [dev-dependencies]
+# Also here so src/transcode.rs's tests run on macOS.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "alac", "flac", "aiff", "caf", "wav", "pcm"] }
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
