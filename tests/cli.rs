@@ -3,7 +3,7 @@ mod common;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use common::{file_entry, home, model_header};
+use common::{file_entry, file_url, home, model_header};
 
 #[test]
 fn non_loopback_listen_without_allow_remote_exits_non_zero() {
@@ -46,7 +46,7 @@ fn stt_and_vad(src: &Path) -> tempfile::TempDir {
     ] {
         let path = src.join(file);
         std::fs::write(&path, bytes).unwrap();
-        let url = format!("file://{}", path.display());
+        let url = file_url(&path);
         manifests.push(model_header(name, requires) + &file_entry(file, &url, bytes));
     }
     manifests.push(
@@ -89,7 +89,7 @@ fn non_commercial_model_warns_on_pull_and_is_tagged_in_list() {
         license_url = \"https://creativecommons.org/licenses/by-nc/4.0/\"\n\
         non_commercial = true\n"
         .to_string()
-        + &file_entry("m.onnx", &format!("file://{}", path.display()), b"weights");
+        + &file_entry("m.onnx", &file_url(&path), b"weights");
     let home = home(&[manifest]);
 
     let pull = run(home.path(), &["pull", "nc"]);
@@ -121,7 +121,7 @@ fn failed_pull_of_a_non_commercial_model_prints_no_warning() {
         license_url = \"https://creativecommons.org/licenses/by-nc/4.0/\"\n\
         non_commercial = true\n"
         .to_string()
-        + &file_entry("m.onnx", &format!("file://{}", path.display()), b"weights");
+        + &file_entry("m.onnx", &file_url(&path), b"weights");
     let home = home(&[manifest]);
 
     let refused = run(home.path(), &["pull", "nc"]);
@@ -195,7 +195,7 @@ fn pull_refuses_an_unavailable_backend_without_force() {
     let path = src.path().join("m.onnx");
     std::fs::write(&path, b"weights").unwrap();
     let manifest = model_header("m", &[]).replace("sherpa-onnx", "nope")
-        + &file_entry("m.onnx", &format!("file://{}", path.display()), b"weights");
+        + &file_entry("m.onnx", &file_url(&path), b"weights");
     let home = home(&[manifest]);
 
     let refused = run(home.path(), &["pull", "m"]);

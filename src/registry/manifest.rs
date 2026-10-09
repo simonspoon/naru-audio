@@ -1207,10 +1207,13 @@ mod tests {
 
     #[test]
     fn a_voice_reference_must_be_a_pinned_file() {
-        let text = include_str!("../../catalog/pocket-tts-int8.toml").replace(
-            "test_wavs/loona.wav\"\ngender",
-            "test_wavs/other.wav\"\ngender",
-        );
+        // A Windows checkout may carry CRLF line endings.
+        let text = include_str!("../../catalog/pocket-tts-int8.toml")
+            .replace("\r\n", "\n")
+            .replace(
+                "test_wavs/loona.wav\"\ngender",
+                "test_wavs/other.wav\"\ngender",
+            );
         let err = Manifest::parse(&text, "pocket").unwrap_err().to_string();
         assert!(
             err.contains("reference `test_wavs/other.wav` is not a [[file]]"),

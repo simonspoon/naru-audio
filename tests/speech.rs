@@ -1311,6 +1311,7 @@ fn preview_validates_its_fields_before_converting_or_loading() {
 /// A cloning model with `[backend.sherpa-onnx] clone = true` for
 /// `POST /api/voices/preview`, alongside the models `fake_home` already
 /// gives `Server::fake`.
+#[cfg(target_os = "macos")]
 fn fake_clone_home() -> tempfile::TempDir {
     let home = fake_home();
     let dir = home.path().join("models").join("fake-clone");

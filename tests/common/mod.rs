@@ -102,6 +102,16 @@ pub fn home(manifests: &[String]) -> tempfile::TempDir {
     dir
 }
 
+/// A `file:///` URL for `path`; Windows paths become `file:///C:/dir/x`.
+pub fn file_url(path: &std::path::Path) -> String {
+    let p = path.to_string_lossy().replace('\\', "/");
+    if p.starts_with('/') {
+        format!("file://{p}")
+    } else {
+        format!("file:///{p}")
+    }
+}
+
 pub fn model_header(name: &str, requires: &[&str]) -> String {
     format!(
         "[model]\nname = \"{name}\"\nkind = \"stt\"\nbackend = \"sherpa-onnx\"\nrequires = {requires:?}\n"

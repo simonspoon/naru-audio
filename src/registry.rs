@@ -826,6 +826,12 @@ fn open_url(url: &str) -> Result<Box<dyn Read>, RegistryError> {
         message,
     };
     if let Some(path) = url.strip_prefix("file://") {
+        // `file:///C:/dir/x` leaves `/C:/dir/x`, which Windows cannot open.
+        #[cfg(windows)]
+        let path = match path.strip_prefix('/') {
+            Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest,
+            _ => path,
+        };
         return Ok(Box::new(File::open(path).map_err(|e| err(e.to_string()))?));
     }
     let resp = ureq::get(url).call().map_err(|e| err(e.to_string()))?;

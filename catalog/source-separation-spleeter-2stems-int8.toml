@@ -7,7 +7,7 @@
 name        = "source-separation-spleeter-2stems-int8"
 kind        = "separation"
 backend     = "sherpa-onnx"
-platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64", "windows-x86_64"]
 license     = "MIT"
 license_url = "https://github.com/deezer/spleeter/blob/master/LICENSE"
 

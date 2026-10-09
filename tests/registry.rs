@@ -20,7 +20,12 @@ fn listing(dir: &Path) -> Vec<String> {
         };
         for e in rd {
             let p = e.unwrap().path();
-            out.push(p.strip_prefix(root).unwrap().display().to_string());
+            out.push(
+                p.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
             if p.is_dir() {
                 walk(root, &p, out);
             }
