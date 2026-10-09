@@ -1,32 +1,73 @@
 # naru-audio
 
-A local speech-to-text (STT) and text-to-speech (TTS) daemon. It works like
-Ollama: one long-running process, models pulled by name, loaded on first use
-and unloaded when idle, behind an HTTP API on `127.0.0.1:7870`.
+naru-audio is one local service for speech-to-text (STT) and text-to-speech
+(TTS). You pick the model for each: small ones that run anywhere, bigger ones
+on Apple Silicon. It ships the capability to run third-party models and never
+bundles their weights: you download them by name, each with a pinned checksum
+and its license shown. Models that are non-commercial carry a warning when
+you pull them and are never a default.
 
-- `/v1/*` is OpenAI-compatible (`/v1/audio/transcriptions`,
-  `/v1/audio/speech`, `/v1/models`), so stock OpenAI clients work.
-- `/api/*` is native and Ollama-shaped (pull, remove, load, loaded models).
-- A WebSocket at `/v1/audio/transcriptions/stream` transcribes live audio.
-- The same binary is a CLI: pull models, check health, transcribe a file,
-  speak text, clone a voice.
+It runs as a daemon on `127.0.0.1:7870` with a web admin UI, an
+OpenAI-compatible HTTP API (so stock OpenAI clients work), a WebSocket for
+live transcription, and a CLI. It was built as the speech backend for Naru,
+but any HTTP client can use it.
 
-It was built as the speech backend for Naru, but any HTTP client can use it.
-The full design (API, error codes, registry, memory budget, sidecar
-protocol) is in [docs/design.md](docs/design.md).
+## Quick start
 
-## Contents
+Install with Homebrew (macOS or Linux), download the default models, and
+start the service:
 
-For users: [Requirements](#requirements) ·
-[Install](#install) · [First run](#first-run) · [Models](#models) ·
-[Voices and cloning](#voices-and-cloning) · [Configuration](#configuration) ·
-[HTTP API](#http-api) · [Health check](#health-check) ·
-[Troubleshooting](#troubleshooting) · [Uninstall](#uninstall)
+```sh
+brew install simonspoon/tap/naru-audio
+naru-audio pull default            # default STT + TTS models (about 1.1 GB) into ~/.naru-audio
+brew services start naru-audio     # or, in a terminal: naru-audio serve
+naru-audio health                  # exit 0 when speech is ready
+```
 
-For developers: [Building from source](#building-from-source) ·
-[Repository layout](#repository-layout) · [Running tests](#running-tests) ·
-[The MLX sidecar](#the-mlx-sidecar) · [Release process](#release-process) ·
-[Contributing](#contributing) · [License](#license)
+No Homebrew? [Build from source](#building-from-source), put
+`target/release/naru-audio` on your `PATH`, and run `naru-audio serve`.
+
+Now open the admin UI in a browser:
+
+**<http://127.0.0.1:7870/admin>**
+
+### What the admin UI offers
+
+A top bar shows whether the daemon is online, the default TTS and STT
+models, and memory use. The tabs:
+
+| Tab | What you do there |
+|---|---|
+| **Overview** | See which models are running, on disk or not pulled (load, unload, pull). Browse the default TTS model's voices with waveforms and play a preview of each. |
+| **Models** | Search and filter the whole catalog (TTS, STT, on disk, running). Pull with progress and cancel, remove, load or unload a model, see its license, and choose the default STT and TTS models. |
+| **Voices** | Pick a model, then browse its built-in, cloned and designed voices. Type a line and hear it, set a voice as the model's default, export, rename or delete a voice, or import one back. |
+| **Clone** | Make a voice from a recording: drop in a file, record one, or take a saved sample; trim it to 5-15 s, auto-transcribe it, hear a test line, then save. Needs Apple Silicon and the MLX sidecar. |
+| **Design** | Make up a voice from a description (quick-pick chips such as female, low, warm), compare three takes of a test line, and save the one you like. |
+| **Playground** | **Speak**: type text, pick a model, voice and the model's own controls, and play or save the audio. **Listen**: upload or record audio and get a transcript. |
+| **Samples** | Your voice-prep library. Upload or record a clip of any length and open it in **Sample Studio**: separate speakers, remove crosstalk and background, pick the best takes, crop and cut, run a denoise chain, edit against the transcript, and save a clean sample to clone from. |
+
+To try it, open **Playground**, type something under **Speak** and play it;
+then upload that audio (or a recording) under **Listen** to transcribe it.
+The default models need nothing else. Cloning, design and Sample Studio use
+extra models, which you pull from the **Models** tab (see [Models](#models)).
+
+### Try it from the terminal
+
+```sh
+naru-audio say "Hello from naru-audio." -o hello.wav
+naru-audio transcribe hello.wav
+```
+
+Or over HTTP:
+
+```sh
+# TTS
+curl http://127.0.0.1:7870/v1/audio/speech -H 'Content-Type: application/json' \
+  -d '{"model":"kokoro-v1.0","input":"Hello there.","voice":"af_heart"}' -o speech.wav
+
+# STT
+curl http://127.0.0.1:7870/v1/audio/transcriptions -F file=@speech.wav -F model=default
+```
 
 ---
 
@@ -36,13 +77,13 @@ For developers: [Building from source](#building-from-source) ·
   built-in sherpa-onnx backend (ONNX Runtime, statically linked), on every
   platform, with no Python and no GPU.
 - **Apple Silicon, for the MLX models only.** Models whose backend is `mlx`
-  (Parakeet and Whisper on MLX, the Qwen3-TTS family, and so voice cloning) run in a
-  Python sidecar on arm64 macOS. They need [`uv`](https://docs.astral.sh/uv/)
-  and a one-time `naru-audio mlx setup`. On other machines they are listed
-  as unavailable.
+  (Parakeet and Whisper on MLX, the Qwen3-TTS family and the other cloning
+  models) run in a Python sidecar on arm64 macOS. They need
+  [`uv`](https://docs.astral.sh/uv/) and a one-time `naru-audio mlx setup`.
+  On other machines they are listed as unavailable.
 - **macOS for `voice add`**: clips are converted with the system `afconvert`.
 - **Disk and memory for models.** Models are downloaded on request, not
-  bundled. The defaults take about 1 GB on disk (see [Models](#models)).
+  bundled. The defaults take about 1.1 GB on disk.
 
 The daemon picks a hardware profile at startup: `large` for arm64 with at
 least 24 GB of RAM, `small` otherwise. The profile sets the memory budget
@@ -52,11 +93,6 @@ on `small`). Both profiles default to the same models.
 ## Install
 
 ### Homebrew
-
-The formula is [Formula/naru-audio.rb](Formula/naru-audio.rb). The release
-workflow publishes it to the `simonspoon/tap` tap when a version is tagged
-(see [Release process](#release-process)); until the first tagged release,
-[build from source](#building-from-source).
 
 ```sh
 brew install simonspoon/tap/naru-audio
@@ -75,46 +111,19 @@ See [Building from source](#building-from-source), then put
 `target/release/naru-audio` on your `PATH` and run `naru-audio serve`
 yourself (it logs to stderr when it is not installed by Homebrew).
 
-## First run
-
-```sh
-# Download the default STT and TTS models (and the VAD model they require)
-# into ~/.naru-audio. This works without the daemon running.
-naru-audio pull default
-
-# Start the daemon: as a service, or in the foreground.
-brew services start naru-audio        # or: naru-audio serve
-
-naru-audio health                     # exit 0 when speech is ready
-naru-audio say "Hello from naru-audio." -o hello.wav
-naru-audio transcribe hello.wav
-```
-
-`say` writes a 16-bit mono WAV; `-o -` streams it to stdout instead, one
-sentence at a time. Both `say` and `transcribe` take `-` for stdin.
-Other client commands:
-
-```sh
-naru-audio transcribe hello.wav --format json    # one JSON line per segment, then the transcript
-naru-audio stream hello.wav                      # replay a WAV over the WebSocket in real time
-naru-audio ps                                    # models the daemon has loaded
-naru-audio list                                  # pulled models and those that can run here
-```
-
-Every command has `--help`.
-
 ## Models
 
 The catalog is built into the binary (the TOML files in [catalog/](catalog/)).
 Every file has a pinned URL and sha256; downloads are checked before they are
-used.
+used. **You choose the models**: set the default STT and TTS in the admin UI
+(**Models** tab) or in [`config.toml`](#configuration), or name a model on any
+request.
 
 | Name | Kind | Backend | Download |
 |---|---|---|---|
 | `parakeet-tdt-0.6b-v2-int8` | STT (English), **default** | sherpa-onnx | 0.66 GB |
-| `kokoro-v1.0` | TTS, **default** | sherpa-onnx | 0.35 GB |
-| `silero-vad` | VAD, pulled with the STT models | sherpa-onnx | 2 MB |
-| `pocket-tts-int8` | TTS (English) | sherpa-onnx | 0.10 GB |
+| `kokoro-v1.0` | TTS, **default** | sherpa-onnx | 0.40 GB |
+| `pocket-tts-int8` | TTS (English), **non-commercial** | sherpa-onnx | 0.20 GB |
 | `parakeet-tdt-0.6b-v2-mlx` | STT (English) | mlx | 2.5 GB |
 | `whisper-large-v3-turbo-mlx` | STT, 99 languages, word timestamps | mlx | 1.6 GB |
 | `qwen3-tts-0.6b-mlx` | TTS, preset voices | mlx | 2.0 GB |
@@ -128,12 +137,24 @@ used.
 | `omnivoice-bf16-mlx` | TTS, clones or designs a voice, 646 languages, does not stream, **non-commercial** | mlx | 1.6 GB |
 | `breeze-tts-2-mlx` | TTS, clones or designs a voice, **non-commercial** | mlx | 7.6 GB |
 
+Supporting models, pulled automatically or on demand:
+
+| Name | Role | Download |
+|---|---|---|
+| `silero-vad` | Voice activity detection; pulled with every STT model | 2 MB |
+| `audio-tagging-ced-tiny` | The [speech gate](#speech-gate-and-vad); pulled with every STT model | 32 MB |
+| `source-separation-spleeter-2stems-int8` | Sample Studio: isolate vocals | 52 MB |
+| `speech-denoiser-gtcrn` | Sample Studio: denoise | 0.5 MB |
+| `speaker-diarization-reverb-titanet` | Sample Studio: who speaks when (default); **non-commercial** | 52 MB |
+| `speaker-diarization-en` | Sample Studio: a commercially usable alternative | 37 MB |
+
 Each model's license is in its catalog file (`license = …`); check it before
 you use a model's output. `naru-audio list` and `GET /v1/models` show it
-(`x_license`, `x_license_url`), and pulling a non-commercial model
-(`pocket-tts-int8`, per its README; `omnivoice-bf16-mlx`, CC-BY-NC-4.0;
-`breeze-tts-2-mlx`, BreezeBlue's own research/non-commercial license)
-prints a warning; `x_non_commercial` marks it in the API.
+(`x_license`, `x_license_url`). Pulling a non-commercial model
+(`pocket-tts-int8`, `omnivoice-bf16-mlx` CC-BY-NC-4.0, `breeze-tts-2-mlx`
+BreezeBlue's research/non-commercial license, `speaker-diarization-reverb-titanet`
+Rev's non-production license) prints a warning; `x_non_commercial` marks it
+in the API. None of them is a default.
 
 ```sh
 naru-audio pull pocket-tts-int8       # pull by name; `default` means the configured STT and TTS models
@@ -147,9 +168,44 @@ pass `--force`. You can add your own manifests (same format as
 [catalog/](catalog/), `file:///` URLs allowed, sha256 still required) in
 `~/.naru-audio/catalog.d/*.toml`; they are merged over the built-in catalog.
 
+Models are loaded on first use and unloaded after `keep_alive` of idleness
+(see [Configuration](#configuration)). `naru-audio ps` lists what is loaded.
+
+### Backends
+
+- **sherpa-onnx** runs the default models in-process on every platform.
+- **MLX** runs the other models in a Python process the daemon supervises
+  (the *sidecar*), on Apple Silicon only. Set it up once:
+
+  ```sh
+  naru-audio mlx setup      # needs uv on PATH; installs a venv in ~/.naru-audio/mlx
+  naru-audio mlx status     # shows the recorded interpreter and whether it imports the sidecar
+  ```
+
+  The sidecar starts on the first MLX request. How it works is under
+  [The MLX sidecar](#the-mlx-sidecar).
+
+## Speech gate and VAD
+
+Before a recording reaches the recognizer, two small models filter it:
+
+- **Silero VAD** finds the speech in the audio. Requests can tune it with the
+  form fields `vad` (default true), `vad_threshold` (0 to 1), `vad_min_speech`
+  (seconds, default 0.1, so a one-word reply is kept) and `vad_min_silence`
+  (seconds).
+- The **speech gate** (`audio-tagging-ced-tiny`) tags each utterance and
+  drops it when it is clearly some other sound (a bark, a clap) with no
+  confident speech beside it, so the recognizer does not invent words for
+  noise. It only vetoes: speech over music still passes; audio shorter than
+  0.6 s or longer than 10 s is never gated; and with no gate model it fails
+  open and transcribes as before.
+
+Both are pulled with the default STT models (`naru-audio pull default`).
+
 ## Voices and cloning
 
-List a model's voices through the daemon:
+List a model's voices through the daemon, or pick one in the admin UI's
+**Voices** tab:
 
 ```sh
 curl 'http://127.0.0.1:7870/v1/audio/voices?model=kokoro-v1.0'
@@ -157,8 +213,12 @@ naru-audio say "A different voice." -v am_adam -o adam.wav
 ```
 
 `kokoro-v1.0`'s default voice is `af_heart`; `-s` sets the speed (0.5 to 2.0).
+Both `say` and `transcribe` take `-` for stdin; `say -o -` streams the WAV to
+stdout one sentence at a time.
 
-**Cloning** needs Apple Silicon and the MLX sidecar:
+**Cloning** needs Apple Silicon and the MLX sidecar. The easiest way is the
+admin UI's **Clone** tab (or **Samples**, to clean a long recording first).
+From the terminal:
 
 ```sh
 naru-audio mlx setup                              # once; needs uv on PATH
@@ -167,12 +227,12 @@ naru-audio voice add myvoice clip.wav --text "Exactly what the clip says."
 naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
 ```
 
-- The clip is one speaker, 5–15 s for best results (3–30 s accepted), in WAV,
+- The clip is one speaker, 5-15 s for best results (3-30 s accepted), in WAV,
   MP3 or anything else `afconvert` reads. `--text` must be its exact
   transcript.
 - Recording a reference that clones well (a Qwen3-TTS Base voice leans on it
   for the whole timbre, and a flaw in it is copied into every sentence):
-  - 8–12 s of one speaker in a quiet room without echo, close to the
+  - 8-12 s of one speaker in a quiet room without echo, close to the
     microphone at a steady distance; no music, no second voice, no
     clipping, no noise-reduction artefacts. Speak in the register you want
     the voice to have, at an even pace, not read stiffly.
@@ -191,26 +251,24 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   never replaced; delete its directory to redo it. Voices are read on each
   request, so a new one works without restarting the daemon.
 - `voice add` (the CLI) always records `qwen3-tts-0.6b-base-mlx`; it has no
-  `--model` yet. `POST /v1/audio/voices` takes one (§2.5 below), for
-  `-m qwen3-tts-1.7b-base-mlx`, `-m chatterbox-tts-8bit-mlx`,
-  `-m chatterbox-turbo-8bit-mlx`,
-  `-m indextts-1.5-mlx`, `-m voxcpm2-8bit-mlx`, `-m omnivoice-bf16-mlx` or
-  `-m breeze-tts-2-mlx` instead. `say` with a cloned voice and no `-m` picks
-  the model it was made for; an explicit `-m` that voice was not made for
-  is refused rather than silently ignored.
+  `--model`. `POST /v1/audio/voices` (and the admin UI) take one, for
+  `qwen3-tts-1.7b-base-mlx`, `chatterbox-tts-8bit-mlx`,
+  `chatterbox-turbo-8bit-mlx`, `indextts-1.5-mlx`, `voxcpm2-8bit-mlx`,
+  `omnivoice-bf16-mlx` or `breeze-tts-2-mlx` instead. `say` with a cloned
+  voice and no `-m` picks `qwen3-tts-0.6b-base-mlx`; an explicit `-m` that
+  voice was not made for is refused rather than silently ignored.
 - `GET /v1/models` names each model's cloning and voice-design capability
   (`x_clone`, `x_clone_requires_transcript`, `x_instruct`), so a client
   picking a model knows what it can do before offering it. `GET
   /v1/audio/voices?model=<name>` lists only the clones made for `<name>`,
-  alongside its own preset voices; `?model=clones` still lists every
-  cloned voice regardless of model, each naming which one it is for.
-  Voices can also be added with `POST /v1/audio/voices` and exported,
-  model and all, with `GET /v1/audio/voices/{name}` ([docs/design.md
-  §2.5](docs/design.md)).
+  alongside its own preset voices; `?model=clones` lists every cloned voice
+  regardless of model, each naming which one it is for. Voices can also be
+  added with `POST /v1/audio/voices` and exported, model and all, with
+  `GET /v1/audio/voices/{name}` ([docs/design.md §2.5](docs/design.md)).
 - `GET /v1/models`' `x_prompt_format.knobs` names each model's own
-  generation knobs beyond `speed`/`exaggeration` — Qwen3-TTS's
+  generation knobs beyond `speed`/`exaggeration` (Qwen3-TTS's
   `temperature`/`top_p`/`top_k`, Chatterbox's `cfg_weight`, VoxCPM2's
-  `cfg_value`/`inference_timesteps`, and so on — each with `min`, `max`,
+  `cfg_value`/`inference_timesteps`, and so on), each with `min`, `max`,
   `default` and, for one that takes an integer, `step`. `POST
   /v1/audio/speech` and `POST /api/voices/preview` take them as
   `"knobs":{"<name>":<number>}`; a name not in `x_prompt_format.knobs` or a
@@ -222,50 +280,43 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   short sentences pair up) with the reference re-applied to each. A cloned
   Qwen3-TTS voice samples at `temperature` 0.55, `top_p` 0.8, `top_k` 20,
   tighter than mlx-audio's own, which lets the timbre drift between
-  sentences; `knobs` override them.
-  Every request's audio is also saved as `~/.naru-audio/recent/<id>.wav`
-  (the `id=` in its `tts_request` log line); the newest 50 are kept.
+  sentences; `knobs` override them. Every request's audio is also saved as
+  `~/.naru-audio/recent/<id>.wav` (the `id=` in its `tts_request` log line);
+  the newest 50 are kept.
+
+Per-model notes:
+
 - `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
-  entirely — a non-1.0 `--speed` with it fails the request instead of
+  entirely: a non-1.0 `--speed` with it fails the request instead of
   quietly synthesising at normal speed. It takes `--exaggeration` (0-1, an
   emotion-exaggeration dial); every other model ignores it. Its first load
   fetches a small shared tokenizer from Hugging Face, so it needs network
   access once even though every other model runs fully offline after
   `pull`.
-- `chatterbox-turbo-8bit-mlx` (MIT, English) is Chatterbox Turbo: it clones
-  from the reference alone and reads tags in the text itself, passed
-  through untouched: `[laugh]`, `[chuckle]`, `[sigh]`, `[cough]`,
-  `[clear throat]`, `[gasp]`, `[groan]`, `[sniff]`, `[shush]`. It has no
-  `exaggeration` or `cfg_weight`, ignores `speed` as Chatterbox does, and
-  needs the same one-time network fetch of the shared tokenizer.
-- `voxcpm2-8bit-mlx` (Apache-2.0) also needs no transcript and, like
-  Chatterbox, does not support `speed` (mlx-audio has no `speed` parameter
-  for it at all) — a non-1.0 `--speed` fails the request the same way. It
-  speaks at 48 kHz, not the 24 kHz every other model here uses.
-- `indextts-1.5-mlx` (Apache-2.0) also needs no transcript and does not
-  support `speed` (no `speed` parameter, only `**kwargs`), same as
-  Chatterbox and VoxCPM2. Unlike every other model here, it does not
-  stream: mlx-audio generates the whole utterance before yielding
-  anything, so `-o -` still works but all the audio arrives in one piece
-  at the end rather than as it is produced.
-- `omnivoice-bf16-mlx` (**CC-BY-NC-4.0, non-commercial only** — k2-fsa's
+- `chatterbox-turbo-8bit-mlx` (MIT, English) clones from the reference alone
+  and reads tags in the text itself, passed through untouched: `[laugh]`,
+  `[chuckle]`, `[sigh]`, `[cough]`, `[clear throat]`, `[gasp]`, `[groan]`,
+  `[sniff]`, `[shush]`. It has no `exaggeration` or `cfg_weight`, ignores
+  `speed` as Chatterbox does, and needs the same one-time tokenizer fetch.
+- `voxcpm2-8bit-mlx` (Apache-2.0) needs no transcript and does not support
+  `speed` (a non-1.0 `--speed` fails the request). It speaks at 48 kHz, not
+  the 24 kHz every other model here uses.
+- `indextts-1.5-mlx` (Apache-2.0) needs no transcript and does not support
+  `speed`. It does not stream: all the audio arrives in one piece at the
+  end, so `-o -` still works but nothing plays until synthesis finishes.
+- `omnivoice-bf16-mlx` (**CC-BY-NC-4.0, non-commercial only**, per k2-fsa's
   README: "The pre-trained model is licensed under the CC-BY-NC due to
   constraints from its training data") clones or designs a voice like
-  VoxCPM2, speaks 646 languages, and does not support `speed` either. Like
-  IndexTTS, it does not stream — one chunk at the end, so `-o -` still
-  works but nothing plays until synthesis finishes. Its cloned voice's
-  transcript (`--text`) is not ignored: mlx-audio prepends it to the
-  spoken text, so it should still be the clip's exact words.
+  VoxCPM2, speaks 646 languages, does not support `speed`, and does not
+  stream. Its transcript (`--text`) is not ignored: mlx-audio prepends it to
+  the spoken text, so it should be the clip's exact words.
 - `breeze-tts-2-mlx` (**BreezeBlue Research and Non-Commercial License,
-  non-commercial only** — the LICENSE: "This Agreement permits research
-  and non-commercial use of the Model Materials free of charge... it does
-  not grant any commercial rights") clones or designs a voice like
-  VoxCPM2 and OmniVoice, and does not support `speed` either (no `speed`
-  parameter). Unlike those two, it does stream at the sidecar's usual
-  cadence with no extra handling needed.
+  non-commercial only**: "it does not grant any commercial rights") clones
+  or designs a voice, does not support `speed`, and streams normally.
 
 **Voice design**: `qwen3-tts-1.7b-voicedesign-mlx` has no voices; it makes
-one up from `--instructions`, which it requires:
+one up from `--instructions`, which it requires (the admin UI's **Design**
+tab does this with chips):
 
 ```sh
 naru-audio pull qwen3-tts-1.7b-voicedesign-mlx
@@ -277,8 +328,8 @@ naru-audio say "Good evening." -m qwen3-tts-1.7b-voicedesign-mlx \
 `say -v myvoice -m voxcpm2-8bit-mlx` (or `-m omnivoice-bf16-mlx` / `-m
 breeze-tts-2-mlx`) clones a voice added the same way as above, and `say -m
 voxcpm2-8bit-mlx --instructions "..."` designs one instead, with no voice
-named — the two are mutually exclusive per request, and a named cloned
-voice always wins if both are given.
+named. The two are mutually exclusive per request, and a named cloned voice
+always wins if both are given.
 
 ## Configuration
 
@@ -290,18 +341,24 @@ All state lives in `$NARU_AUDIO_HOME`, default `~/.naru-audio`:
 ├── catalog.d/      your own model manifests
 ├── models/<name>/  pulled models
 ├── voices/<name>/  cloned voices
+├── prep/           Sample Studio clips and samples
+├── recent/         the newest 50 synthesised replies
 ├── state/          measured memory use per model
 ├── tmp/            partial downloads and locks
 └── mlx/            the MLX sidecar's venv (Apple Silicon)
 ```
 
-`config.toml` (every key is optional):
+`config.toml` (every key is optional; the admin UI's default-model controls
+write `[defaults]` for you):
 
 ```toml
 [defaults]
 stt = "parakeet-tdt-0.6b-v2-int8"   # the model used when a request names none, or `default`
 tts = "kokoro-v1.0"
 keep_alive = "5m"                   # how long an idle model stays loaded; 0 unloads once idle, negative never
+
+[defaults.voices]
+"kokoro-v1.0" = "af_heart"          # a TTS model's default voice
 
 [memory]
 max_resident = "8GiB"               # budget for loaded models; idle ones are evicted, oldest first, to fit
@@ -330,7 +387,7 @@ there.
 `Host` header check; there is no authentication, so only do this on a
 network you trust. A request with an `Origin` header (a browser fetch or
 WebSocket) is allowed only when it names exactly the `Host` the request came
-in on — same-origin — and that `Host` is itself allowed; `--allow-remote`
+in on (same-origin) and that `Host` is itself allowed; `--allow-remote`
 still requires the Origin/Host match. This is what lets the built-in
 `/admin` UI (served by this daemon, same origin) call the API from the
 browser; a page on any other site gets 403.
@@ -340,9 +397,6 @@ browser; a page on any other site gets 403.
 ```sh
 curl http://127.0.0.1:7870/health
 curl http://127.0.0.1:7870/v1/models
-curl http://127.0.0.1:7870/v1/audio/speech -H 'Content-Type: application/json' \
-  -d '{"model":"kokoro-v1.0","input":"Hello there.","voice":"af_heart"}' -o speech.wav
-curl http://127.0.0.1:7870/v1/audio/transcriptions -F file=@speech.wav -F model=default
 ```
 
 | Route | Purpose |
@@ -353,11 +407,13 @@ curl http://127.0.0.1:7870/v1/audio/transcriptions -F file=@speech.wav -F model=
 | `GET /v1/audio/transcriptions/stream` | WebSocket streaming STT. |
 | `POST /v1/audio/speech` | Text in, streamed `wav` or `pcm` out. |
 | `GET`/`POST /v1/audio/voices`, `GET`/`PATCH`/`DELETE /v1/audio/voices/{name}` | List, add, export, rename/update and remove cloned and designed voices. |
-| `GET`/`POST /api/voices/{model}/{voice}/sample`, `POST /api/voices/preview` | A voice's own or a cached (`GET`) or freshly generated and cached (`POST`) sample clip; a one-off preview from an uploaded clip. |
+| `GET`/`POST /api/voices/{model}/{voice}/sample`, `POST /api/voices/preview` | A voice's cached (`GET`) or freshly generated and cached (`POST`) sample clip; a one-off preview from an uploaded clip. |
+| `/v1/audio/prep/*`, `/v1/audio/samples*` | Sample Studio: clips, transcripts, renders, projects and finished samples. The admin UI's own API. |
 | `POST /api/pull`, `DELETE /api/models/{name}` | Pull (NDJSON progress) and remove models. |
-| `GET`/`DELETE /api/pulls/{name}` | List pulls in progress; cancel one. |
+| `GET /api/pulls`, `DELETE /api/pulls/{name}` | List pulls in progress; cancel one. |
 | `GET /api/ps`, `POST /api/load` | Loaded models; warm or unload one. |
 | `GET`/`PUT /api/defaults` | The live default STT/TTS model and each TTS model's default voice. |
+| `GET /admin` | The web admin UI. |
 
 Errors use OpenAI's envelope, `{"error":{"message","type","code","param"}}`.
 Fields, extensions and every error code are in
@@ -388,13 +444,14 @@ It calls `GET /health` on `$NARU_AUDIO_URL` and exits:
 | Service won't stay up | Read `$(brew --prefix)/var/log/naru-audio.log`. |
 | `cannot listen on 127.0.0.1:7870` | Something else holds the port; use `--listen 127.0.0.1:PORT` (and `NARU_AUDIO_URL` for the clients). |
 | `refusing to listen on non-loopback address … without --allow-remote` | Add `--allow-remote`, after reading [Network access](#configuration). |
-| HTTP 403 `forbidden_origin` | Browsers are refused by design; call the daemon from a server-side process. |
+| HTTP 403 `forbidden_origin` | A browser page on another origin called the daemon (the admin UI at `/admin` is same-origin and fine). Call it from a server-side process, or open the page from the daemon itself. |
 | HTTP 503 `backend_unavailable` on an MLX model | Not Apple Silicon, or the sidecar is not set up: run `naru-audio mlx setup`, then `naru-audio mlx status`. |
 | `` `uv` is not on PATH `` | `brew install uv`, then `naru-audio mlx setup` again. |
 | Log line `mlx_env_stale` after an upgrade | The sidecar's dependencies changed: run `naru-audio mlx setup`. |
 | `/health` reports running under Rosetta | You installed the x86_64 build on Apple Silicon; install the arm64 one. |
 | HTTP 507 `insufficient_memory` | Loaded models are busy and the next one does not fit: raise `[memory] max_resident` or use a smaller model. |
 | A model fails to load after files were changed | `naru-audio verify NAME`; if it fails, `naru-audio rm NAME` and pull it again. |
+| Sample Studio says `model_not_pulled` | Pull the model it names (Spleeter, GTCRN, a diarization model) from the **Models** tab or `naru-audio pull`. |
 
 ## Uninstall
 
@@ -408,6 +465,28 @@ The log is left at `$(brew --prefix)/var/log/naru-audio.log`; delete it too
 if you like.
 
 ---
+
+## Using naru-audio from agents and scripts
+
+Everything above is scriptable. The relevant pieces:
+
+- **CLI client commands** talk to the daemon at `$NARU_AUDIO_URL` and need no
+  UI: `say TEXT -o FILE|-`, `transcribe FILE|-` (`--format json` prints one
+  JSON line per segment, then the transcript), `stream FILE` (replays a WAV
+  over the WebSocket in real time and prints events as JSON Lines; `--partials`,
+  `--frame-ms`, `--speed`), `ps`, `list`, `health`. Every command has `--help`.
+- **Exit codes** of `health`: 0 ready, 3 not running, 4 default model not
+  ready. Branch on these rather than parsing text.
+- **HTTP**: stock OpenAI clients work against `http://127.0.0.1:7870/v1`.
+  Discover capabilities per model with `GET /v1/models` (`x_*` fields) rather
+  than hard-coding them. Errors carry a stable `error.code`.
+- **No downloads behind your back**: a missing model is HTTP 409
+  `model_not_pulled`; the daemon never pulls on its own. Pull with
+  `naru-audio pull NAME` or `POST /api/pull`.
+- Never log audio or transcript text.
+
+The full spec (API, error codes, registry, memory budget, sidecar protocol)
+is [docs/design.md](docs/design.md).
 
 ## Building from source
 
@@ -423,7 +502,9 @@ cargo build --release
 ```
 
 The MLX backend is compiled in only for `aarch64-apple-darwin`. No Python
-is needed to build; the sidecar's files are embedded in the binary.
+is needed to build; the sidecar's files and the admin UI are embedded in the
+binary. `./start.sh` builds a release binary and runs `serve` with any
+arguments you pass.
 
 ## Repository layout
 
@@ -431,12 +512,14 @@ is needed to build; the sidecar's files are embedded in the binary.
 src/
   main.rs            CLI (clap): serve and every subcommand
   server.rs          HTTP router, Host/Origin guards, health, models, registry routes
-  server/            transcriptions, speech and voices, WebSocket streaming
+  server/            transcriptions, speech and voices, WebSocket streaming, Sample Studio API, /admin
+  admin/             the buildless admin UI (index.html, admin.css, js/*.mjs), embedded at build time
+  prep/              Sample Studio: separation, denoise, diarization, edit pipeline
   registry.rs        pull, verify, remove; registry/manifest.rs parses catalog TOML
   manager.rs         default models, config.toml, keep-alive, memory budget
   profile.rs         hardware profile (RAM, arch, Rosetta)
   backend.rs         which backends can run here; loads STT/TTS models
-  stt/  tts/         sherpa-onnx and MLX engines, VAD, hotwords, leveller
+  stt/  tts/         sherpa-onnx and MLX engines, VAD, speech gate, hotwords, leveller
   mlx.rs, mlx/       `mlx setup|status` and the sidecar process
   voices.rs          cloned voices
   log.rs, error.rs   log lines and rotation; the error envelope
