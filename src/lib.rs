@@ -6,6 +6,8 @@ pub mod log;
 pub mod manager;
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 pub mod mlx;
+#[cfg(all(windows, target_env = "msvc"))]
+mod msvc_stl_compat;
 pub mod prep;
 pub mod profile;
 pub mod registry;

@@ -13,6 +13,8 @@
 //! generate call (and, cold, also from process start); for kokoro-rs from spawn
 //! to the first PCM bytes after the WAV header.
 
+#[cfg(all(windows, target_env = "msvc"))]
+use naru_audio as _; // links the STL shim (build.rs)
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -59,6 +61,19 @@ fn threads() -> i32 {
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get() as i32))
 }
 
+#[cfg(unix)]
+use libc::{RUSAGE_CHILDREN, RUSAGE_SELF};
+#[cfg(not(unix))]
+const RUSAGE_SELF: i32 = 0;
+#[cfg(not(unix))]
+const RUSAGE_CHILDREN: i32 = -1;
+
+#[cfg(not(unix))]
+fn max_rss_bytes(_who: i32) -> u64 {
+    0
+}
+
+#[cfg(unix)]
 fn max_rss_bytes(who: i32) -> u64 {
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     unsafe { libc::getrusage(who, &mut ru) };
@@ -311,7 +326,7 @@ fn sherpa(dir: &str, voice: &str, mode: &str, trials: usize) {
                 "ttfa_s": r.ttfa,
                 "ttfa_from_start_s": if trial == 0 { Some(load_s + r.ttfa) } else { None },
                 "wall_s": r.wall, "audio_s": r.audio_s, "rtf": r.wall / r.audio_s,
-                "max_rss_mb": max_rss_bytes(libc::RUSAGE_SELF) as f64 / 1048576.0,
+                "max_rss_mb": max_rss_bytes(RUSAGE_SELF) as f64 / 1048576.0,
                 "lead_s": lead, "trail_s": trail,
                 "pieces": r.pieces.iter().map(|(n, l, t)| json!([*n as f64 / RATE as f64, l, t])).collect::<Vec<_>>(),
             })
@@ -366,7 +381,7 @@ fn kokoro(voice: &str) {
         json!({
             "engine": "kokoro-rs", "voice": voice,
             "ttfa_from_start_s": ttfa, "wall_s": wall, "audio_s": audio_s, "rtf": wall / audio_s,
-            "max_rss_mb": max_rss_bytes(libc::RUSAGE_CHILDREN) as f64 / 1048576.0,
+            "max_rss_mb": max_rss_bytes(RUSAGE_CHILDREN) as f64 / 1048576.0,
             "lead_s": lead, "trail_s": trail,
         })
     );

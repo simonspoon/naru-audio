@@ -64,11 +64,15 @@ fn model_home() -> Option<tempfile::TempDir> {
         eprintln!("skip: {message}");
         return None;
     }
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    #[cfg(windows)]
+    use std::os::windows::fs::symlink_dir as symlink;
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("models")).unwrap();
     for entry in std::fs::read_dir(home.join("models")).unwrap() {
         let entry = entry.unwrap();
-        std::os::unix::fs::symlink(
+        symlink(
             entry.path(),
             dir.path().join("models").join(entry.file_name()),
         )
