@@ -188,7 +188,7 @@ fn asset_response(content_type: &'static str, bytes: &'static [u8]) -> Response 
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; connect-src 'self' ws: wss:",
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' blob:; connect-src 'self'",
         ),
     );
     resp
@@ -305,6 +305,28 @@ mod tests {
                 .unwrap()
                 .contains("default-src 'self'")
         );
+    }
+
+    #[tokio::test]
+    async fn csp_connect_src_is_self_only() {
+        let req = Request::get("/admin")
+            .header(axum::http::header::HOST, "127.0.0.1:7870")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        let csp = resp
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let connect = csp
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("connect-src"))
+            .unwrap();
+        assert_eq!(connect, "connect-src 'self'");
+        assert!(!csp.split_whitespace().any(|t| t == "ws:" || t == "wss:"));
     }
 
     /// Every `src=`, `href=` and `import ... from` in an HTML/JS/CSS asset
