@@ -320,6 +320,16 @@ impl Manifest {
             .unwrap_or_default()
     }
 
+    /// Whether the model decodes per-request hotwords: an STT model on the
+    /// sherpa-onnx backend that derives `bpe.vocab` (the tokenizer
+    /// `decode_with_hotwords` needs configured at construction, see
+    /// `stt::engine`). MLX STT backends ignore hotwords.
+    pub fn hotwords(&self) -> bool {
+        self.model.kind == Kind::Stt
+            && self.model.backend == "sherpa-onnx"
+            && self.derive().iter().any(|d| d == BPE_VOCAB)
+    }
+
     /// `backend.<model.backend>.clone`: the model speaks in the cloned
     /// voices under `$NARU_AUDIO_HOME/voices/` (`crate::voices`).
     pub fn clones(&self) -> bool {

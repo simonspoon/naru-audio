@@ -227,6 +227,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         "x_default",
         "x_design",
         "x_design_voice_model",
+        "x_hotwords",
         "x_instruct",
         "x_kind",
         "x_languages",
@@ -1007,6 +1008,22 @@ async fn v1_models_names_cloning_and_voice_design_capability() {
 
     // A non-TTS model has no `prompt_format` table at all: `null`.
     assert_eq!(get("silero-vad")["x_prompt_format"], Value::Null);
+}
+
+/// `x_hotwords` is true only for an STT model that decodes per-request
+/// hotwords (sherpa-onnx with a derived `bpe.vocab`), false everywhere else.
+#[tokio::test]
+async fn v1_models_advertises_hotword_support() {
+    let dir = home(&[]);
+    let (status, body) = get_json(dir.path(), "/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let data = body["data"].as_array().unwrap();
+    let get = |id: &str| data.iter().find(|m| m["id"] == id).unwrap();
+
+    assert_eq!(get("parakeet-tdt-0.6b-v2-int8")["x_hotwords"], true);
+    assert_eq!(get("parakeet-tdt-0.6b-v2-mlx")["x_hotwords"], false);
+    assert_eq!(get("kokoro-v1.0")["x_hotwords"], false);
+    assert_eq!(get("silero-vad")["x_hotwords"], false);
 }
 
 #[tokio::test]

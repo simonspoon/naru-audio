@@ -350,6 +350,8 @@ async fn models(
                         // `exaggeration`) reads style guidance; `null` when
                         // there is nothing to declare.
                         "x_prompt_format": e.manifest.prompt_format(),
+                        // STT only: the model decodes per-request hotwords.
+                        "x_hotwords": e.manifest.hotwords(),
                     })
                 })
                 .collect(),
