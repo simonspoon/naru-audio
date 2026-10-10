@@ -239,6 +239,22 @@ pub struct PromptFormatInline {
     pub example: Option<String>,
 }
 
+/// Kwargs `synth()` in `mlx/naru_audio_mlx/__main__.py` sets itself, so a
+/// knob of the same name would clobber them (`kwargs.update(knobs)`) or
+/// raise a duplicate-kwarg error in `model.generate(...)`. `exaggeration`
+/// is deliberately absent: Chatterbox's knob of that name overrides the
+/// same dial on purpose. Applies to the `mlx` backend only.
+const RESERVED_KNOB_NAMES: &[&str] = &[
+    "ref_audio",
+    "ref_text",
+    "instruct",
+    "text",
+    "voice",
+    "speed",
+    "stream",
+    "streaming_interval",
+];
+
 /// One generation knob within [`PromptFormat`]. Every knob declares
 /// `min`, `max` and `default` (naru task 1458: `/v1/audio/speech` and
 /// `POST /api/voices/preview` validate a request's `knobs` against them);
@@ -520,6 +536,21 @@ impl Manifest {
                     "voice `{}` reference `{r}` is not a [[file]]",
                     v.id
                 ));
+            }
+        }
+
+        // Only the MLX worker merges knobs into `generate` kwargs; sherpa-onnx
+        // (Kokoro's `speed`) reads them itself.
+        if self.model.backend == "mlx"
+            && let Some(pf) = self.prompt_format()
+        {
+            for k in &pf.knobs {
+                if RESERVED_KNOB_NAMES.contains(&k.name.as_str()) {
+                    return Err(format!(
+                        "model `{name}` knob `{}` collides with a reserved generate kwarg",
+                        k.name
+                    ));
+                }
             }
         }
 
@@ -1224,6 +1255,21 @@ mod tests {
                     k.name
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_knob_named_after_a_reserved_kwarg_is_rejected_naru_1460() {
+        let text = include_str!("../../catalog/chatterbox-tts-8bit-mlx.toml").replace("\r\n", "\n");
+        assert!(Manifest::parse(&text, "chatterbox").is_ok());
+        for reserved in ["ref_audio", "speed"] {
+            let bad = text.replace("name = \"cfg_weight\"", &format!("name = \"{reserved}\""));
+            assert_ne!(bad, text);
+            let err = Manifest::parse(&bad, "chatterbox").unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("knob `{reserved}`")) && err.contains("chatterbox-tts"),
+                "{err}"
+            );
         }
     }
 
