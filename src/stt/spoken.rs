@@ -63,8 +63,15 @@ pub fn annotate(words: &[Word]) -> Vec<SpokenWord> {
             .text
             .strip_prefix('.')
             .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+        // A thousands group cut at its comma: ",000" or ",000," (exactly 3 digits).
+        let group = w.text.strip_prefix(',').is_some_and(|rest| {
+            let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            digits == 3 && rest[digits..].chars().all(is_trail)
+        });
         match joined.last_mut() {
-            Some(prev) if fraction && prev.text.ends_with(|c: char| c.is_ascii_digit()) => {
+            Some(prev)
+                if (fraction || group) && prev.text.ends_with(|c: char| c.is_ascii_digit()) =>
+            {
                 prev.text.push_str(&w.text);
                 prev.end = w.end;
             }
@@ -567,6 +574,38 @@ mod tests {
         );
         assert_eq!((words[1].start, words[1].end), (1.0, 2.5));
         assert_eq!(words[1].text, "$2.50,");
+    }
+
+    #[test]
+    fn a_thousands_group_cut_at_its_comma_is_joined() {
+        let w = |start: f64, text: &str| Word {
+            start,
+            end: start + 0.5,
+            text: text.to_string(),
+            confidence: None,
+        };
+        let words = annotate(&[w(1.0, "3"), w(2.0, ",000")]);
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text, "3,000");
+        assert_eq!(words[0].spoken, "three thousand");
+        assert_eq!((words[0].start, words[0].end), (1.0, 2.5));
+
+        let words = annotate(&[w(0.0, "12"), w(1.0, ",500")]);
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].spoken, "twelve thousand five hundred");
+
+        let words = annotate(&[w(0.0, "3"), w(1.0, ",000,")]);
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text, "3,000,");
+        assert_eq!(words[0].spoken, "three thousand,");
+
+        let words = annotate(&[w(0.0, "1"), w(1.0, ",000"), w(2.0, ",000")]);
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text, "1,000,000");
+        assert_eq!(words[0].spoken, "one million");
+
+        let words = annotate(&[w(0.0, "3"), w(1.0, ",50")]);
+        assert_eq!(words.len(), 2);
     }
 
     #[test]
