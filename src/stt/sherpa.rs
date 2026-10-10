@@ -103,19 +103,21 @@ impl SttModel for SherpaStt {
     /// reports pieces like `" He"`, `"ll"`, `"o"`, `" there"` — the
     /// SentencePiece `\u{2581}` marker `tokens.txt` uses is already
     /// rendered back to an ordinary space at this layer, not passed
-    /// through raw), each word's timestamp offset by its utterance's
+    /// through raw), each word's timestamp offset by its decode slice's
     /// start.
     fn decode_words(&self, pcm16k: &[f32], vad: Option<&VadConfig>) -> Result<Vec<Word>, SttError> {
         let rate = TARGET_SAMPLE_RATE as f64;
         let mut words = Vec::new();
         for (span, from, to) in utterances(pcm16k, &self.vad_model, self.gate.as_ref(), vad)? {
             let recognized = self.recognizer.decode_with_tokens(&pcm16k[from..to])?;
-            let utt_start = span.start as f64 / rate;
+            // Token times count from the decoded slice's start (`from`, the
+            // previous cut), not the VAD span's start.
+            let slice_start = from as f64 / rate;
             let utt_end = (span.start + span.len) as f64 / rate;
             words.extend(merge_words(
                 &recognized.tokens,
                 &recognized.timestamps,
-                utt_start,
+                slice_start,
                 utt_end,
             ));
         }
@@ -179,7 +181,7 @@ fn merge_words(tokens: &[String], timestamps: &[f32], utt_start: f64, utt_end: f
     if let Some(b) = building {
         words.push(Word {
             start: b.start,
-            end: utt_end,
+            end: utt_end.max(b.start),
             text: b.text,
             confidence: None,
         });
@@ -296,6 +298,14 @@ mod merge_words_tests {
         assert!((words[1].start - 10.6).abs() < 1e-6);
         assert!((words[1].end - 11.0).abs() < 1e-6);
         assert_eq!(words[1].text, "there");
+    }
+
+    #[test]
+    fn last_word_never_ends_before_it_starts() {
+        // A last token past the utterance's end (naru task 1476).
+        let words = merge_words(&[tok(" a")], &[2.0], 0.0, 1.0);
+        assert_eq!(words.len(), 1);
+        assert!(words[0].end >= words[0].start);
     }
 
     #[test]

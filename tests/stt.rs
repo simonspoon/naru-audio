@@ -297,3 +297,33 @@ fn speech_gate_refuses_a_clear_non_speech_sound() {
     assert!(gate.allows(&[0.1; 100]));
     assert!(gate.allows(&vec![0.0; 16_000 * 11]));
 }
+
+/// naru task 1476: a word's time counts from its decode slice's start, not
+/// the VAD span's, so with leading silence and gaps the words must still be
+/// ordered and inside the buffer.
+#[test]
+fn word_times_are_monotonic_and_within_the_buffer() {
+    let Some(model) = model() else { return };
+    let speech = samples("plain.wav");
+    let gap = vec![0.0f32; 16_000];
+    let mut pcm = gap.clone();
+    for i in 0..3 {
+        if i > 0 {
+            pcm.extend_from_slice(&gap);
+        }
+        pcm.extend_from_slice(&speech);
+    }
+    let duration = pcm.len() as f64 / 16_000.0;
+    let words = model
+        .decode_words(&pcm, Some(&VadConfig::default()))
+        .expect("decode_words");
+    eprintln!("words: {words:?}");
+    assert!(!words.is_empty());
+    let mut prev = 0.0;
+    for w in &words {
+        assert!(w.start >= prev, "word {w:?} starts before {prev}");
+        assert!(w.end >= w.start, "word {w:?} ends before it starts");
+        assert!(w.end <= duration + 0.05, "word {w:?} past {duration}");
+        prev = w.start;
+    }
+}
