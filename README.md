@@ -126,6 +126,8 @@ request.
 | `pocket-tts-int8` | TTS (English), **non-commercial** | sherpa-onnx | 0.20 GB |
 | `parakeet-tdt-0.6b-v2-mlx` | STT (English) | mlx | 2.5 GB |
 | `whisper-large-v3-turbo-mlx` | STT, 99 languages, word timestamps | mlx | 1.6 GB |
+| `qwen3-asr-1.7b-4bit-mlx` | STT, 30 languages | mlx | 1.6 GB |
+| `qwen3-asr-0.6b-8bit-mlx` | STT, 30 languages | mlx | 1.0 GB |
 | `qwen3-tts-0.6b-mlx` | TTS, preset voices | mlx | 2.0 GB |
 | `qwen3-tts-0.6b-base-mlx` | TTS, speaks cloned voices | mlx | 2.0 GB |
 | `qwen3-tts-1.7b-base-mlx` | TTS, speaks cloned voices | mlx | 3.1 GB |

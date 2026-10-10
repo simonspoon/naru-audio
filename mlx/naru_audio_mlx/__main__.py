@@ -63,6 +63,11 @@ def handle(header, samples):
             # float16, the dtype `mlx_whisper.transcribe` decodes in.
             model = load_model(header["dir"], dtype=mx.float16)
             answer = {}
+        elif header.get("model", "").startswith("qwen3-asr"):
+            from mlx_audio.stt.utils import load_model
+
+            model = load_model(Path(header["dir"]))
+            answer = {}
         else:
             from parakeet_mlx import from_pretrained
 
@@ -82,6 +87,8 @@ def handle(header, samples):
         model = loaded(header)
         if header["model"].startswith("whisper"):
             return transcribe_whisper(model, header, samples)
+        if header["model"].startswith("qwen3-asr"):
+            return transcribe_qwen3_asr(model, samples)
         from parakeet_mlx.audio import get_logmel
 
         audio = mx.array(np.frombuffer(samples or b"", dtype="<f4"))
@@ -112,6 +119,21 @@ def loaded(header):
 # Whisper continues the style of its prompt, so a prompt full of fillers and
 # false starts makes it transcribe them instead of cleaning them up.
 VERBATIM_PROMPT = "Um, uh, so, I- I mean, like, you know, hmm. Uh-huh."
+
+
+def transcribe_qwen3_asr(model, samples):
+    """One utterance through mlx-audio's Qwen3-ASR. The language is always
+    auto-detected: the model names languages in English ("English"), not
+    by the request's ISO code. No word timestamps, no hotwords."""
+    audio = mx.array(np.frombuffer(samples or b"", dtype="<f4"))
+    # Audio under 1 s is zero-padded to a full chunk and decoded; only
+    # empty audio has nothing to decode.
+    if audio.size == 0:
+        return {"segments": []}
+    result = model.generate(audio)
+    duration = audio.size / 16000
+    text = result.text.strip()
+    return {"segments": [{"start": 0.0, "end": duration, "text": text}] if text else []}
 
 
 def transcribe_whisper(model, header, samples):

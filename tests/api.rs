@@ -33,6 +33,8 @@ const MLX: &[&str] = &[
     "indextts-1.5-mlx",
     "omnivoice-bf16-mlx",
     "parakeet-tdt-0.6b-v2-mlx",
+    "qwen3-asr-0.6b-8bit-mlx",
+    "qwen3-asr-1.7b-4bit-mlx",
     "qwen3-tts-0.6b-base-mlx",
     "qwen3-tts-0.6b-mlx",
     "qwen3-tts-1.7b-base-mlx",

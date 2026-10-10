@@ -51,6 +51,14 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/pocket-tts-int8.toml"),
     ),
     (
+        "qwen3-asr-0.6b-8bit-mlx.toml",
+        include_str!("../../catalog/qwen3-asr-0.6b-8bit-mlx.toml"),
+    ),
+    (
+        "qwen3-asr-1.7b-4bit-mlx.toml",
+        include_str!("../../catalog/qwen3-asr-1.7b-4bit-mlx.toml"),
+    ),
+    (
         "qwen3-tts-0.6b-base-mlx.toml",
         include_str!("../../catalog/qwen3-tts-0.6b-base-mlx.toml"),
     ),
@@ -641,6 +649,8 @@ mod tests {
                 "parakeet-tdt-0.6b-v2-int8",
                 "parakeet-tdt-0.6b-v2-mlx",
                 "pocket-tts-int8",
+                "qwen3-asr-0.6b-8bit-mlx",
+                "qwen3-asr-1.7b-4bit-mlx",
                 "qwen3-tts-0.6b-base-mlx",
                 "qwen3-tts-0.6b-mlx",
                 "qwen3-tts-1.7b-base-mlx",
@@ -1043,6 +1053,8 @@ mod tests {
         for name in [
             "parakeet-tdt-0.6b-v2-int8",
             "parakeet-tdt-0.6b-v2-mlx",
+            "qwen3-asr-0.6b-8bit-mlx",
+            "qwen3-asr-1.7b-4bit-mlx",
             "silero-vad",
             "whisper-large-v3-turbo-mlx",
         ] {
