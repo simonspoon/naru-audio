@@ -438,13 +438,19 @@ pub fn speech_secs(pcm: &[f32], vad_model: &Path) -> Result<f64, PrepError> {
     Ok(samples as f64 / TARGET_SAMPLE_RATE as f64)
 }
 
-/// `pcm` from the first span's start to the last span's end, widened by
-/// `pad` samples each side and clamped to the buffer; `pcm` unchanged if
-/// there are no spans.
+/// Least lead-in, in ms, [`trim_to_spans`] keeps before the first span: the
+/// VAD can miss a quiet clip-initial filler ("Um"), so its first span may
+/// start up to ~500 ms after the real speech does (naru task 1572).
+const MIN_LEAD_PAD_MS: usize = 500;
+
+/// `pcm` from the first span's start, widened by `max(pad, MIN_LEAD_PAD_MS)`
+/// samples, to the last span's end, widened by `pad`; both clamped to the
+/// buffer; `pcm` unchanged if there are no spans.
 pub fn trim_to_spans(pcm: &[f32], spans: &[(usize, usize)], pad: usize) -> Vec<f32> {
     match (spans.first(), spans.last()) {
         (Some(&(from, _)), Some(&(_, to))) => {
-            let from = from.saturating_sub(pad).min(pcm.len());
+            let lead = pad.max(MIN_LEAD_PAD_MS * TARGET_SAMPLE_RATE as usize / 1000);
+            let from = from.saturating_sub(lead).min(pcm.len());
             let to = to.saturating_add(pad).clamp(from, pcm.len());
             pcm[from..to].to_vec()
         }
@@ -545,4 +551,32 @@ fn list_ids(dir: &Path, meta_name: &str) -> Vec<String> {
         .collect();
     ids.sort();
     ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_keeps_at_least_500ms_of_lead_and_trail_is_unchanged() {
+        let pcm: Vec<f32> = (0..16_000 * 5).map(|i| i as f32).collect();
+        let first = (0.71 * 16_000.0) as usize;
+        let spans = [(first, 16_000 * 3), (16_000 * 3 + 100, 16_000 * 4)];
+        let out = trim_to_spans(&pcm, &spans, 0);
+        // Lead: 500 ms kept before 0.71 s -> starts at 0.21 s.
+        assert_eq!(out[0] as usize, first - 8_000);
+        assert!(out[0] as usize <= (0.21 * 16_000.0) as usize);
+        // Trail: ends exactly at the last span's end (pad 0).
+        assert_eq!(out.len(), 16_000 * 4 - (first - 8_000));
+        // A larger pad still wins on the lead and applies to the trail.
+        let out = trim_to_spans(&pcm, &spans, 10_000);
+        assert_eq!(out[0] as usize, first - 10_000);
+        assert_eq!(out.len(), 16_000 * 4 + 10_000 - (first - 10_000));
+    }
+
+    #[test]
+    fn trim_lead_is_clamped_to_the_clip_start() {
+        let pcm = vec![0.1f32; 16_000];
+        assert_eq!(trim_to_spans(&pcm, &[(1_000, 5_000)], 0).len(), 5_000);
+    }
 }

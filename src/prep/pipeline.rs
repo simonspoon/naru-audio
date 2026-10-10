@@ -776,7 +776,8 @@ mod tests {
         assert_eq!(out.len(), 1000);
         let chain = parse(json!([{"type": "trim_silence", "pad_ms": 0.25}]));
         let out = run(&chain, Select::All, vec![0.1; 1000], &mut NoModels).unwrap();
-        assert_eq!(out.len(), 100 + 4 + 4);
+        // Lead is floored at 500 ms (clamped to 0 here); trail keeps pad_ms.
+        assert_eq!(out.len(), 200 + 4);
     }
 
     #[test]
