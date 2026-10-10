@@ -1023,7 +1023,11 @@ async fn v1_models_advertises_hotword_support() {
     let get = |id: &str| data.iter().find(|m| m["id"] == id).unwrap();
 
     assert_eq!(get("parakeet-tdt-0.6b-v2-int8")["x_hotwords"], true);
-    assert_eq!(get("parakeet-tdt-0.6b-v2-mlx")["x_hotwords"], false);
+    // The MLX Parakeet is `platforms = macos-*` only, so `Registry::list`'s
+    // `runs_here()` filter drops it off macOS (e.g. the Linux CI runner).
+    if cfg!(target_os = "macos") {
+        assert_eq!(get("parakeet-tdt-0.6b-v2-mlx")["x_hotwords"], false);
+    }
     assert_eq!(get("kokoro-v1.0")["x_hotwords"], false);
     assert_eq!(get("silero-vad")["x_hotwords"], false);
 }
