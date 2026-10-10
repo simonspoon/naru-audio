@@ -1,0 +1,78 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # Static CRT (+crt-static) comes from .cargo/config.toml. MLX is
+      # aarch64-macOS only (cfg-gated), so a plain build is sherpa-only.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --bin naru-audio
+
+      - name: Smoke test
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD 'target\release\naru-audio.exe'
+
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw "naru-audio --version exited $LASTEXITCODE" }
+
+          # The static CRT must be linked in: no VCRUNTIME140 dependency.
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vsPath = & $vswhere -latest -products '*' -property installationPath
+          $dumpbin = Get-ChildItem -Path (Join-Path $vsPath 'VC\Tools\MSVC') -Recurse -Filter dumpbin.exe |
+            Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          $deps = & $dumpbin.FullName /dependents $exe | Out-String
+          Write-Host $deps
+          if ($deps -match 'VCRUNTIME140') { throw 'naru-audio.exe depends on VCRUNTIME140' }
+
+      - name: Stage binary
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $PWD 'dist'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          $name = 'naru-audio-windows-amd64.exe'
+          Copy-Item 'target\release\naru-audio.exe' (Join-Path $dist $name)
+          $hash = (Get-FileHash -Algorithm SHA256 (Join-Path $dist $name)).Hash.ToLower()
+          [System.IO.File]::WriteAllText((Join-Path $dist "$name.sha256"), "$hash  $name`n")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: naru-audio-windows-amd64
+          path: dist
+
+      - name: Attach to release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # release.yml's release job creates the release; wait for it.
+          $found = $false
+          for ($i = 0; $i -lt 90; $i++) {
+            gh release view $env:GITHUB_REF_NAME *> $null
+            if ($LASTEXITCODE -eq 0) { $found = $true; break }
+            Start-Sleep -Seconds 20
+          }
+          if (-not $found) { throw "release $env:GITHUB_REF_NAME did not appear within 30 minutes" }
+          gh release upload $env:GITHUB_REF_NAME (Get-ChildItem dist | ForEach-Object { $_.FullName }) --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
