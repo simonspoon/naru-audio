@@ -101,6 +101,11 @@ const ASSETS: &[Asset] = &[
         bytes: include_bytes!("../admin/js/clone.mjs"),
     },
     Asset {
+        path: "js/design-models.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../admin/js/design-models.mjs"),
+    },
+    Asset {
         path: "js/design.mjs",
         content_type: "text/javascript; charset=utf-8",
         bytes: include_bytes!("../admin/js/design.mjs"),

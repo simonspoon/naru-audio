@@ -1,43 +1,17 @@
 // Design tab (mockup: na-admin-design): pick a design-capable model, build
-// a description from quick-pick chips (formatted per that model's
-// `x_prompt_format.style`), generate three takes of a shared test line,
+// a description with that model's own wizard form (fields, presets and tips
+// from design-models.mjs, with a live preview of the exact `instructions`
+// string), generate three takes of a shared test line,
 // pick one, name it, and save it as a voice on `x_design_voice_model` (the
 // model that can actually hold the voice — VoiceDesign models can't clone
 // themselves).
 
 import { getJson, request } from './api.mjs';
 import { el, toast, playButton, waveformSvg, peaks, decodeWav } from './ui.mjs';
+import { designModel } from './design-models.mjs';
 
 const TEST_LINE = 'Warm coffee, a quiet morning, and nothing on fire yet.';
 const RECENT_KEY = 'naru-audio-design-recent';
-const CHIP_GROUPS = [
-  { key: 'voice', label: 'Voice', options: ['male', 'female', 'neutral'] },
-  { key: 'age', label: 'Age', options: ['young', 'adult', 'older'] },
-  { key: 'pitch', label: 'Pitch', options: ['low', 'mid', 'high'] },
-  { key: 'pace', label: 'Pace', options: ['slow', 'steady', 'quick'] },
-  { key: 'mood', label: 'Mood', options: ['warm', 'dry', 'bright', 'gravelly'] },
-];
-
-/** Builds the instructions text from the quick-pick attributes, formatted
- * per the model's declared `x_prompt_format.style`. `attributes` models
- * get a plain key:value list; everything else (including the common
- * `free_text` style) gets a natural-language sentence, matching the
- * mockup. */
-function formatDescription(style, picks) {
-  const chosen = CHIP_GROUPS.filter((g) => picks[g.key]);
-  if (style === 'attributes') {
-    return chosen.map((g) => `${g.key}: ${picks[g.key]}`).join(', ');
-  }
-  const subject = [picks.age, picks.voice].filter(Boolean).join(' ') || 'voice';
-  const qualities = [
-    picks.pitch && `${picks.pitch} pitch`,
-    picks.pace && `${picks.pace} pace`,
-    picks.mood && `${picks.mood} tone`,
-  ].filter(Boolean);
-  let text = `A ${subject}`;
-  if (qualities.length) text += ` with a ${qualities.join(', ')}`;
-  return `${text}.`;
-}
 
 function recentPrompts() {
   try {
@@ -56,13 +30,18 @@ export function mount(view, params) {
   let disposed = false;
   let models = [];
   let selectedModel = params.model ?? null;
-  const picks = {};
+  let values = {};
   let takes = []; // {blob, buffer}
   let pickedIndex = null;
 
   const modelBar = el('div', { class: 'filt' });
-  const chipsWrap = el('div', {});
+  const notesWrap = el('div', {});
+  const presetsWrap = el('div', { class: 'chip-row wrap' });
+  const fieldsWrap = el('div', {});
+  const tagsWrap = el('div', { class: 'chip-row wrap' });
   const descBox = el('textarea', { class: 'inp', rows: 4 });
+  const previewBox = el('pre', { class: 'design-preview' });
+  const warnBox = el('div', { class: 'design-warn' });
   const takesGrid = el('div', { class: 'vg3' });
   const nameInput = el('input', { class: 'inp' });
   const saveHint = el('span', { style: 'color:var(--muted);font-size:13px' });
@@ -82,8 +61,20 @@ export function mount(view, params) {
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['2']),
       el('div', { style: 'flex:1;display:grid;grid-template-columns:1fr 1.2fr;gap:14px' }, [
-        el('div', {}, [el('div', { class: 'lab' }, ['Quick picks']), chipsWrap]),
-        el('div', {}, [el('div', { class: 'lab' }, ['Describe it · picks fill this in']), descBox]),
+        el('div', {}, [
+          el('div', { class: 'lab' }, ['Starter themes · fill the whole form']),
+          presetsWrap,
+          el('div', { class: 'lab', style: 'margin-top:10px' }, ['Quick picks']),
+          fieldsWrap,
+        ]),
+        el('div', {}, [
+          notesWrap,
+          el('div', { class: 'lab' }, ['Describe it · edit freely, form picks rewrite this']),
+          descBox,
+          el('div', { class: 'lab', style: 'margin-top:8px' }, ['Preview · exactly what is sent']),
+          previewBox,
+          warnBox,
+        ]),
       ]),
     ]),
     el('div', { class: 'step' }, [
@@ -113,6 +104,7 @@ export function mount(view, params) {
   const rightCard = el('div', { class: 'card' }, [
     el('h3', {}, ['Test line']),
     testLineInput,
+    tagsWrap,
     el('div', { style: 'color:var(--muted);font-size:13px;margin-top:8px' }, [
       'Every take speaks this line, so you compare like with like.',
     ]),
@@ -131,8 +123,10 @@ export function mount(view, params) {
             class: `chip${m.id === selectedModel ? ' on' : ''}`,
             onclick: () => {
               selectedModel = m.id;
+              values = {};
               renderModelBar();
               renderSaveHint();
+              renderModelUi();
             },
           },
           [m.id],
@@ -141,29 +135,152 @@ export function mount(view, params) {
     );
   }
 
-  function renderChips() {
-    chipsWrap.replaceChildren(
-      ...CHIP_GROUPS.map((g) =>
-        el('div', { class: 'chip-row' }, [
-          el('span', { class: 'lab' }, [g.label]),
-          ...g.options.map((opt) =>
-            el(
-              'span',
-              {
-                class: `chip${picks[g.key] === opt ? ' on' : ''}`,
-                onclick: () => {
-                  picks[g.key] = picks[g.key] === opt ? null : opt;
-                  renderChips();
-                  const model = models.find((m) => m.id === selectedModel);
-                  descBox.value = formatDescription(model?.x_prompt_format?.style, picks);
-                },
-              },
-              [opt],
-            ),
-          ),
-        ]),
+  function currentModel() {
+    const m = models.find((x) => x.id === selectedModel);
+    return designModel(selectedModel, m?.x_prompt_format?.hint);
+  }
+
+  /** Rebuilds the description from the form, then the preview. */
+  function applyForm() {
+    descBox.value = currentModel().build(values);
+    renderPreview();
+  }
+
+  function renderPreview() {
+    const dm = currentModel();
+    const text = descBox.value.trim();
+    descBox.placeholder = dm.placeholder ?? '';
+    const lines = [`instructions: ${JSON.stringify(text)}`];
+    if (selectedModel?.startsWith('voxcpm2')) {
+      lines.push(`spoken as:    (${text})${testLineInput.value}`);
+    }
+    previewBox.textContent = lines.join('\n');
+    const warnings = [...(dm.check ? dm.check(text) : [])];
+    if (dm.charLimit) {
+      const note = `${text.length}/${dm.charLimit} characters`;
+      if (text.length > dm.charLimit) warnings.push(`${note}: over the ${dm.charLimit}-character guideline.`);
+      else previewBox.textContent += `\n${note}`;
+    }
+    if (selectedModel?.startsWith('voxcpm2') && /^\(.*\)$/.test(text)) {
+      warnings.push('Remove the outer parentheses: the server adds them.');
+    }
+    warnBox.replaceChildren(...warnings.map((w) => el('div', {}, [`⚠ ${w}`])));
+  }
+
+  function renderNotes() {
+    const dm = currentModel();
+    const list = (items) => el('ul', { class: 'design-list' }, items.map((t) => el('li', {}, [t])));
+    notesWrap.replaceChildren(
+      el('div', { class: 'design-note' }, [
+        el('b', {}, [dm.label]),
+        ` ${dm.summary}`,
+        list(dm.tips),
+        dm.pitfalls?.length ? el('div', { class: 'lab', style: 'margin-top:6px' }, ['Pitfalls']) : null,
+        dm.pitfalls?.length ? list(dm.pitfalls) : null,
+        dm.license ? el('div', { class: 'design-license' }, [`Licence: ${dm.license}`]) : null,
+      ]),
+    );
+  }
+
+  function applyPreset(p) {
+    values = { ...p.values };
+    renderFields();
+    applyForm();
+    if (p.text) {
+      descBox.value = p.text;
+      renderPreview();
+    }
+    if (p.line) testLineInput.value = p.line;
+    renderPreview();
+  }
+
+  function renderPresets() {
+    presetsWrap.replaceChildren(
+      ...currentModel().presets.map((p) =>
+        el('span', { class: 'chip', onclick: () => applyPreset(p) }, [p.name]),
       ),
     );
+  }
+
+  function setValue(key, value) {
+    values[key] = value || null;
+    renderFields();
+    applyForm();
+  }
+
+  function renderFields() {
+    fieldsWrap.replaceChildren(
+      ...currentModel().fields.map((f) => {
+        let control;
+        if (f.type === 'select') {
+          control = el(
+            'select',
+            { class: 'inp design-select', onchange: (e) => setValue(f.key, e.target.value) },
+            [
+              el('option', { value: '' }, ['—']),
+              ...f.options.map((o) => el('option', { value: o, selected: values[f.key] === o }, [o])),
+            ],
+          );
+        } else if (f.type === 'text') {
+          control = el('input', {
+            class: 'inp',
+            value: values[f.key] ?? '',
+            placeholder: f.placeholder ?? '',
+            oninput: (e) => {
+              values[f.key] = e.target.value;
+              applyForm();
+            },
+          });
+        } else {
+          control = el(
+            'div',
+            { class: 'chip-row wrap', style: 'margin:0;flex:1' },
+            f.options.map((opt) =>
+              el(
+                'span',
+                {
+                  class: `chip${values[f.key] === opt ? ' on' : ''}`,
+                  onclick: () => setValue(f.key, values[f.key] === opt ? null : opt),
+                },
+                [opt],
+              ),
+            ),
+          );
+        }
+        return el('div', { class: 'chip-row design-field' }, [
+          el('span', { class: 'lab' }, [f.label]),
+          control,
+          f.hint ? el('span', { class: 'design-hint' }, [f.hint]) : null,
+        ]);
+      }),
+    );
+  }
+
+  function insertTag(tag) {
+    const i = testLineInput.selectionStart ?? testLineInput.value.length;
+    const j = testLineInput.selectionEnd ?? i;
+    const v = testLineInput.value;
+    testLineInput.value = `${v.slice(0, i)}${tag}${v.slice(j)}`;
+    testLineInput.focus();
+    testLineInput.setSelectionRange(i + tag.length, i + tag.length);
+    renderPreview();
+  }
+
+  function renderTags() {
+    const dm = currentModel();
+    tagsWrap.replaceChildren(
+      ...(dm.tags.length ? [el('span', { class: 'lab' }, [dm.tagLabel ?? 'Insert a tag'])] : []),
+      ...dm.tags.map((t) => el('span', { class: 'chip', onclick: () => insertTag(t.insert) }, [t.label])),
+    );
+  }
+
+  /** Re-renders everything that depends on the selected model. */
+  function renderModelUi() {
+    renderNotes();
+    renderPresets();
+    renderFields();
+    renderTags();
+    renderPreview();
   }
 
   function renderRecent() {
@@ -171,7 +288,14 @@ export function mount(view, params) {
       ...recentPrompts().map((p) =>
         el(
           'div',
-          { class: 'kv', style: 'cursor:pointer', onclick: () => (descBox.value = p) },
+          {
+            class: 'kv',
+            style: 'cursor:pointer',
+            onclick: () => {
+              descBox.value = p;
+              renderPreview();
+            },
+          },
           [el('span', {}, [p])],
         ),
       ),
@@ -280,9 +404,12 @@ export function mount(view, params) {
     if (!selectedModel && models.length) selectedModel = models[0].id;
     renderModelBar();
     renderSaveHint();
+    renderModelUi();
   }
 
-  renderChips();
+  descBox.addEventListener('input', renderPreview);
+  testLineInput.addEventListener('input', renderPreview);
+  renderModelUi();
   renderRecent();
   refresh();
   return () => {

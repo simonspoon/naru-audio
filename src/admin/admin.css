@@ -763,3 +763,21 @@ textarea.inp { resize: vertical; }
 .sw-handle.end::after { background: var(--magenta); box-shadow: 0 0 6px var(--magenta); }
 .sw-playhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #fff; pointer-events: none; z-index: 3; }
 .sw-status { color: var(--muted); font: 12px var(--font-mono); margin-top: 4px; }
+.chip-row.wrap { flex-wrap: wrap; }
+.chip-row.design-field { align-items: flex-start; }
+.design-field > .lab { padding-top: 3px; }
+.design-select { width: auto; min-width: 200px; }
+.design-hint { color: var(--muted); font-size: 12px; }
+.design-note { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+.design-list { margin: 4px 0 0; padding-left: 18px; }
+.design-license { margin-top: 6px; color: var(--amber); }
+.design-preview {
+  margin: 0;
+  padding: 8px 10px;
+  font: 12px var(--font-mono, monospace);
+  background: var(--surface-raised);
+  border-radius: var(--r-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.design-warn { color: var(--amber); font-size: 13px; margin-top: 6px; }
