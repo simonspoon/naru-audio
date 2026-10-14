@@ -28,6 +28,13 @@ CLONE_SAMPLING = {"temperature": 0.55, "top_p": 0.8, "top_k": 20}
 # interval, so the first audio is out after this much is generated.
 STREAMING_INTERVAL = 0.32
 
+# OmniVoice renders a fixed, estimated duration, so speech often runs to the
+# last sample (a hard cut, heard as a blip) and the decoder leaves a click
+# in the first few ms. Each clip loses this much at its edges and gets a
+# short fade over what is left (naru task 1922).
+EDGE_TRIM_MS = (20, 30)
+EDGE_FADE_MS = (10, 40)
+
 models = {}
 
 
@@ -202,6 +209,26 @@ def whisper_answer(result, words):
     return answer
 
 
+def trim_fade_edges(audio, sample_rate, trim_ms=EDGE_TRIM_MS, fade_ms=EDGE_FADE_MS):
+    """`audio` (1-D float) without its first `trim_ms[0]` and last
+    `trim_ms[1]` ms, then faded in over `fade_ms[0]` and out over
+    `fade_ms[1]` ms (linear). A clip too short to keep a sample after
+    both trims comes back unchanged."""
+    audio = np.asarray(audio, dtype=np.float32)
+    head, tail = (int(sample_rate * ms / 1000) for ms in trim_ms)
+    if len(audio) <= head + tail:
+        return audio
+    audio = audio[head : len(audio) - tail].copy()
+    fade_in, fade_out = (min(int(sample_rate * ms / 1000), len(audio)) for ms in fade_ms)
+    if fade_in:
+        audio[:fade_in] *= np.linspace(0.0, 1.0, fade_in, endpoint=False, dtype=np.float32)
+    if fade_out:
+        audio[len(audio) - fade_out :] *= np.linspace(
+            1.0, 0.0, fade_out, endpoint=False, dtype=np.float32
+        )
+    return audio
+
+
 def synth(model, header):
     """The chunks of `header["text"]` as f32le bytes, generated one at a
     time as `serve` asks for them."""
@@ -276,7 +303,10 @@ def synth(model, header):
                 streaming_interval=STREAMING_INTERVAL,
                 **kwargs,
             ):
-                yield np.asarray(result.audio, dtype="<f4").tobytes()
+                wav = np.asarray(result.audio, dtype="<f4")
+                if model_name.startswith("omnivoice"):
+                    wav = trim_fade_edges(wav, getattr(result, "sample_rate", 24000))
+                yield wav.astype("<f4").tobytes()
 
 
 # A sentence shorter than this many characters joins its neighbour.

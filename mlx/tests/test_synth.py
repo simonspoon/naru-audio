@@ -17,6 +17,7 @@ from naru_audio_mlx.__main__ import (
     split_chunks,
     split_sentences,
     synth,
+    trim_fade_edges,
 )
 
 REFERENCE = mx.full((1, 16, 3), 7)
@@ -472,6 +473,33 @@ class IndexTTSLoadDir(unittest.TestCase):
             self.assertTrue(second.exists())
         self.assertFalse(first_path.exists())
         self.assertFalse(second.exists())
+
+
+class TrimFadeEdges(unittest.TestCase):
+    def test_trims_and_fades_both_edges(self):
+        # 1 kHz: one sample per ms.
+        out = trim_fade_edges(np.ones(200), 1000, trim_ms=(10, 20), fade_ms=(5, 8))
+        self.assertEqual(len(out), 170)
+        self.assertEqual(out[0], 0.0)
+        self.assertLess(out[1], out[4])
+        self.assertEqual(out[5], 1.0)
+        self.assertEqual(out[-9], 1.0)
+        self.assertGreater(out[-1], 0.0)
+        self.assertLess(out[-1], out[-8])
+
+    def test_clip_too_short_is_unchanged(self):
+        out = trim_fade_edges(np.full(30, 0.5), 1000, trim_ms=(10, 20))
+        self.assertEqual(out.tolist(), [0.5] * 30)
+
+    def test_omnivoice_synth_applies_it(self):
+        class Long(OmniVoice):
+            def generate(self, text, **kwargs):
+                yield type("Result", (), {"audio": mx.ones((24000,)), "sample_rate": 24000})
+
+        out = audio(Long(), {"model": "omnivoice-bf16-mlx"})
+        self.assertEqual(len(out), 24000 - 480 - 720)
+        self.assertEqual(out[0], 0.0)
+        self.assertEqual(out[len(out) // 2], 1.0)
 
 
 if __name__ == "__main__":
