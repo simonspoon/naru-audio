@@ -531,6 +531,7 @@ tests/               integration tests; tests/fixtures/ holds audio fixtures
 examples/            tts_spike.rs, the benchmark behind docs/tts-spike.md
 docs/                design.md (the spec), tts-spike.md and its corpus
 Formula/             the Homebrew formula
+scripts/             launchd.sh + launchd-check.sh (opt-in launchd agent, docs/launchd.md)
 .github/workflows/   ci.yml, release.yml
 ```
 

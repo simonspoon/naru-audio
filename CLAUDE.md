@@ -12,3 +12,4 @@ These answer "where does X live". Check here first instead of running a filesyst
   - Rust usage: `src/tts/sherpa.rs`, `src/stt/sherpa.rs`
 - Cargo crate docs: `cargo doc --no-deps --open`, or read source under `~/.cargo/registry/src/index.crates.io-*/<crate>-<ver>/` (`target/doc` does not exist until `cargo doc` runs)
 - Build docs: `README.md` at the repo root
+- launchd (opt-in, macOS): `scripts/launchd.sh install|uninstall`, gate `scripts/launchd-check.sh`; see `docs/launchd.md` (never alongside the brew service)
