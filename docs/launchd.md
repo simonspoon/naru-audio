@@ -32,3 +32,4 @@ Other platforms and the formula are unchanged.
 Rollback: `scripts/launchd.sh uninstall`, then start it by hand again.
 
 Gate: `scripts/launchd-check.sh` (stub `launchctl` and `brew`, never touches the real agent).
+Loop smoke test passed.
