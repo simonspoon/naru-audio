@@ -376,6 +376,11 @@ Every non-2xx HTTP response uses OpenAI's envelope:
 | — | `pull_failed` | In-stream, not an HTTP status: the `{"error":…}` line (`type` `server_error`) that ends a `POST /api/pull` NDJSON stream after a failure. The response itself is already 200. |
 | — | `pull_cancelled` | In-stream: the `{"error":…}` line that ends a `POST /api/pull` NDJSON stream after `DELETE /api/pulls/{name}` (naru task 1458). |
 
+Speaker verification (naru task 2028, `docs/live-mode-spec.md` "Speaker guard") adds three opt-in routes,
+`POST /v1/audio/speaker/enroll`, `POST /v1/audio/speaker/verify` and `DELETE /v1/audio/speaker/enrollment`, on the
+`wespeaker-sv-en` model (`kind = "speaker"`). They use the codes above (`model_not_pulled`, `invalid_request`);
+a verify that has no enrollment or a too-short clip fails open with `is_him: true` instead of erroring.
+
 Every response carries `X-Request-Id`. WebSocket errors use the same `code`
 strings inside `{"type":"error"}`.
 

@@ -99,6 +99,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/voxcpm2-8bit-mlx.toml"),
     ),
     (
+        "wespeaker-sv-en.toml",
+        include_str!("../../catalog/wespeaker-sv-en.toml"),
+    ),
+    (
         "whisper-large-v3-turbo-mlx.toml",
         include_str!("../../catalog/whisper-large-v3-turbo-mlx.toml"),
     ),
@@ -121,6 +125,9 @@ pub enum Kind {
     /// Offline source separation (naru task 1461 §8): isolates vocals
     /// from music/noise.
     Separation,
+    /// Speaker verification (naru task 2028): an embedding model whose
+    /// vectors are compared against an enrolled voice.
+    Speaker,
 }
 
 impl Kind {
@@ -132,6 +139,7 @@ impl Kind {
             Kind::Diarization => "diarization",
             Kind::Denoise => "denoise",
             Kind::Separation => "separation",
+            Kind::Speaker => "speaker",
         }
     }
 }
@@ -692,6 +700,7 @@ mod tests {
                 "speaker-diarization-reverb-titanet",
                 "speech-denoiser-gtcrn",
                 "voxcpm2-8bit-mlx",
+                "wespeaker-sv-en",
                 "whisper-large-v3-turbo-mlx"
             ]
         );

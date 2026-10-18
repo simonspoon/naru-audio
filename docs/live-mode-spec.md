@@ -101,7 +101,29 @@ Windows: `hold_settling` = hold engine starting, or finished < 1 s ago; `device_
 
 ## Not extracted (I/O-entangled, stays in the client until the switch)
 
-AVAudioEngine/hold start-stop sequencing and the audio chain, the speaker-guard scoring (`isHis`, fails open),
-the queue/transcription flush, claim retry (+2 s) and refresh (5 s), the epoch counter that drops stale async work,
+AVAudioEngine/hold start-stop sequencing and the audio chain, the queue/transcription flush, claim retry (+2 s) and refresh (5 s), the epoch counter that drops stale async work,
 the thinking cue gate, auto-send config load, and the cold-cue timestamp. The epoch is a caller concern: effects
 returned by this machine are valid only for the state that produced them.
+
+## Speaker guard
+
+Scoring lives in `src/speaker.rs` (naru task 2028), not in the state machine. The `wespeaker-sv-en` catalog model
+(WeSpeaker ResNet34 via sherpa-onnx, `kind = "speaker"`) embeds 16 kHz mono audio; an enrollment is the L2-normalised
+mean of several clips' embeddings, stored as `$NARU_AUDIO_HOME/speaker/enrollment.json` tagged with the model name
+(embeddings of different models are not comparable, so a mismatched enrollment is ignored). A clip is "him" iff its
+cosine score against the enrollment is at least the threshold (`DEFAULT_THRESHOLD` = 0.7, overridable per request).
+On the TTS fixtures in `tests/fixtures/speaker/` the same voice scored 0.94-0.99 and a different voice 0.59-0.62;
+re-measure against a real enrollment before the switch.
+
+**Fails open** (short replies such as "yes" or a number must never be dropped): no enrollment, a model that is not
+pulled, a mismatched enrollment, or a clip under 1 s (`MIN_SAMPLES`) all answer `is_him: true`, with `reason`
+`no_enrollment`, `model_unavailable`, `model_mismatch` or `too_short` (`scored` otherwise).
+
+The machine's side is `LiveState::segment_fate(other_voice, is_him)`: `Admit` iff `segment_goes_to_guard` and the
+guard said him, else `Drop`.
+
+Routes (opt-in, nothing calls them until the switch; multipart like `/v1/audio/transcriptions`):
+`POST /v1/audio/speaker/enroll` (one or more `file` clips, replaces the enrollment; 400 when none is 1 s or longer),
+`POST /v1/audio/speaker/verify` (`file`, optional `threshold`; answers `{score, is_him, reason, threshold}`),
+`DELETE /v1/audio/speaker/enrollment`. A request that needs the model while it is not pulled is 409
+`model_not_pulled` (§2.6); a verify with no enrollment, or a clip too short to score, never needs it.

@@ -661,7 +661,9 @@ impl ModelManager {
         match kind {
             Kind::Stt => Some(self.stt_default()),
             Kind::Tts => Some(self.tts_default()),
-            Kind::Vad | Kind::Diarization | Kind::Denoise | Kind::Separation => None,
+            Kind::Vad | Kind::Diarization | Kind::Denoise | Kind::Separation | Kind::Speaker => {
+                None
+            }
         }
     }
 

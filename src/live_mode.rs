@@ -3,7 +3,7 @@
 //! Spec: `docs/live-mode-spec.md`. This module is pure: no I/O, no async, no clock reads. Every
 //! time-based rule takes the instant as a millisecond argument (`now_ms`, any monotonic origin), and
 //! every method that in Swift would kick off work (cut the voice, start the engine, claim the speaker)
-//! returns a description of that work instead. Nothing here is wired to a socket or route yet, and
+//! returns a description of that work instead. Nothing here is wired to a socket or route yet (the speaker guard's scoring is `crate::speaker`), and
 //! naru-mac keeps its own copy until the switch task.
 
 /// The page-visible mode, derived from the inputs. Pause and the speaker mute are overlays, not modes.
@@ -45,6 +45,13 @@ pub fn counts_as_played(played: bool, cut_by_mute: bool) -> bool {
 }
 
 /// What a change of pause state does; `None` from [`pause_action`] when nothing changes.
+/// The fate of a finished segment after the speaker guard ([`LiveState::segment_fate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentFate {
+    Admit,
+    Drop,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PauseAction {
     /// Pausing: cut the sounding reply (unstamped), stop capture and the run loop, drop held audio.
@@ -248,6 +255,18 @@ impl LiveState {
     /// A segment is dropped after `admits_segment` too when the mic is muted.
     pub fn segment_goes_to_guard(&self, other_voice: bool) -> bool {
         self.segment_admitted(other_voice) && !self.muted
+    }
+
+    /// What happens to a finished segment once the speaker guard has scored
+    /// it (`crate::speaker::Verdict::is_him`): it must reach the guard at all
+    /// ([`Self::segment_goes_to_guard`]) and then pass it. The guard fails
+    /// open, so an unscored segment arrives here with `is_him = true`.
+    pub fn segment_fate(&self, other_voice: bool, is_him: bool) -> SegmentFate {
+        if self.segment_goes_to_guard(other_voice) && is_him {
+            SegmentFate::Admit
+        } else {
+            SegmentFate::Drop
+        }
     }
 
     /// The VAD's speaking flag changed. On a rising edge the gate's state at the start is recorded.
@@ -948,6 +967,21 @@ mod tests {
         m.muted = true;
         assert!(m.segment_admitted(false));
         assert!(!m.segment_goes_to_guard(false));
+    }
+
+    #[test]
+    fn segment_fate_needs_the_gate_and_the_guard() {
+        let s = joined();
+        assert_eq!(s.segment_fate(false, true), SegmentFate::Admit);
+        // another voice's segment is rejected by the guard
+        assert_eq!(s.segment_fate(false, false), SegmentFate::Drop);
+        // a closed gate drops it even when the guard would admit
+        let mut m = joined();
+        m.muted = true;
+        assert_eq!(m.segment_fate(false, true), SegmentFate::Drop);
+        let mut p = joined();
+        p.paused = true;
+        assert_eq!(p.segment_fate(false, true), SegmentFate::Drop);
     }
 
     #[test]

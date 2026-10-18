@@ -1,0 +1,22 @@
+# WeSpeaker ResNet34 speaker embedding trained on VoxCeleb (Apache-2.0,
+# github.com/wenet-e2e/wespeaker), sherpa-onnx's ONNX export. Speaker
+# verification and enrollment for the live-mode speaker guard (naru task
+# 2028): embeds a clip into a fixed-size vector, compared by cosine
+# similarity against the enrolled voice. Size and hash computed 2026-10-18
+# from the upstream release. Embeddings are not comparable across models, so
+# an enrollment records the model it was made with.
+
+[model]
+name        = "wespeaker-sv-en"
+kind        = "speaker"
+backend     = "sherpa-onnx"
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64", "windows-x86_64"]
+languages   = ["en"]
+license     = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0"
+
+[[file]]
+path   = "embedding.onnx"
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34.onnx"
+sha256 = "5ef208a9da1453335308a6b6f4e6dfbd7e183a38b604de0a57664f45d257fe94"
+size   = 26_534_365

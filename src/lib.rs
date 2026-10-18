@@ -13,6 +13,7 @@ pub mod prep;
 pub mod profile;
 pub mod registry;
 pub mod server;
+pub mod speaker;
 pub mod stt;
 #[cfg(any(not(target_os = "macos"), test))]
 pub mod transcode;

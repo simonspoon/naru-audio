@@ -383,6 +383,7 @@ pub(super) fn not_kind(name: &str, kind: Kind) -> ApiError {
         Kind::Diarization => "speaker diarization",
         Kind::Denoise => "speech denoising",
         Kind::Separation => "source separation",
+        Kind::Speaker => "speaker verification",
     };
     bad_request(
         "model",
@@ -618,7 +619,7 @@ pub(super) fn multipart_error(e: MultipartError) -> ApiError {
 
 /// §2.2/§2.6: not WAV, or a WAV variant outside §2.2, is 415; over a cap is
 /// 413; a broken WAV is 400.
-fn audio_error(e: AudioError) -> ApiError {
+pub(super) fn audio_error(e: AudioError) -> ApiError {
     let (status, code) = match &e {
         AudioError::NotWav(_)
         | AudioError::UnsupportedRate(_)

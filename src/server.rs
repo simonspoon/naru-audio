@@ -6,6 +6,7 @@ mod admin;
 mod prep;
 mod pulls;
 mod sample_transcript;
+mod speaker;
 mod speech;
 mod stream;
 mod transcriptions;
@@ -83,6 +84,18 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
         )
         .route("/v1/audio/transcriptions/stream", get(stream::stream))
+        .route(
+            "/v1/audio/speaker/enroll",
+            post(speaker::enroll).layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/v1/audio/speaker/verify",
+            post(speaker::verify).layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/v1/audio/speaker/enrollment",
+            delete(speaker::delete_enrollment),
+        )
         .route("/v1/audio/speech", post(speech::speech))
         .route(
             "/v1/audio/voices",

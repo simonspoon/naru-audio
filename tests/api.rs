@@ -184,7 +184,8 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
             "speaker-diarization-reverb-titanet",
             "speech-denoiser-gtcrn",
             "stt",
-            "vad"
+            "vad",
+            "wespeaker-sv-en"
         ]
     );
     // Pocket TTS: CC-BY-4.0, but its README flags it non-commercial (§1441).
@@ -257,6 +258,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
             "source-separation-spleeter-2stems-int8" => "separation",
             "speaker-diarization-en" | "speaker-diarization-reverb-titanet" => "diarization",
             "speech-denoiser-gtcrn" => "denoise",
+            "wespeaker-sv-en" => "speaker",
             _ => "stt",
         };
         assert_eq!(m["x_kind"], kind);
@@ -448,7 +450,8 @@ async fn unreadable_manifest_json_is_skipped() {
             "speaker-diarization-en",
             "speaker-diarization-reverb-titanet",
             "speech-denoiser-gtcrn",
-            "vad"
+            "vad",
+            "wespeaker-sv-en"
         ]
     );
 
