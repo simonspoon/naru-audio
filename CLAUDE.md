@@ -13,3 +13,4 @@ These answer "where does X live". Check here first instead of running a filesyst
 - Cargo crate docs: `cargo doc --no-deps --open`, or read source under `~/.cargo/registry/src/index.crates.io-*/<crate>-<ver>/` (`target/doc` does not exist until `cargo doc` runs)
 - Build docs: `README.md` at the repo root
 - launchd (opt-in, macOS): `scripts/launchd.sh install|uninstall`, gate `scripts/launchd-check.sh`; see `docs/launchd.md` (never alongside the brew service)
+- Ambient gate + state machine (inert, naru task 2031): `src/ambient/`, `docs/ambient.md`; llama.cpp behind the off-by-default `llama` feature

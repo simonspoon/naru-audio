@@ -5,6 +5,10 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Local speech-to-text and text-to-speech daemon for Naru"
 
+# Off by default: pulls in llama.cpp (cmake, Metal on macOS) for the ambient gate (src/ambient/llama.rs).
+[features]
+llama = ["dep:llama-cpp-2"]
+
 [dependencies]
 axum = { version = "0.8", features = ["multipart", "ws"] }
 base64 = "0.22"
@@ -13,6 +17,7 @@ clap = { version = "4", features = ["derive", "env"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 hound = "3.5.1"
 humantime = "2"
+llama-cpp-2 = { version = "0.1.158", optional = true, default-features = false, features = ["metal"] }
 rubato = "5.0.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
