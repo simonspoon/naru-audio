@@ -2,7 +2,7 @@
 
 Extracted from naru-mac `Sources/NaruMac/NativeLive.swift` (+ `SystemUnmuteGuard.swift`) for naru task 2027, the
 first step of making naru-audio the audio server with naru-mac/naru-ios as thin clients. Implemented as pure Rust in
-`src/live_mode.rs` with unit tests. **No socket, route or wiring exists yet**; naru-mac keeps its own copy until the
+`src/live_mode.rs` with unit tests. **No client is wired to it yet**: `GET /v1/audio/live` (naru task 2029, `docs/live-protocol.md`) now drives it over a socket, but naru-mac keeps its own copy until the
 switch task, so nothing existing changes. Swift test cases (`PauseTests`, `SegmentGateTests`,
 `SystemUnmuteGuardTests`) are ported one for one.
 

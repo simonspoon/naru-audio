@@ -3,6 +3,7 @@
 //! §2.6 errors, `X-Request-Id`.
 
 mod admin;
+mod live;
 mod prep;
 mod pulls;
 mod sample_transcript;
@@ -84,6 +85,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
         )
         .route("/v1/audio/transcriptions/stream", get(stream::stream))
+        .route("/v1/audio/live", get(live::live))
         .route(
             "/v1/audio/speaker/enroll",
             post(speaker::enroll).layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),

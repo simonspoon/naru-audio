@@ -35,20 +35,20 @@ use crate::stt::audio::TARGET_SAMPLE_RATE;
 use crate::stt::vad::{Segmenter, Span, Vad};
 use crate::stt::{SttError, SttModel, VadConfig, Vocabulary};
 
-const RATE: usize = TARGET_SAMPLE_RATE as usize;
+pub(super) const RATE: usize = TARGET_SAMPLE_RATE as usize;
 
 /// §2.4: the largest binary frame.
-const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub(super) const MAX_FRAME_BYTES: usize = 64 * 1024;
 
 /// What the socket reads at all. A frame over [`MAX_FRAME_BYTES`] is
 /// refused either way; past this the library refuses it before it is read.
-const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// How long a closing session waits for the client's close.
-const CLOSE_LINGER: Duration = Duration::from_secs(1);
+pub(super) const CLOSE_LINGER: Duration = Duration::from_secs(1);
 
 /// §2.4 backpressure: undecoded audio a session may queue.
-const MAX_BACKLOG_SAMPLES: usize = 30 * RATE;
+pub(super) const MAX_BACKLOG_SAMPLES: usize = 30 * RATE;
 
 /// Seconds of the backlog kept free of any one segment.
 const BACKLOG_HEADROOM: f32 = 2.0;
@@ -76,7 +76,7 @@ const PARTIAL_MAX: usize = 8 * RATE;
 
 /// The first message: §2.4 "Handshake". Unknown fields are ignored.
 #[derive(Deserialize)]
-struct Start {
+pub(super) struct Start {
     model: Option<String>,
     #[serde(default)]
     partials: bool,
@@ -113,13 +113,13 @@ enum ClientMessage {
 }
 
 #[derive(Clone, Copy)]
-enum Format {
+pub(super) enum Format {
     S16le,
     F32le,
 }
 
 impl Format {
-    fn width(self) -> usize {
+    pub(super) fn width(self) -> usize {
         match self {
             Format::S16le => 2,
             Format::F32le => 4,
@@ -127,7 +127,7 @@ impl Format {
     }
 
     /// Whole samples, scaled to [-1, 1) as `audio::decode` scales 16-bit WAV.
-    fn samples(self, bytes: &[u8]) -> Vec<f32> {
+    pub(super) fn samples(self, bytes: &[u8]) -> Vec<f32> {
         match self {
             Format::S16le => bytes
                 .as_chunks::<2>()
@@ -146,23 +146,23 @@ impl Format {
 }
 
 /// A validated `start`. Lengths are in samples.
-struct Config {
-    model: String,
-    format: Format,
-    vad: VadConfig,
-    max_segment: usize,
+pub(super) struct Config {
+    pub(super) model: String,
+    pub(super) format: Format,
+    pub(super) vad: VadConfig,
+    pub(super) max_segment: usize,
     pad: usize,
-    hotwords: Option<Arc<Vocabulary>>,
-    keep_alive: Option<KeepAlive>,
+    pub(super) hotwords: Option<Arc<Vocabulary>>,
+    pub(super) keep_alive: Option<KeepAlive>,
     partials: bool,
 }
 
 /// Why a session ends other than normally: sent as an `error` event, then
 /// the close `code` (§2.4 "Close codes").
-struct Fail {
-    code: &'static str,
-    message: String,
-    close: u16,
+pub(super) struct Fail {
+    pub(super) code: &'static str,
+    pub(super) message: String,
+    pub(super) close: u16,
 }
 
 impl From<ApiError> for Fail {
@@ -182,7 +182,7 @@ impl From<ApiError> for Fail {
     }
 }
 
-fn violation(code: &'static str, message: impl Into<String>) -> Fail {
+pub(super) fn violation(code: &'static str, message: impl Into<String>) -> Fail {
     Fail {
         code,
         message: message.into(),
@@ -199,7 +199,7 @@ enum Ended {
 }
 
 /// Socket task to VAD thread.
-enum Input {
+pub(super) enum Input {
     Audio(Vec<f32>),
     Flush,
     Stop,
@@ -207,7 +207,7 @@ enum Input {
 }
 
 /// VAD thread to decode thread, in order.
-enum Job {
+pub(super) enum Job {
     Decode {
         pcm: Vec<f32>,
         /// The speech, in seconds since `start`; the padding is not in it.
@@ -226,7 +226,7 @@ enum Job {
 }
 
 /// Either thread to the socket task.
-enum Event {
+pub(super) enum Event {
     Send(Value),
     /// A decode failed: `backend_unavailable` or `internal`, 1011.
     Fail(SttError),
@@ -488,7 +488,7 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
 /// The next data frame; `None` once the client has closed or dropped the
 /// connection. A frame the library refuses (over [`MAX_MESSAGE_BYTES`], or
 /// malformed) is a protocol violation. Pings are answered by the library.
-async fn next(socket: &mut WebSocket) -> Result<Option<Message>, Fail> {
+pub(super) async fn next(socket: &mut WebSocket) -> Result<Option<Message>, Fail> {
     loop {
         let Some(msg) = socket.recv().await else {
             return Ok(None);
@@ -510,7 +510,7 @@ async fn next(socket: &mut WebSocket) -> Result<Option<Message>, Fail> {
     }
 }
 
-async fn send(socket: &mut WebSocket, event: Value) -> Result<(), axum::Error> {
+pub(super) async fn send(socket: &mut WebSocket, event: Value) -> Result<(), axum::Error> {
     socket.send(Message::Text(event.to_string().into())).await
 }
 
@@ -525,7 +525,7 @@ fn hotwords_of(s: &str) -> Result<Option<Arc<Vocabulary>>, Fail> {
     Ok((!v.terms.is_empty()).then(|| Arc::new(v)))
 }
 
-fn warn_truncated(st: &AppState, req_id: &str, v: &Vocabulary) {
+pub(super) fn warn_truncated(st: &AppState, req_id: &str, v: &Vocabulary) {
     if v.terms_dropped > 0 {
         st.log.line(
             "warn",
@@ -540,7 +540,7 @@ fn warn_truncated(st: &AppState, req_id: &str, v: &Vocabulary) {
 }
 
 /// `default_model` is what `default` resolves to (§3.3).
-fn validate(start: Start, default_model: &str) -> Result<Config, Fail> {
+pub(super) fn validate(start: Start, default_model: &str) -> Result<Config, Fail> {
     let format = match start.format.as_str() {
         "s16le" => Format::S16le,
         "f32le" => Format::F32le,
@@ -644,7 +644,7 @@ fn validate(start: Start, default_model: &str) -> Result<Config, Fail> {
 }
 
 /// The VAD thread: until `stop`, or until the socket task goes.
-fn segment(vad: Vad, mut segments: Segments, mut input: UnboundedReceiver<Input>) {
+pub(super) fn segment(vad: Vad, mut segments: Segments, mut input: UnboundedReceiver<Input>) {
     let mut segmenter = vad.segmenter();
     while let Some(input) = input.blocking_recv() {
         match input {
@@ -674,7 +674,7 @@ fn segment(vad: Vad, mut segments: Segments, mut input: UnboundedReceiver<Input>
 /// detector: `max_segment`, at the quietest point of its last second, and
 /// `flush`/`stop`, at the latest sample. `floor` is where the last segment
 /// ended, so audio after a cut goes to the next segment, never both.
-struct Segments {
+pub(super) struct Segments {
     /// The recent audio: enough for `pad` before any span that can still
     /// open, and the whole open one.
     ring: VecDeque<f32>,
@@ -697,7 +697,7 @@ struct Segments {
 }
 
 impl Segments {
-    fn new(
+    pub(super) fn new(
         cfg: &Config,
         jobs: UnboundedSender<Job>,
         events: UnboundedSender<Event>,
@@ -866,7 +866,7 @@ fn quietest(pcm: &[f32]) -> usize {
 ///
 /// §2.4's decode FIFO shared by every session of a model is not
 /// implemented: sessions decode concurrently, as `POST` requests do.
-fn decode(
+pub(super) fn decode(
     model: Guard,
     vad: VadConfig,
     jobs: UnboundedReceiver<Job>,

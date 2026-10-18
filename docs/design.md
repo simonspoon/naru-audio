@@ -381,6 +381,9 @@ Speaker verification (naru task 2028, `docs/live-mode-spec.md` "Speaker guard") 
 `wespeaker-sv-en` model (`kind = "speaker"`). They use the codes above (`model_not_pulled`, `invalid_request`);
 a verify that has no enrollment or a too-short clip fails open with `is_him: true` instead of erroring.
 
+The live conversation socket, `GET /v1/audio/live` (naru task 2029), is specified in `docs/live-protocol.md`; it is
+opt-in and nothing calls it until the clients switch.
+
 Every response carries `X-Request-Id`. WebSocket errors use the same `code`
 strings inside `{"type":"error"}`.
 

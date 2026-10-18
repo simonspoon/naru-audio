@@ -3,7 +3,7 @@
 //! Spec: `docs/live-mode-spec.md`. This module is pure: no I/O, no async, no clock reads. Every
 //! time-based rule takes the instant as a millisecond argument (`now_ms`, any monotonic origin), and
 //! every method that in Swift would kick off work (cut the voice, start the engine, claim the speaker)
-//! returns a description of that work instead. Nothing here is wired to a socket or route yet (the speaker guard's scoring is `crate::speaker`), and
+//! returns a description of that work instead. `GET /v1/audio/live` (naru task 2029, `src/server/live.rs`) drives it over a socket (the speaker guard's scoring is `crate::speaker`), and
 //! naru-mac keeps its own copy until the switch task.
 
 /// The page-visible mode, derived from the inputs. Pause and the speaker mute are overlays, not modes.
