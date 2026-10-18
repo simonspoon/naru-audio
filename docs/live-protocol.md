@@ -33,19 +33,40 @@ The first frame must be a text `start`; anything else is a fatal `invalid_reques
 | `model` | `default` | the STT model, as in §2.4 |
 | `partials` | `true` | send `partial` events while an utterance is open |
 | `hotwords`, `vad`, `keep_alive` | | exactly as §2.4's `start` |
+| `typed_frames` | `false` | binary frames lead with a type byte (below); `ready` echoes it |
 
 The server answers `ready`, then the first `state`. A model that is not pulled or will not load is the §2.6
 error, then a close. `loading` precedes `ready` when the model is not resident.
 
 ```json
-{"type":"ready","session":"mac-1","model":"parakeet-tdt-0.6b-v2-int8","load_ms":0,"resumed":false}
+{"type":"ready","session":"mac-1","model":"parakeet-tdt-0.6b-v2-int8","load_ms":0,"resumed":false,"typed_frames":false}
 {"type":"state","mode":"live","seq":1,"agent_speaking":false,"enrolled":false,"enrolling":false,
  "speaking":[],"resumed":false}
 ```
 
 ## Client messages
 
-Binary frames are microphone audio: s16le mono 16 kHz, at most 64 KiB, a whole number of samples. Text frames:
+Binary frames are microphone audio: s16le mono 16 kHz, at most 64 KiB, a whole number of samples.
+With `typed_frames: true` the first byte of every binary frame is its type and the rest is s16le mono 16 kHz
+(the 64 KiB limit counts the whole frame, the whole-sample rule the payload):
+
+| Type | Meaning |
+| --- | --- |
+| `0x00` | microphone audio, exactly as an untyped frame |
+| `0x01` | speaker reference: what the client is playing. Never heard by the VAD or recorded for enrollment |
+| other, or an empty frame | fatal `invalid_request` (1008) |
+
+**Echo guard** (naru task 2030). The client's own voice processing stays its first defence; this is the second.
+Stream the reference as it plays, about when the microphone could hear it. For each microphone frame the server
+correlates the last 200 ms of microphone audio against the reference over lags of 0 to 400 ms (normalised
+cross-correlation, 4 kHz decimated); at 0.5 or more it is the agent's own voice and the VAD is fed silence for that
+frame, as a shut gate does. A finished segment is checked once more the same way and dropped (a clearing `partial`,
+no `utterance`) if it is the reference heard back. The guard needs correlation, never loudness alone, and fails open:
+no reference, one older than 600 ms, under 100 ms of microphone audio, or a quiet signal pass unchanged, so a short
+"yes" over the agent's voice is kept. Untyped sessions have no reference and are unchanged. Frames that arrive faster
+than real time are placed back to back, so send the reference at playback pace.
+
+Text frames:
 
 | Message | Meaning |
 | --- | --- |

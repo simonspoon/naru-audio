@@ -39,11 +39,16 @@ use super::stream::{
 };
 use super::transcriptions::{decode_error, internal, kind_manifest, stt_manifest};
 use super::{AppState, RequestId, manager_error};
+use crate::echo::EchoCanceller;
 use crate::error::ApiError;
 use crate::live_mode::{LiveState, Mode, SegmentFate};
 use crate::registry::manifest::Kind;
 use crate::speaker::{self, DEFAULT_MODEL, DEFAULT_THRESHOLD, Enrollment, SpeakerVerifier};
 use crate::stt::vad::Vad;
+
+/// Typed binary frames: the first byte.
+const FRAME_MIC: u8 = 0x00;
+const FRAME_REFERENCE: u8 = 0x01;
 
 /// A `level` event is sent at most this often.
 const LEVEL_EVERY: Duration = Duration::from_millis(100);
@@ -114,6 +119,10 @@ struct LiveStart {
     vad: Option<Value>,
     hotwords: Option<String>,
     keep_alive: Option<Value>,
+    /// Binary frames carry a leading type byte (`0x00` microphone, `0x01`
+    /// speaker reference); off unless `true`.
+    #[serde(default)]
+    typed_frames: bool,
 }
 
 fn s16le() -> String {
@@ -208,10 +217,14 @@ struct Live {
     last_level: Instant,
     utterance: u64,
     speaks: HashMap<String, JoinHandle<()>>,
+    /// Binary frames lead with a type byte.
+    typed: bool,
+    echo: EchoCanceller,
+    began: Instant,
 }
 
 impl Live {
-    fn new(mode: Mode, seq: u64, enrolled: Option<Enrollment>) -> Self {
+    fn new(mode: Mode, seq: u64, enrolled: Option<Enrollment>, typed: bool) -> Self {
         let mut live = Live {
             state: LiveState::new(),
             seq,
@@ -227,6 +240,9 @@ impl Live {
             last_level: Instant::now(),
             utterance: 0,
             speaks: HashMap::new(),
+            typed,
+            echo: EchoCanceller::new(),
+            began: Instant::now(),
         };
         live.set_mode(mode);
         live
@@ -549,10 +565,15 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         None
     });
 
-    let mut live = Live::new(mode, previous.as_ref().map_or(0, |p| p.seq), enrolled);
+    let mut live = Live::new(
+        mode,
+        previous.as_ref().map_or(0, |p| p.seq),
+        enrolled,
+        start.typed_frames,
+    );
     let ready = json!({
         "type": "ready", "session": session_id, "model": cfg.model, "load_ms": load_ms,
-        "resumed": previous.is_some(),
+        "resumed": previous.is_some(), "typed_frames": start.typed_frames,
     });
     if send(socket, ready).await.is_err() {
         return Ok(Ended::Gone);
@@ -636,20 +657,47 @@ async fn drive(
                                 format!("a binary frame is at most {MAX_FRAME_BYTES} bytes, got {}", bytes.len()),
                             ));
                         }
-                        if bytes.len() % cfg.format.width() != 0 {
+                        let (kind, payload) = if live.typed {
+                            match bytes.split_first() {
+                                Some((&kind @ (FRAME_MIC | FRAME_REFERENCE), rest)) => (kind, rest),
+                                Some((kind, _)) => {
+                                    return Err(violation(
+                                        "invalid_request",
+                                        format!("frame type {kind:#04x} is not 0x00 (microphone) or 0x01 (reference)"),
+                                    ));
+                                }
+                                None => {
+                                    return Err(violation(
+                                        "invalid_request",
+                                        "a typed frame needs its type byte",
+                                    ));
+                                }
+                            }
+                        } else {
+                            (FRAME_MIC, &bytes[..])
+                        };
+                        if payload.len() % cfg.format.width() != 0 {
                             return Err(violation(
                                 "invalid_request",
-                                format!("a {}-byte frame is not a whole number of samples", bytes.len()),
+                                format!("a {}-byte frame is not a whole number of samples", payload.len()),
                             ));
                         }
-                        let samples = cfg.format.samples(&bytes);
+                        let samples = cfg.format.samples(payload);
+                        if kind == FRAME_REFERENCE {
+                            // What the client is playing: kept for the echo
+                            // check, never heard by the VAD.
+                            live.echo.push_reference(&samples, live.began.elapsed());
+                            continue;
+                        }
                         live.note_level(&samples);
                         if let Some(clip) = &mut live.enrolling {
                             let room = ENROLL_MAX_SAMPLES.saturating_sub(clip.len());
                             clip.extend_from_slice(&samples[..samples.len().min(room)]);
                         }
                         // A shut gate feeds silence: the VAD keeps its clock.
-                        let fed = if live.gate_open() { samples } else { vec![0.0; samples.len()] };
+                        // A frame that is the reference heard back is shut the same way.
+                        let echo = live.echo.is_echo(&samples, live.began.elapsed());
+                        let fed = if !echo && live.gate_open() { samples } else { vec![0.0; samples.len()] };
                         live.push_ring(&fed);
                         let queued = backlog.fetch_add(fed.len(), Ordering::SeqCst) + fed.len();
                         if queued > MAX_BACKLOG_SAMPLES {
@@ -1017,12 +1065,20 @@ async fn finish_segment(st: &Arc<AppState>, live: &mut Live, v: &Value) -> Vec<V
         return vec![json!({"type": "partial", "segment": v["segment"], "text": ""})];
     }
     let mode = live.mode();
+    // Backstop behind the frame-level check: a segment that is the
+    // reference heard back, whatever its first 100 ms looked like.
+    let echo = mode != Mode::Idle
+        && live.clip(start, end).is_some_and(|clip| {
+            let back = live.received.saturating_sub((end * RATE as f64) as usize);
+            live.echo.clip_is_echo(&clip, back)
+        });
     let verdict = if mode == Mode::Live && live.enrolled.is_some() {
         score(st, live, start, end).await
     } else {
         None
     };
     let admitted = match mode {
+        _ if echo => false,
         Mode::Live => {
             live.state
                 .segment_fate(false, verdict.is_none_or(|d| d.is_him))

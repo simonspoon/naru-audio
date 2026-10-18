@@ -1,6 +1,7 @@
 //! naru-audio: local STT/TTS daemon for Naru (docs/design.md).
 
 pub mod backend;
+pub mod echo;
 pub mod error;
 pub mod live_mode;
 pub mod log;

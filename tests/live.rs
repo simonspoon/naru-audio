@@ -656,3 +656,102 @@ async fn a_start_without_a_mode_or_a_session_to_resume_is_1008() {
     .await;
     assert_error_close(&events, close, "invalid_request");
 }
+
+/// A typed frame: the type byte, then s16le.
+fn typed(kind: u8, pcm: &[f32]) -> Message {
+    let mut bytes = vec![kind];
+    bytes.extend(s16le(pcm));
+    Message::binary(bytes)
+}
+
+/// Plays `reference` and hears `mic` back, frame for frame, on a typed
+/// session.
+async fn send_with_reference(ws: &mut Ws, reference: &[f32], mic: &[f32]) {
+    for (i, frame) in mic.chunks(640).enumerate() {
+        let from = (i * 640).min(reference.len());
+        let to = (from + 640).min(reference.len());
+        if from < to {
+            ws.send(typed(1, &reference[from..to])).await.unwrap();
+        }
+        ws.send(typed(0, frame)).await.unwrap();
+    }
+}
+
+fn utterances(events: &[Value]) -> usize {
+    events.iter().filter(|e| e["type"] == "utterance").count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_frames_are_opt_in_and_echoed_in_ready() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    for (fields, want) in [(json!({}), false), (json!({"typed_frames": true}), true)] {
+        let mut ws = connect(&addr).await;
+        ws.send(start(fields)).await.unwrap();
+        let ready = next_of(&mut ws, "ready").await;
+        assert_eq!(ready["typed_frames"], want, "{ready}");
+        stop(&mut ws).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typed_microphone_frame_behaves_like_an_untyped_one() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let (mut ws, _) = ready(&addr, json!({"typed_frames": true})).await;
+    for frame in two_plains().chunks(640) {
+        ws.send(typed(0, frame)).await.unwrap();
+    }
+    let events = stop(&mut ws).await;
+    assert_eq!(utterances(&events), 2, "{events:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_frame_type_is_1008() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let (mut ws, _) = ready(&addr, json!({"typed_frames": true})).await;
+    ws.send(typed(7, &[0.0; 160])).await.unwrap();
+    let (events, close) = until_close(&mut ws).await;
+    assert_error_close(&events, close, "invalid_request");
+    let (mut ws, _) = ready(&addr, json!({"typed_frames": true})).await;
+    ws.send(Message::binary(vec![])).await.unwrap();
+    let (events, close) = until_close(&mut ws).await;
+    assert_error_close(&events, close, "invalid_request");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_microphone_hearing_the_reference_makes_no_utterance() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let speech = two_plains();
+
+    // Echo: the reference is exactly what the microphone hears.
+    let (mut ws, _) = ready(&addr, json!({"typed_frames": true})).await;
+    send_with_reference(&mut ws, &speech, &speech).await;
+    let events = stop(&mut ws).await;
+    assert_eq!(utterances(&events), 0, "echo_leak_utterances: {events:?}");
+
+    // Control: no reference at all, the same speech is heard.
+    let (mut ws, _) = ready(&addr, json!({"typed_frames": true})).await;
+    send_with_reference(&mut ws, &[], &speech).await;
+    let events = stop(&mut ws).await;
+    assert_eq!(utterances(&events), 2, "short_reply_drops: {events:?}");
+
+    // Control: a reference that is not what the microphone hears.
+    let other = samples("mesa-names.wav");
+    let (mut ws, _) = ready(&addr, json!({"typed_frames": true})).await;
+    send_with_reference(&mut ws, &other, &speech).await;
+    let events = stop(&mut ws).await;
+    assert_eq!(utterances(&events), 2, "short_reply_drops: {events:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_untyped_session_ignores_the_echo_machinery() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let (mut ws, _) = ready(&addr, json!({})).await;
+    send_audio(&mut ws, &two_plains()).await;
+    let events = stop(&mut ws).await;
+    assert_eq!(utterances(&events), 2, "{events:?}");
+}
