@@ -577,17 +577,78 @@ async fn partials_off_run_no_extra_decode() {
 async fn partials_come_before_their_final() {
     let Some(home) = model_home() else { return };
     let (addr, decodes) = serve_counting(home.path()).await;
-    let mut ws = ready(&addr, json!({"partials": true})).await;
-    let mut pcm = samples("plain.wav");
-    pcm.extend(vec![0.0f32; 16_000]);
-    pcm.extend(samples("plain.wav"));
-    pcm.extend(vec![0.0f32; 16_000]);
-    for frame in pcm.chunks(640) {
-        ws.send(Message::binary(s16le(frame))).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(40)).await;
+    let ws = ready(&addr, json!({"partials": true})).await;
+    let (mut sink, mut stream) = ws.split();
+    // A reader task feeds every event (or the close code) into a channel, so
+    // the sender can wait on the decoder instead of racing it.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Value, Option<u16>>>();
+    tokio::spawn(async move {
+        while let Some(msg) = stream.next().await {
+            match msg {
+                Ok(Message::Text(t)) => {
+                    let _ = tx.send(Ok(serde_json::from_str(&t).unwrap()));
+                }
+                Ok(Message::Close(frame)) => {
+                    let _ = tx.send(Err(frame.map(|f| u16::from(f.code))));
+                    return;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let _ = tx.send(Err(None));
+    });
+    let mut events: Vec<Value> = Vec::new();
+    let silence = vec![0.0f32; 16_000];
+    for segment in 0..2usize {
+        // Speech first; the segment cannot close until the silence after it.
+        for frame in samples("plain.wav").chunks(640) {
+            sink.send(Message::binary(s16le(frame))).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        // Hold the silence back until this segment has had a partial, so the
+        // result never depends on how fast the model decodes.
+        let wait = async {
+            while !events
+                .iter()
+                .any(|e| e["type"] == "partial" && e["segment"] == segment)
+            {
+                match rx.recv().await {
+                    Some(Ok(e)) => events.push(e),
+                    Some(Err(code)) => return Err(code),
+                    None => return Err(None),
+                }
+            }
+            Ok(())
+        };
+        match tokio::time::timeout(Duration::from_secs(60), wait).await {
+            Ok(Ok(())) => {}
+            Ok(Err(code)) => {
+                panic!("closed ({code:?}) before a partial for segment {segment}: {events:?}")
+            }
+            Err(_) => panic!("no partial for segment {segment} within 60 s: {events:?}"),
+        }
+        for frame in silence.chunks(640) {
+            sink.send(Message::binary(s16le(frame))).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
     }
-    ws.send(Message::text(r#"{"type":"stop"}"#)).await.unwrap();
-    let (events, close) = until_close(&mut ws).await;
+    sink.send(Message::text(r#"{"type":"stop"}"#))
+        .await
+        .unwrap();
+    let drain = async {
+        while let Some(item) = rx.recv().await {
+            match item {
+                Ok(e) => events.push(e),
+                Err(code) => return code,
+            }
+        }
+        None
+    };
+    let close = match tokio::time::timeout(Duration::from_secs(60), drain).await {
+        Ok(code) => code,
+        Err(_) => panic!("no close within 60 s: {events:?}"),
+    };
     assert_eq!(close, Some(1000), "{events:?}");
     eprintln!("partials: {events:?}");
     let finals: Vec<usize> = events
