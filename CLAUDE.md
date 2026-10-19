@@ -14,3 +14,9 @@ These answer "where does X live". Check here first instead of running a filesyst
 - Build docs: `README.md` at the repo root
 - launchd (opt-in, macOS): `scripts/launchd.sh install|uninstall`, gate `scripts/launchd-check.sh`; see `docs/launchd.md` (never alongside the brew service)
 - Ambient gate + state machine (inert, naru task 2031): `src/ambient/`, `docs/ambient.md`; llama.cpp behind the off-by-default `llama` feature
+
+## Dev environment
+
+- Dev work uses the dev daemon on :7871 (naru task 2092), started with `scripts/dev-audio.sh` (state in `~/.naru-audio-dev`).
+- Never install to, restart or overwrite the real install: launchd `com.naru.audio`, port :7870, `~/.naru-audio`.
+- Full details live in the naru repo's `docs/dev-env.md` (`/Users/simonspoon/naru-projects/projects/tools/naru/docs/dev-env.md`), which exists once naru task 2094 lands.
