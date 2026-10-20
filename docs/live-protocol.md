@@ -26,8 +26,10 @@ The first frame must be a text `start`; anything else is a fatal `invalid_reques
 
 | Field | | |
 | --- | --- | --- |
-| `mode` | required unless resuming | `idle`, `live`, `muted` or `ambient` (the spec's mode table) |
-| `rate` | required | the microphone's sample rate: exactly `16000`; resample on the client (`unsupported_value`) |
+| `mode` | required unless resuming or joining a conversation | `idle`, `live`, `muted` or `ambient` (the spec's mode table) |
+| `rate` | required for `audio` | the microphone's sample rate: exactly `16000`; resample on the client (`unsupported_value`) |
+| `role` | `audio` | `audio`, or `control`: mode messages only, no microphone (Conversations, below) |
+| `conversation` | none | a key, 1 to 128 characters; every socket with the same key shares one mode and `seq` (below) |
 | `format` | `s16le` | the only microphone format (`unsupported_value` otherwise) |
 | `session` | server-made | a client id, 1 to 128 characters; reconnecting with it resumes (below) |
 | `model` | `default` | the STT model, as in §2.4 |
@@ -83,7 +85,7 @@ Text frames:
 
 | Event | Fields |
 | --- | --- |
-| `state` | `mode`, `seq`, `agent_speaking`, `enrolled`, `enrolling`, `speaking` (running speak ids), `resumed`, and on a resume `previous_mode`, `lost_speaks`. `seq` rises by one on every `state`, so a client can spot a gap |
+| `state` | `mode`, `seq`, `agent_speaking`, `enrolled`, `enrolling`, `speaking` (running speak ids), `resumed`, and on a resume `previous_mode`, `lost_speaks`. `seq` rises by one on every `state`, so a client can spot a gap. In a conversation `seq` is the conversation's, shared by every socket in it |
 | `level` | `rms` (the loudest frame since the last event, 0 to 1), `gate` (whether the microphone is reaching the VAD). At most every 100 ms, only while frames arrive |
 | `speech` | `active`, `at`: the VAD's edges, as §2.4 |
 | `partial` | `segment`, `start`, `text`: the open utterance so far. Only in `live` mode and while the agent is not speaking. An empty `text` clears a partial whose segment was then dropped |
@@ -115,10 +117,47 @@ is accepted. A clean `stop` forgets the session, as does a restart of the daemon
 
 The enrollment is the stored one on disk, so it survives both.
 
+## Conversations (naru task 2178)
+
+The mode — above all the microphone mute — has one owner, the server. Every socket whose `start` names the same
+`conversation` shares **one mode and one `seq`**; the page, the Mac app and a headset only send intents, and the
+server decides and tells them all. Without `conversation` a socket is alone, exactly as above.
+
+- **The intent** is the ordinary `{"type":"mode","mode":"muted"}` (or back to `"live"`, or any mode), from any
+  socket of the conversation. A change bumps the conversation's `seq` and sends **one `state` to every socket in
+  it**, the sender included (the sender gets no second one). Changing to the mode it already has is ignored. On an
+  audio socket a change acts exactly as its own `mode` message would: the open segment is cut and the gate follows
+  the new mode, so a mute from the page really shuts the microphone.
+- An audio socket's `agent_speaking` or `enroll` change also bumps the shared `seq` and sends every socket a
+  `state`; each socket's `agent_speaking`, `enrolled`, `enrolling` and `speaking` are still its own.
+- **Joining.** The first socket's `mode` begins the conversation at `seq` 1 (a first socket without `mode` is
+  `invalid_request`). A socket that joins later takes the current mode and `seq` as its first `state`, whatever
+  its own `start.mode` says, so a reloaded page sees the truth. With `session` resume as well, the conversation's
+  mode and `seq` win over the resumed ones.
+- **A gap in `seq`** means the socket fell behind; the `state` it got is the current one, so take it as the
+  truth.
+- **Lifetime.** A conversation lives while it has a socket. When the last one ends (stop, drop or error) it is
+  forgotten, and the next socket to name it begins it afresh at `seq` 1. It is not part of the 60-second resume.
+
+**`role: "control"`** is a socket with no microphone, model or VAD, for a client that only shows or sets the mute
+(the page through naru serve's proxy). It needs `conversation`; `rate`, `model`, `vad` and the like are not
+needed. It is answered by
+
+```json
+{"type":"ready","session":"page-1","role":"control","conversation":"c1","resumed":false}
+{"type":"state","mode":"live","seq":4,"agent_speaking":false,"enrolled":false,"enrolling":false,
+ "speaking":[],"resumed":false}
+```
+
+and then gets every `state` of the conversation. It accepts only `mode` and `stop` (`done`, then close 1000).
+Binary frames, `agent_speaking`, `speak`, `enroll`, `flush` and a second `start` are fatal `invalid_request`
+(1008). Its `state` always has `agent_speaking`, `enrolled` and `enrolling` false and `speaking` empty.
+
 ## Errors and close codes
 
 The close codes of §2.4: 1000 after `done`; 1008 for a protocol violation (`invalid_request` — an unreadable or
-unknown message, a bad frame, a second `start`, a bad `mode`; `unsupported_value` — `rate`, `format`); 1011 for a
+unknown message, a bad frame, a second `start`, a bad `mode`, a bad `role` or `conversation`, an audio `start`
+without `rate`, a message a control socket does not take; `unsupported_value` — `rate`, `format`); 1011 for a
 decode or load failure; 1013 for `backlog` (more than 30 s of undecoded audio) and `insufficient_memory`. Each is
 preceded by an `error` event with `fatal: true`.
 

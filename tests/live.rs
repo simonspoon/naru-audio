@@ -755,3 +755,180 @@ async fn an_untyped_session_ignores_the_echo_machinery() {
     let events = stop(&mut ws).await;
     assert_eq!(utterances(&events), 2, "{events:?}");
 }
+
+// Conversations (naru task 2178): sockets sharing a `conversation` key share
+// one mode and `seq`; a `control` socket carries only the mode.
+
+/// A control socket on `conversation`, and its first `state`.
+async fn control(addr: &str, conversation: &str, mode: &str) -> (Ws, Value) {
+    let mut ws = connect(addr).await;
+    ws.send(text(json!({
+        "type": "start", "role": "control", "conversation": conversation, "mode": mode,
+    })))
+    .await
+    .unwrap();
+    let ready = next_of(&mut ws, "ready").await;
+    assert_eq!(ready["role"], "control", "{ready}");
+    assert_eq!(ready["conversation"], conversation, "{ready}");
+    let state = next_of(&mut ws, "state").await;
+    (ws, state)
+}
+
+/// The next event, which must be a `state`; panics after 10 s.
+async fn exactly_state(ws: &mut Ws) -> Value {
+    let event = tokio::time::timeout(Duration::from_secs(10), ws.next())
+        .await
+        .expect("no state within 10 s")
+        .unwrap()
+        .unwrap();
+    let event: Value = serde_json::from_str(event.to_text().unwrap()).unwrap();
+    assert_eq!(event["type"], "state", "{event}");
+    event
+}
+
+/// Nothing arrives on `ws` for a while.
+async fn quiet(ws: &mut Ws) {
+    let got = tokio::time::timeout(Duration::from_millis(300), ws.next()).await;
+    assert!(got.is_err(), "unexpected {got:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn control_sockets_share_one_conversation_state() {
+    let home = fake_home();
+    let addr = serve(home.path()).await;
+    let conv = "c1-shared";
+    let (mut a, first) = control(&addr, conv, "live").await;
+    assert_eq!(first["mode"], "live", "{first}");
+    assert_eq!(first["seq"], 1, "{first}");
+    // B's own mode is ignored: the conversation has one.
+    let (mut b, joined) = control(&addr, conv, "idle").await;
+    assert_eq!(joined["mode"], "live", "{joined}");
+    assert_eq!(joined["seq"], 1, "{joined}");
+    let mut seq = 1;
+    for (from, mode) in [(0, "muted"), (1, "live"), (1, "muted")] {
+        let sender = if from == 0 { &mut a } else { &mut b };
+        sender
+            .send(text(json!({"type": "mode", "mode": mode})))
+            .await
+            .unwrap();
+        seq += 1;
+        for ws in [&mut a, &mut b] {
+            let state = exactly_state(ws).await;
+            assert_eq!(state["mode"], mode, "{state}");
+            assert_eq!(state["seq"], seq, "{state}");
+        }
+        quiet(&mut a).await;
+        quiet(&mut b).await;
+    }
+    // The same mode again changes nothing.
+    a.send(text(json!({"type": "mode", "mode": "muted"})))
+        .await
+        .unwrap();
+    quiet(&mut a).await;
+    quiet(&mut b).await;
+    // A later joiner sees the truth first, whatever its own start says.
+    let (mut c, current) = control(&addr, conv, "live").await;
+    assert_eq!(current["mode"], "muted", "{current}");
+    assert_eq!(current["seq"], seq, "{current}");
+    for ws in [&mut a, &mut b, &mut c] {
+        stop(ws).await;
+    }
+    // The last member gone, the conversation starts afresh.
+    let (mut d, fresh) = control(&addr, conv, "idle").await;
+    assert_eq!(fresh["mode"], "idle", "{fresh}");
+    assert_eq!(fresh["seq"], 1, "{fresh}");
+    stop(&mut d).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bad_conversation_starts_are_1008() {
+    let home = fake_home();
+    for first in [
+        json!({"type": "start", "role": "control", "mode": "live"}),
+        json!({"type": "start", "role": "control", "conversation": "", "mode": "live"}),
+        json!({"type": "start", "conversation": "", "mode": "live", "rate": 16000}),
+        json!({"type": "start", "role": "speaker", "conversation": "c", "mode": "live"}),
+        json!({"type": "start", "role": "control", "conversation": "c-new"}),
+        json!({"type": "start", "mode": "live"}),
+    ] {
+        let (events, close) = session_error(home.path(), text(first.clone())).await;
+        assert_error_close(&events, close, "invalid_request");
+        eprintln!("ok: {first}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_control_socket_refuses_audio_and_speech() {
+    let home = fake_home();
+    let addr = serve(home.path()).await;
+    for bad in [
+        Message::binary(vec![0u8; 640]),
+        text(json!({"type": "speak", "id": "t1", "text": "hi"})),
+        text(json!({"type": "agent_speaking", "value": true})),
+        text(json!({"type": "enroll", "action": "begin"})),
+        text(json!({"type": "flush"})),
+        text(json!({"type": "start", "role": "control", "conversation": "c-bad", "mode": "live"})),
+    ] {
+        let (mut ws, _) = control(&addr, "c-bad", "live").await;
+        ws.send(bad).await.unwrap();
+        let (events, close) = until_close(&mut ws).await;
+        assert_error_close(&events, close, "invalid_request");
+    }
+    // A socket that failed left its conversation: this one begins it afresh.
+    let (mut ws, fresh) = control(&addr, "c-bad", "idle").await;
+    assert_eq!(fresh["mode"], "idle", "{fresh}");
+    assert_eq!(fresh["seq"], 1, "{fresh}");
+    stop(&mut ws).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_control_mute_shuts_the_audio_sockets_gate() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let conv = "c-audio";
+    let (mut audio, first) = ready(&addr, json!({"conversation": conv})).await;
+    assert_eq!(first["mode"], "live", "{first}");
+    assert_eq!(first["seq"], 1, "{first}");
+    let (mut ctl, joined) = control(&addr, conv, "idle").await;
+    assert_eq!(joined["mode"], "live", "{joined}");
+    assert_eq!(joined["seq"], 1, "{joined}");
+
+    ctl.send(text(json!({"type": "mode", "mode": "muted"})))
+        .await
+        .unwrap();
+    let on_ctl = exactly_state(&mut ctl).await;
+    let on_audio = exactly_state(&mut audio).await;
+    for state in [&on_ctl, &on_audio] {
+        assert_eq!(state["mode"], "muted", "{state}");
+        assert_eq!(state["seq"], 2, "{state}");
+    }
+    // The audio socket's gate is really shut, not just relabelled.
+    let speech = samples("plain.wav");
+    for frame in speech.chunks(640).take(15) {
+        audio.send(Message::binary(s16le(frame))).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let level = next_of(&mut audio, "level").await;
+    assert!(level["rms"].as_f64().unwrap() > 0.0, "{level}");
+    assert_eq!(level["gate"], false, "{level}");
+    eprintln!("ran: muted level {level}");
+
+    // Back to live from the audio socket, mirrored on the control socket.
+    audio
+        .send(text(json!({"type": "mode", "mode": "live"})))
+        .await
+        .unwrap();
+    let back = next_of(&mut audio, "state").await;
+    let mirrored = exactly_state(&mut ctl).await;
+    for state in [&back, &mirrored] {
+        assert_eq!(state["mode"], "live", "{state}");
+        assert_eq!(state["seq"], 3, "{state}");
+    }
+    let events = stop(&mut audio).await;
+    assert!(
+        !events.iter().any(|e| e["type"] == "state"),
+        "one state per change: {events:?}"
+    );
+    quiet(&mut ctl).await;
+    stop(&mut ctl).await;
+}

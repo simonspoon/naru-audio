@@ -29,6 +29,7 @@ use base64::engine::general_purpose::STANDARD;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
@@ -103,14 +104,141 @@ fn forget(session: &str) {
     RESUME.lock().unwrap().remove(session);
 }
 
+/// Changes a conversation keeps for a slow member before it lags.
+const CONVERSATION_BACKLOG: usize = 16;
+
+/// The state every socket of one `conversation` shares (naru task 2178).
+struct Conv {
+    mode: Mode,
+    /// The `seq` of the conversation's latest `state`.
+    seq: u64,
+    members: usize,
+    /// Each change as `(seq, mode)`, to every member.
+    tx: broadcast::Sender<(u64, Mode)>,
+}
+
+/// Conversations by key, while they have members. Process-wide for the same
+/// reason as [`RESUME`].
+static CONVERSATIONS: LazyLock<Mutex<HashMap<String, Conv>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// One socket's membership of a conversation; dropping it leaves.
+struct Member {
+    key: String,
+    rx: broadcast::Receiver<(u64, Mode)>,
+    /// The latest `seq` this socket was told.
+    last: u64,
+}
+
+/// Joins `key`, creating it in `seed` when it is new; the current mode and
+/// seq. Subscribing under the lock means no change falls in between.
+fn join(key: &str, seed: Option<Mode>) -> Result<(Member, Mode, u64), Fail> {
+    let mut table = CONVERSATIONS.lock().unwrap();
+    let conv = match table.get_mut(key) {
+        Some(conv) => conv,
+        None => {
+            let Some(mode) = seed else {
+                return Err(violation(
+                    "invalid_request",
+                    "start needs a mode (idle, live, muted or ambient) to begin a conversation",
+                ));
+            };
+            let (tx, _) = broadcast::channel(CONVERSATION_BACKLOG);
+            table.entry(key.to_string()).or_insert(Conv {
+                mode,
+                seq: 1,
+                members: 0,
+                tx,
+            })
+        }
+    };
+    conv.members += 1;
+    let member = Member {
+        key: key.to_string(),
+        rx: conv.tx.subscribe(),
+        last: conv.seq,
+    };
+    Ok((member, conv.mode, conv.seq))
+}
+
+/// Moves the conversation to `mode` and tells every member; the same mode
+/// is ignored.
+fn publish_mode(key: &str, mode: Mode) {
+    let mut table = CONVERSATIONS.lock().unwrap();
+    if let Some(conv) = table.get_mut(key)
+        && conv.mode != mode
+    {
+        conv.mode = mode;
+        conv.seq += 1;
+        let _ = conv.tx.send((conv.seq, mode));
+    }
+}
+
+/// A new `state` for every member with the mode unchanged (one member's
+/// `agent_speaking` or enrollment changed).
+fn publish_state(key: &str) {
+    let mut table = CONVERSATIONS.lock().unwrap();
+    if let Some(conv) = table.get_mut(key) {
+        conv.seq += 1;
+        let _ = conv.tx.send((conv.seq, conv.mode));
+    }
+}
+
+impl Member {
+    /// The next change this socket has not been told. After a lag the
+    /// conversation's current state is the truth, and older ones are skipped.
+    async fn changed(&mut self) -> (u64, Mode) {
+        loop {
+            let (seq, mode) = match self.rx.recv().await {
+                Ok(change) => change,
+                // The sender lives in the table while this member does, so
+                // this is a lag.
+                Err(_) => {
+                    let table = CONVERSATIONS.lock().unwrap();
+                    let conv = &table[&self.key];
+                    (conv.seq, conv.mode)
+                }
+            };
+            if seq > self.last {
+                self.last = seq;
+                return (seq, mode);
+            }
+        }
+    }
+}
+
+impl Drop for Member {
+    fn drop(&mut self) {
+        let mut table = CONVERSATIONS.lock().unwrap();
+        if let Some(conv) = table.get_mut(&self.key) {
+            conv.members -= 1;
+            if conv.members == 0 {
+                table.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// A change for a socket that may be in a conversation; never, if not.
+async fn changed(member: &mut Option<Member>) -> (u64, Mode) {
+    match member {
+        Some(m) => m.changed().await,
+        None => std::future::pending().await,
+    }
+}
+
 /// The first message.
 #[derive(Deserialize)]
 struct LiveStart {
     /// Required unless `session` names a session that can be resumed.
     mode: Option<String>,
-    /// Sample rate of the microphone frames: 16000.
-    rate: u64,
+    /// Sample rate of the microphone frames: 16000. Required for `audio`.
+    rate: Option<u64>,
     session: Option<String>,
+    /// Sockets with the same key share one mode and `seq`.
+    conversation: Option<String>,
+    /// `audio` (the default) or `control`: mode messages only, no audio.
+    role: Option<String>,
     model: Option<String>,
     /// Partial utterances; on unless `false`.
     partials: Option<bool>,
@@ -293,6 +421,16 @@ impl Live {
 
     fn state_event(&mut self, resumed: Option<&Snapshot>) -> Value {
         self.seq += 1;
+        self.state_value(resumed)
+    }
+
+    /// A `state` at a conversation's `seq`.
+    fn shared_state(&mut self, seq: u64, resumed: Option<&Snapshot>) -> Value {
+        self.seq = seq;
+        self.state_value(resumed)
+    }
+
+    fn state_value(&self, resumed: Option<&Snapshot>) -> Value {
         let mut ids: Vec<&String> = self.speaks.keys().collect();
         ids.sort();
         let mut event = json!({
@@ -457,6 +595,28 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
             ));
         }
     };
+    if let Some(key) = &start.conversation {
+        check_id("conversation", key)?;
+    }
+    let control = match start.role.as_deref() {
+        None | Some("audio") => false,
+        Some("control") => true,
+        Some(other) => {
+            return Err(violation(
+                "invalid_request",
+                format!("role {other:?} is not one of audio, control"),
+            ));
+        }
+    };
+    if control {
+        return control_session(req_id, socket, start).await;
+    }
+    let Some(rate) = start.rate else {
+        return Err(violation(
+            "invalid_request",
+            "start needs a rate (16000) for an audio socket",
+        ));
+    };
     if start.format != "s16le" {
         return Err(violation(
             "unsupported_value",
@@ -472,7 +632,7 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
     };
     let requested = start.mode.as_deref().map(parse_mode).transpose()?;
     // Everything else is the stream's own validation.
-    let mut fields = json!({"sample_rate": start.rate, "partials": start.partials.unwrap_or(true)});
+    let mut fields = json!({"sample_rate": rate, "partials": start.partials.unwrap_or(true)});
     for (key, value) in [
         ("model", start.model.as_ref().map(|m| json!(m))),
         ("hotwords", start.hotwords.as_ref().map(|h| json!(h))),
@@ -492,8 +652,10 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
 
     let previous = recall(&session_id);
     let mode = match (requested, &previous) {
-        (Some(mode), _) => mode,
-        (None, Some(prev)) => prev.mode,
+        (Some(mode), _) => Some(mode),
+        (None, Some(prev)) => Some(prev.mode),
+        // A conversation that exists has a mode.
+        (None, None) if start.conversation.is_some() => None,
         (None, None) => {
             return Err(violation(
                 "invalid_request",
@@ -565,6 +727,14 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         None
     });
 
+    // A conversation's mode and seq win over the resumed ones.
+    let (mut member, mode, shared_seq) = match &start.conversation {
+        Some(key) => {
+            let (member, mode, seq) = join(key, mode)?;
+            (Some(member), mode, Some(seq))
+        }
+        None => (None, mode.expect("checked above"), None),
+    };
     let mut live = Live::new(
         mode,
         previous.as_ref().map_or(0, |p| p.seq),
@@ -578,13 +748,27 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
     if send(socket, ready).await.is_err() {
         return Ok(Ended::Gone);
     }
-    let first = live.state_event(previous.as_ref());
+    let first = match shared_seq {
+        Some(seq) => live.shared_state(seq, previous.as_ref()),
+        None => live.state_event(previous.as_ref()),
+    };
     remember_state(&session_id, &live);
     if send(socket, first).await.is_err() {
         return Ok(Ended::Gone);
     }
 
-    let result = drive(st, req_id, socket, &session_id, &mut live, cfg, vad, model).await;
+    let result = drive(
+        st,
+        req_id,
+        socket,
+        &session_id,
+        &mut live,
+        &mut member,
+        cfg,
+        vad,
+        model,
+    )
+    .await;
     let lost = live.abort_speaks();
     match &result {
         Ok(Ended::Stopped) => forget(&session_id),
@@ -599,6 +783,79 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         ),
     }
     result
+}
+
+/// A `control` socket: joins `start.conversation` and carries its mode
+/// both ways, with no audio, model or VAD.
+async fn control_session(
+    req_id: &str,
+    socket: &mut WebSocket,
+    start: LiveStart,
+) -> Result<Ended, Fail> {
+    let Some(key) = start.conversation else {
+        return Err(violation(
+            "invalid_request",
+            "a control socket needs a conversation",
+        ));
+    };
+    let session_id = match &start.session {
+        Some(id) => {
+            check_id("session", id)?;
+            id.clone()
+        }
+        None => req_id.to_string(),
+    };
+    let requested = start.mode.as_deref().map(parse_mode).transpose()?;
+    let (mut member, mode, seq) = join(&key, requested)?;
+    let state = |mode: Mode, seq: u64| {
+        json!({
+            "type": "state", "mode": mode_name(mode), "seq": seq, "agent_speaking": false,
+            "enrolled": false, "enrolling": false, "speaking": [], "resumed": false,
+        })
+    };
+    let ready = json!({
+        "type": "ready", "session": session_id, "role": "control", "conversation": key,
+        "resumed": false,
+    });
+    if send(socket, ready).await.is_err() || send(socket, state(mode, seq)).await.is_err() {
+        return Ok(Ended::Gone);
+    }
+    loop {
+        tokio::select! {
+            msg = next(socket) => {
+                let Some(msg) = msg? else { return Ok(Ended::Gone) };
+                match msg {
+                    Message::Text(text) => match parse(&text)? {
+                        ClientMessage::Mode { mode } => publish_mode(&key, parse_mode(&mode)?),
+                        ClientMessage::Stop => {
+                            if send(socket, json!({"type": "done"})).await.is_err() {
+                                return Ok(Ended::Gone);
+                            }
+                            return Ok(Ended::Stopped);
+                        }
+                        ClientMessage::Start(_) => {
+                            return Err(violation("invalid_request", "the session has already started"));
+                        }
+                        _ => {
+                            return Err(violation(
+                                "invalid_request",
+                                "a control socket accepts only mode and stop",
+                            ));
+                        }
+                    },
+                    Message::Binary(_) => {
+                        return Err(violation("invalid_request", "a control socket takes no audio"));
+                    }
+                    _ => {}
+                }
+            }
+            (seq, mode) = member.changed() => {
+                if send(socket, state(mode, seq)).await.is_err() {
+                    return Ok(Ended::Gone);
+                }
+            }
+        }
+    }
 }
 
 /// The state a reconnect would find, with the speaks running now.
@@ -623,6 +880,7 @@ async fn drive(
     socket: &mut WebSocket,
     session_id: &str,
     live: &mut Live,
+    member: &mut Option<Member>,
     cfg: Config,
     vad: Vad,
     model: crate::manager::Guard,
@@ -718,8 +976,10 @@ async fn drive(
                         }
                     }
                     Message::Text(text) => {
+                        let conv = member.as_ref().map(|m| m.key.as_str());
                         let sent = client_message(
-                            st, req_id, session_id, live, &out_tx, &input_tx, &mut stopping, &text,
+                            st, req_id, session_id, live, conv, &out_tx, &input_tx, &mut stopping,
+                            &text,
                         )
                         .await?;
                         for event in sent {
@@ -750,6 +1010,18 @@ async fn drive(
                     return Err(internal(st, req_id, "the session's workers stopped".to_string()).into());
                 }
             },
+            (seq, mode) = changed(member) => {
+                // As a `mode` message does: the old mode's audio is cut first.
+                if mode != live.mode() {
+                    let _ = input_tx.send(Input::Flush);
+                    live.set_mode(mode);
+                }
+                let state = live.shared_state(seq, None);
+                remember_state(session_id, live);
+                if send(socket, state).await.is_err() {
+                    return Ok(Ended::Gone);
+                }
+            }
             Some(event) = out.recv() => {
                 // A speak that ended is no longer running.
                 let ended = match event["type"].as_str() {
@@ -768,13 +1040,16 @@ async fn drive(
     }
 }
 
-/// One client text frame after `start`; the events to send back.
+/// One client text frame after `start`; the events to send back. In a
+/// conversation a `state` is published instead, and every member, this one
+/// included, sends it when it arrives.
 #[allow(clippy::too_many_arguments)]
 async fn client_message(
     st: &Arc<AppState>,
     req_id: &str,
     session_id: &str,
     live: &mut Live,
+    conv: Option<&str>,
     out: &UnboundedSender<Value>,
     input: &UnboundedSender<Input>,
     stopping: &mut bool,
@@ -790,7 +1065,9 @@ async fn client_message(
         }
         ClientMessage::Mode { mode } => {
             let mode = parse_mode(&mode)?;
-            if mode != live.mode() {
+            if let Some(key) = conv {
+                publish_mode(key, mode);
+            } else if mode != live.mode() {
                 // What the old mode heard is the old mode's: cut it first.
                 let _ = input.send(Input::Flush);
                 live.set_mode(mode);
@@ -813,7 +1090,10 @@ async fn client_message(
                         }));
                     }
                 }
-                sent.push(live.state_event(None));
+                match conv {
+                    Some(key) => publish_state(key),
+                    None => sent.push(live.state_event(None)),
+                }
                 remember_state(session_id, live);
             }
         }
@@ -825,7 +1105,15 @@ async fn client_message(
             let _ = input.send(Input::Stop);
         }
         ClientMessage::Enroll { action } => {
-            sent.extend(enroll(st, req_id, live, &action).await);
+            let mut events = enroll(st, req_id, live, &action).await;
+            if let Some(key) = conv {
+                let before = events.len();
+                events.retain(|e| e["type"] != "state");
+                if events.len() < before {
+                    publish_state(key);
+                }
+            }
+            sent.extend(events);
             remember_state(session_id, live);
         }
         ClientMessage::Speak {
