@@ -163,7 +163,7 @@ struct Conv {
     members: usize,
     /// Each change as `(seq, mode)`, to every member.
     tx: broadcast::Sender<(u64, Mode)>,
-    /// `wake` and `ambient_verdict` events as `(sender's member id, event)`,
+    /// `wake`, `ambient_verdict` and `level` events as `(sender's member id, event)`,
     /// to every other member; the sender sends its own.
     events: broadcast::Sender<(u64, Value)>,
 }
@@ -190,7 +190,7 @@ struct Member {
 enum Shared {
     /// A `state` change: `(seq, mode)`.
     State(u64, Mode),
-    /// Another member's `wake` or `ambient_verdict`.
+    /// Another member's `wake`, `ambient_verdict` or `level`.
     Event(Value),
 }
 
@@ -252,7 +252,7 @@ fn publish_state(key: &str) {
     }
 }
 
-/// Sends `event` (a `wake` or `ambient_verdict`) to every other member of
+/// Sends `event` (a `wake`, `ambient_verdict` or `level`) to every other member of
 /// `key`; `from` sends it itself.
 fn publish_event(key: &str, from: u64, event: Value) {
     let table = CONVERSATIONS.lock().unwrap();
@@ -1077,10 +1077,14 @@ async fn drive(
                             });
                         }
                         let _ = input_tx.send(Input::Audio(fed));
-                        if let Some(level) = live.level_event()
-                            && send(socket, level).await.is_err()
-                        {
-                            return Ok(Ended::Gone);
+                        if let Some(level) = live.level_event() {
+                            // Every other member gets it too, at the same rate.
+                            if let Some(m) = member.as_ref() {
+                                publish_event(&m.key, m.id, level.clone());
+                            }
+                            if send(socket, level).await.is_err() {
+                                return Ok(Ended::Gone);
+                            }
                         }
                     }
                     Message::Text(text) => {

@@ -86,7 +86,7 @@ Text frames:
 | Event | Fields |
 | --- | --- |
 | `state` | `mode`, `seq`, `agent_speaking`, `enrolled`, `enrolling`, `speaking` (running speak ids), `resumed`, and on a resume `previous_mode`, `lost_speaks`. `seq` rises by one on every `state`, so a client can spot a gap. In a conversation `seq` is the conversation's, shared by every socket in it |
-| `level` | `rms` (the loudest frame since the last event, 0 to 1), `gate` (whether the microphone is reaching the VAD). At most every 100 ms, only while frames arrive |
+| `level` | `rms` (the loudest frame since the last event, 0 to 1), `gate` (whether the microphone is reaching the VAD). At most every 100 ms, only while frames arrive. Sent to every socket of the conversation |
 | `speech` | `active`, `at`: the VAD's edges, as §2.4 |
 | `partial` | `segment`, `start`, `text`: the open utterance so far. Only in `live` mode and while the agent is not speaking. An empty `text` clears a partial whose segment was then dropped |
 | `utterance` | `id` (0, 1, 2… per session), `segment`, `text`, `start`, `end` (seconds since `start`), `decode_ms`, and `speaker` (`score`, `is_him`, `reason`) when an enrollment exists |
@@ -169,7 +169,7 @@ needed. It is answered by
  "speaking":[],"resumed":false}
 ```
 
-and then gets every `state` of the conversation, and every `wake` and `ambient_verdict`. It accepts only `mode` and `stop` (`done`, then close 1000).
+and then gets every `state` of the conversation, and every `wake`, `ambient_verdict` and `level`. It accepts only `mode` and `stop` (`done`, then close 1000).
 Binary frames, `agent_speaking`, `speak`, `enroll`, `flush` and a second `start` are fatal `invalid_request`
 (1008). Its `state` always has `agent_speaking`, `enrolled` and `enrolling` false and `speaking` empty.
 

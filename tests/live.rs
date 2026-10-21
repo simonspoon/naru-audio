@@ -919,7 +919,8 @@ async fn a_control_mute_shuts_the_audio_sockets_gate() {
         .await
         .unwrap();
     let back = next_of(&mut audio, "state").await;
-    let mirrored = exactly_state(&mut ctl).await;
+    // The muted frames' `level` events reach the control socket first.
+    let mirrored = next_of(&mut ctl, "state").await;
     for state in [&back, &mirrored] {
         assert_eq!(state["mode"], "live", "{state}");
         assert_eq!(state["seq"], 3, "{state}");
@@ -931,6 +932,58 @@ async fn a_control_mute_shuts_the_audio_sockets_gate() {
     );
     quiet(&mut ctl).await;
     stop(&mut ctl).await;
+}
+
+/// The `level` events among `events`, as `(rms, gate)`.
+fn levels(events: &[Value]) -> Vec<(f64, bool)> {
+    events
+        .iter()
+        .filter(|e| e["type"] == "level")
+        .map(|e| (e["rms"].as_f64().unwrap(), e["gate"].as_bool().unwrap()))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn level_events_reach_every_socket_of_the_conversation() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let conv = "c-level";
+    let (mut audio, _) = ready(&addr, json!({"conversation": conv})).await;
+    let (mut ctl, _) = control(&addr, conv, "live").await;
+    let speech = samples("plain.wav");
+    for frame in speech.chunks(640).take(15) {
+        audio.send(Message::binary(s16le(frame))).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let on_audio = levels(&stop(&mut audio).await);
+    // The audio socket published each before sending it, so all are queued.
+    let mut seen = Vec::new();
+    while let Ok(Some(Ok(msg))) = tokio::time::timeout(Duration::from_millis(300), ctl.next()).await
+    {
+        if let Message::Text(t) = msg {
+            seen.push(serde_json::from_str::<Value>(&t).unwrap());
+        }
+    }
+    let on_ctl = levels(&seen);
+    let level_divergence = on_audio.len().max(on_ctl.len())
+        - on_audio.iter().zip(&on_ctl).filter(|(a, c)| a == c).count();
+    eprintln!("ran: level_divergence = {level_divergence}, levels = {on_audio:?}");
+    assert!(!on_audio.is_empty(), "{on_audio:?}");
+    assert_eq!(level_divergence, 0, "audio {on_audio:?} control {on_ctl:?}");
+    stop(&mut ctl).await;
+
+    // Without `conversation` a socket's levels stay its own.
+    let (mut other, _) = control(&addr, "c-level-other", "live").await;
+    let (mut solo, _) = ready(&addr, json!({})).await;
+    for frame in speech.chunks(640).take(15) {
+        solo.send(Message::binary(s16le(frame))).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let level = next_of(&mut solo, "level").await;
+    assert!(level["rms"].as_f64().unwrap() > 0.0, "{level}");
+    stop(&mut solo).await;
+    quiet(&mut other).await;
+    stop(&mut other).await;
 }
 
 // Ambient mode's wake word (naru task 2208): `wake.wav` is macOS `say -v
