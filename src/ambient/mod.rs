@@ -1,8 +1,8 @@
 //! The ambient decision gate and ambient state machine, ported from naru-ios (naru task 2031):
 //! `NaruAmbientGate/InternDecisionGate.swift` and `NaruKit/AmbientMachine.swift`.
 //!
-//! Docs: `docs/ambient.md`. Nothing here is wired into the server yet; naru-ios keeps its own copy
-//! until the switch task. Everything runs locally, with no API key.
+//! Docs: `docs/ambient.md`. `server/live.rs` runs each `ambient` line through an [`machine::AmbientMachine`]
+//! and the gate (naru task 2208). Everything runs locally, with no API key.
 //!
 //! * [`machine`]: the pure state machine (no I/O, no clock; `now_ms` is passed in).
 //! * [`intern`]: the Intern-Decision-4B prompt, the calibrated A/B/C readout and the routing rule,

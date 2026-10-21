@@ -932,3 +932,89 @@ async fn a_control_mute_shuts_the_audio_sockets_gate() {
     quiet(&mut ctl).await;
     stop(&mut ctl).await;
 }
+
+// Ambient mode's wake word (naru task 2208): `wake.wav` is macOS `say -v
+// Samantha "Hey Naru. What time is it?"` at 16 kHz, which Parakeet hears as
+// "Hey Neru, what time is it?" (a built-in spelling).
+
+/// `wake.wav` followed by 1 s of silence.
+fn wake_line() -> Vec<f32> {
+    let mut pcm = samples("wake.wav");
+    pcm.extend(vec![0.0f32; 16_000]);
+    pcm
+}
+
+fn wake_events(events: &[Value]) -> usize {
+    events.iter().filter(|e| e["type"] == "wake").count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wake_word_in_ambient_emits_one_wake() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let (mut ws, _) = ready(&addr, json!({"mode": "ambient"})).await;
+    send_audio(&mut ws, &wake_line()).await;
+    let events = stop(&mut ws).await;
+    let wake_events = wake_events(&events);
+    eprintln!("ran: wake_events = {wake_events}");
+    assert_eq!(wake_events, 1, "{events:?}");
+    let wake = events.iter().find(|e| e["type"] == "wake").unwrap();
+    assert!(wake["at_ms"].is_u64(), "{wake}");
+    assert!(wake["context"].is_array(), "{wake}");
+    // The wake line is still flagged, and comes first.
+    let flag = events
+        .iter()
+        .position(|e| e["type"] == "ambient_flag")
+        .expect("an ambient_flag");
+    let at = events.iter().position(|e| e["type"] == "wake").unwrap();
+    assert!(flag < at, "{events:?}");
+    assert_eq!(
+        wake["text"],
+        events[flag]["text"].as_str().unwrap().trim(),
+        "{events:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_wake_line_emits_no_wake() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let (mut ws, _) = ready(&addr, json!({"mode": "ambient"})).await;
+    send_audio(&mut ws, &two_plains()).await;
+    let events = stop(&mut ws).await;
+    let wake_events = wake_events(&events);
+    eprintln!("ran: wake_events = {wake_events}");
+    assert_eq!(wake_events, 0, "{events:?}");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["type"] == "ambient_flag")
+            .count(),
+        2,
+        "{events:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_conversation_socket_gets_the_wake() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let conv = "c-wake";
+    let (mut audio, first) = ready(&addr, json!({"conversation": conv, "mode": "ambient"})).await;
+    assert_eq!(first["mode"], "ambient", "{first}");
+    let (mut ctl, _) = control(&addr, conv, "ambient").await;
+    send_audio(&mut audio, &wake_line()).await;
+    let on_ctl = next_of(&mut ctl, "wake").await;
+    let events = stop(&mut audio).await;
+    assert_eq!(wake_events(&events), 1, "{events:?}");
+    let on_audio = events.iter().find(|e| e["type"] == "wake").unwrap();
+    assert_eq!(&on_ctl, on_audio);
+    // Exactly one on the control socket too.
+    let (rest, close) = {
+        ctl.send(text(json!({"type": "stop"}))).await.unwrap();
+        until_close(&mut ctl).await
+    };
+    assert_eq!(close, Some(1000), "{rest:?}");
+    assert_eq!(wake_events(&rest), 0, "{rest:?}");
+    eprintln!("ran: control wake {on_ctl}");
+}

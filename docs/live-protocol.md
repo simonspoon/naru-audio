@@ -90,7 +90,9 @@ Text frames:
 | `speech` | `active`, `at`: the VAD's edges, as §2.4 |
 | `partial` | `segment`, `start`, `text`: the open utterance so far. Only in `live` mode and while the agent is not speaking. An empty `text` clears a partial whose segment was then dropped |
 | `utterance` | `id` (0, 1, 2… per session), `segment`, `text`, `start`, `end` (seconds since `start`), `decode_ms`, and `speaker` (`score`, `is_him`, `reason`) when an enrollment exists |
-| `ambient_flag` | the same fields as `utterance`, for speech heard in `ambient` mode. The server only flags it; no ambient classification exists yet (next step) |
+| `ambient_flag` | the same fields as `utterance`, for every segment heard in `ambient` mode (the speaker guard scores it too when an enrollment exists). The `wake` or `ambient_verdict` it leads to, if any, follows it |
+| `wake` | `text` (the line that woke), `remainder` (the words after the wake word, or `null`), `at_ms` (ms since the session began), `context` (the last ~30 s before it, oldest first: `speaker` `him`/`other`/`unknown`, `text`, `at_ms`). The wake word was heard in `ambient` mode (Ambient, below). Sent to every socket of the conversation |
+| `ambient_verdict` | `kind` (`idea` or `can_help`), `score` (0 to 1: 1 − P(ignore), above 0.9), `text`, `at_ms`, `context` as `wake`. The ambient gate flagged a line of his. Sent to every socket of the conversation |
 | `speak_audio` | `id`, `seq` (from 0), `rate`, `final`, `data` (base64 s16le mono, at most 16 KiB raw per chunk). The last event of an id has `final: true` and empty `data`; `cancelled: true` when it was cut |
 | `error` | `code`, `message`, `fatal`, and `id` for a speak. `fatal: true` is followed by the close; `false` leaves the session open |
 | `done` | after `stop`, before the 1000 close |
@@ -104,6 +106,24 @@ never. A shut gate feeds the VAD **silence of the same length**, not nothing, so
 carry on. A finished segment then goes through `LiveState::segment_fate`: in `live` it must also pass the speaker
 guard (`speaker::verify`). The guard **fails open** — no enrollment, a clip under 1 s, or the model not pulled is
 "him" — so a short "yes" is never dropped. A dropped segment sends nothing but a clearing `partial`.
+
+## Ambient (naru task 2208)
+
+In `ambient` mode each segment also goes through the ambient machine and gate (`src/ambient/`, `docs/ambient.md`).
+The server only reports; it never changes the mode itself, so a client that wants to talk after a `wake` sends
+`{"type":"mode","mode":"live"}`.
+
+- **Wake.** A line that opens with the wake word — the built-in "Naru" spellings (`neru`, `niru`, …), a bare
+  sound-alike such as "Hey Naro", or one of naru's custom `ambient.wake_words` — is a `wake`. Custom words are read
+  at session start from `NARU_AUDIO_WAKE_CONFIG`, else `~/.naru/config.json` (when `~/.naru` exists), else
+  `~/.mesa/config.json`. A line tagged as another voice by the speaker guard never wakes; an untagged one (no
+  enrollment, under 1 s) may. After a wake the machine is in its conversation and sends no second `wake` until it
+  returns: "thanks, that's all", 120 s without his voice, or the socket entering `ambient` again from another mode.
+- **Verdict.** Outside that conversation a line of his (tagged by the speaker guard, so an enrollment is needed) is
+  judged by the gate, the model named by `NARU_AUDIO_AMBIENT_GATE` (a GGUF; needs the `llama` build). Unset or
+  failing to load, nothing is ever flagged. A flagged line is an `ambient_verdict`.
+- **Conversations.** The socket that heard it sends its own `wake` or `ambient_verdict`; every other socket of its
+  conversation, control sockets included, gets the same event once.
 
 ## Reconnect and resync
 
@@ -149,7 +169,7 @@ needed. It is answered by
  "speaking":[],"resumed":false}
 ```
 
-and then gets every `state` of the conversation. It accepts only `mode` and `stop` (`done`, then close 1000).
+and then gets every `state` of the conversation, and every `wake` and `ambient_verdict`. It accepts only `mode` and `stop` (`done`, then close 1000).
 Binary frames, `agent_speaking`, `speak`, `enroll`, `flush` and a second `start` are fatal `invalid_request`
 (1008). Its `state` always has `agent_speaking`, `enrolled` and `enrolling` false and `speaking` empty.
 

@@ -15,8 +15,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
@@ -40,6 +40,8 @@ use super::stream::{
 };
 use super::transcriptions::{decode_error, internal, kind_manifest, stt_manifest};
 use super::{AppState, RequestId, manager_error};
+use crate::ambient::machine::{self, AmbientMachine, EventKind, LogLine};
+use crate::ambient::{self, AmbientGate};
 use crate::echo::EchoCanceller;
 use crate::error::ApiError;
 use crate::live_mode::{LiveState, Mode, SegmentFate};
@@ -104,6 +106,52 @@ fn forget(session: &str) {
     RESUME.lock().unwrap().remove(session);
 }
 
+/// The ambient gate, loaded on first use from the GGUF named by
+/// `NARU_AUDIO_AMBIENT_GATE`; unset, or any load failure, is the
+/// [`ambient::NullGate`] (`ambient::load_gate` fails open). Process-wide for
+/// the same reason as [`RESUME`].
+static GATE: OnceLock<Arc<dyn AmbientGate>> = OnceLock::new();
+
+fn gate() -> Arc<dyn AmbientGate> {
+    GATE.get_or_init(|| {
+        let path = std::env::var_os("NARU_AUDIO_AMBIENT_GATE")
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from);
+        ambient::load_gate(path.as_deref())
+    })
+    .clone()
+}
+
+/// Naru's custom wake words, `ambient.wake_words` in its config file:
+/// `NARU_AUDIO_WAKE_CONFIG`, else `~/.naru/config.json` when `~/.naru`
+/// exists, else `~/.mesa/config.json` (naru's own `config_file`). A missing
+/// or unreadable file means none.
+fn wake_words() -> Vec<String> {
+    let path = match std::env::var_os("NARU_AUDIO_WAKE_CONFIG").filter(|p| !p.is_empty()) {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let Some(home) = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(std::path::PathBuf::from)
+            else {
+                return Vec::new();
+            };
+            let naru = home.join(".naru");
+            let dot = if naru.is_dir() {
+                naru
+            } else {
+                home.join(".mesa")
+            };
+            dot.join("config.json")
+        }
+    };
+    std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| serde_json::from_value(v["ambient"]["wake_words"].clone()).ok())
+        .unwrap_or_default()
+}
+
 /// Changes a conversation keeps for a slow member before it lags.
 const CONVERSATION_BACKLOG: usize = 16;
 
@@ -115,7 +163,13 @@ struct Conv {
     members: usize,
     /// Each change as `(seq, mode)`, to every member.
     tx: broadcast::Sender<(u64, Mode)>,
+    /// `wake` and `ambient_verdict` events as `(sender's member id, event)`,
+    /// to every other member; the sender sends its own.
+    events: broadcast::Sender<(u64, Value)>,
 }
+
+/// Member ids, so a member skips the events it published itself.
+static MEMBER_IDS: AtomicU64 = AtomicU64::new(0);
 
 /// Conversations by key, while they have members. Process-wide for the same
 /// reason as [`RESUME`].
@@ -125,9 +179,19 @@ static CONVERSATIONS: LazyLock<Mutex<HashMap<String, Conv>>> =
 /// One socket's membership of a conversation; dropping it leaves.
 struct Member {
     key: String,
+    id: u64,
     rx: broadcast::Receiver<(u64, Mode)>,
+    events: broadcast::Receiver<(u64, Value)>,
     /// The latest `seq` this socket was told.
     last: u64,
+}
+
+/// What a member hears from its conversation.
+enum Shared {
+    /// A `state` change: `(seq, mode)`.
+    State(u64, Mode),
+    /// Another member's `wake` or `ambient_verdict`.
+    Event(Value),
 }
 
 /// Joins `key`, creating it in `seed` when it is new; the current mode and
@@ -144,18 +208,22 @@ fn join(key: &str, seed: Option<Mode>) -> Result<(Member, Mode, u64), Fail> {
                 ));
             };
             let (tx, _) = broadcast::channel(CONVERSATION_BACKLOG);
+            let (events, _) = broadcast::channel(CONVERSATION_BACKLOG);
             table.entry(key.to_string()).or_insert(Conv {
                 mode,
                 seq: 1,
                 members: 0,
                 tx,
+                events,
             })
         }
     };
     conv.members += 1;
     let member = Member {
         key: key.to_string(),
+        id: MEMBER_IDS.fetch_add(1, Ordering::Relaxed),
         rx: conv.tx.subscribe(),
+        events: conv.events.subscribe(),
         last: conv.seq,
     };
     Ok((member, conv.mode, conv.seq))
@@ -184,24 +252,45 @@ fn publish_state(key: &str) {
     }
 }
 
+/// Sends `event` (a `wake` or `ambient_verdict`) to every other member of
+/// `key`; `from` sends it itself.
+fn publish_event(key: &str, from: u64, event: Value) {
+    let table = CONVERSATIONS.lock().unwrap();
+    if let Some(conv) = table.get(key) {
+        let _ = conv.events.send((from, event));
+    }
+}
+
 impl Member {
-    /// The next change this socket has not been told. After a lag the
-    /// conversation's current state is the truth, and older ones are skipped.
-    async fn changed(&mut self) -> (u64, Mode) {
+    /// The next change this socket has not been told, or another member's
+    /// event. After a lag the conversation's current state is the truth, and
+    /// older ones are skipped; lagged events are lost.
+    async fn changed(&mut self) -> Shared {
         loop {
-            let (seq, mode) = match self.rx.recv().await {
-                Ok(change) => change,
-                // The sender lives in the table while this member does, so
-                // this is a lag.
-                Err(_) => {
-                    let table = CONVERSATIONS.lock().unwrap();
-                    let conv = &table[&self.key];
-                    (conv.seq, conv.mode)
+            tokio::select! {
+                change = self.rx.recv() => {
+                    let (seq, mode) = match change {
+                        Ok(change) => change,
+                        // The sender lives in the table while this member
+                        // does, so this is a lag.
+                        Err(_) => {
+                            let table = CONVERSATIONS.lock().unwrap();
+                            let conv = &table[&self.key];
+                            (conv.seq, conv.mode)
+                        }
+                    };
+                    if seq > self.last {
+                        self.last = seq;
+                        return Shared::State(seq, mode);
+                    }
                 }
-            };
-            if seq > self.last {
-                self.last = seq;
-                return (seq, mode);
+                event = self.events.recv() => {
+                    if let Ok((from, event)) = event
+                        && from != self.id
+                    {
+                        return Shared::Event(event);
+                    }
+                }
             }
         }
     }
@@ -220,7 +309,7 @@ impl Drop for Member {
 }
 
 /// A change for a socket that may be in a conversation; never, if not.
-async fn changed(member: &mut Option<Member>) -> (u64, Mode) {
+async fn changed(member: &mut Option<Member>) -> Shared {
     match member {
         Some(m) => m.changed().await,
         None => std::future::pending().await,
@@ -349,6 +438,9 @@ struct Live {
     typed: bool,
     echo: EchoCanceller,
     began: Instant,
+    /// The wake word and the gate's routing for `ambient` mode; its clock is
+    /// `began`.
+    ambient: AmbientMachine,
 }
 
 impl Live {
@@ -371,14 +463,25 @@ impl Live {
             typed,
             echo: EchoCanceller::new(),
             began: Instant::now(),
+            ambient: AmbientMachine::new(),
         };
         live.set_mode(mode);
         live
     }
 
+    /// Milliseconds since the session began: the ambient machine's clock.
+    fn now_ms(&self) -> u64 {
+        self.began.elapsed().as_millis() as u64
+    }
+
     /// Drives [`LiveState`] to `mode`: live and joined unless idle, ambient
     /// as asked, muted only while the pipeline is wanted.
     fn set_mode(&mut self, mode: Mode) {
+        if mode == Mode::Ambient && self.mode() != Mode::Ambient {
+            // Back in ambient, the next wake word wakes again.
+            let now = self.now_ms();
+            self.ambient.end_conversation(now);
+        }
         let s = &mut self.state;
         s.live = mode != Mode::Idle;
         s.joined = mode != Mode::Idle;
@@ -741,6 +844,7 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         enrolled,
         start.typed_frames,
     );
+    live.ambient.set_wake_words(&wake_words());
     let ready = json!({
         "type": "ready", "session": session_id, "model": cfg.model, "load_ms": load_ms,
         "resumed": previous.is_some(), "typed_frames": start.typed_frames,
@@ -849,8 +953,12 @@ async fn control_session(
                     _ => {}
                 }
             }
-            (seq, mode) = member.changed() => {
-                if send(socket, state(mode, seq)).await.is_err() {
+            shared = member.changed() => {
+                let event = match shared {
+                    Shared::State(seq, mode) => state(mode, seq),
+                    Shared::Event(event) => event,
+                };
+                if send(socket, event).await.is_err() {
                     return Ok(Ended::Gone);
                 }
             }
@@ -993,7 +1101,8 @@ async fn drive(
             }
             event = events.recv() => match event {
                 Some(Event::Send(v)) => {
-                    for event in worker_event(st, live, v).await {
+                    let conv = member.as_ref().map(|m| (m.key.as_str(), m.id));
+                    for event in worker_event(st, live, conv, v).await {
                         if send(socket, event).await.is_err() {
                             return Ok(Ended::Gone);
                         }
@@ -1010,7 +1119,16 @@ async fn drive(
                     return Err(internal(st, req_id, "the session's workers stopped".to_string()).into());
                 }
             },
-            (seq, mode) = changed(member) => {
+            shared = changed(member) => {
+                let (seq, mode) = match shared {
+                    Shared::State(seq, mode) => (seq, mode),
+                    Shared::Event(event) => {
+                        if send(socket, event).await.is_err() {
+                            return Ok(Ended::Gone);
+                        }
+                        continue;
+                    }
+                };
                 // As a `mode` message does: the old mode's audio is cut first.
                 if mode != live.mode() {
                     let _ = input_tx.send(Input::Flush);
@@ -1319,8 +1437,14 @@ fn load_verifier(st: &AppState) -> Result<SpeakerVerifier, ApiError> {
     })
 }
 
-/// An event from the VAD or decode thread, as the events to send.
-async fn worker_event(st: &Arc<AppState>, live: &mut Live, v: Value) -> Vec<Value> {
+/// An event from the VAD or decode thread, as the events to send. `conv` is
+/// the socket's conversation key and member id, if it is in one.
+async fn worker_event(
+    st: &Arc<AppState>,
+    live: &mut Live,
+    conv: Option<(&str, u64)>,
+    v: Value,
+) -> Vec<Value> {
     match v["type"].as_str() {
         Some("speech") => {
             let active = v["active"].as_bool().unwrap_or(false);
@@ -1335,14 +1459,20 @@ async fn worker_event(st: &Arc<AppState>, live: &mut Live, v: Value) -> Vec<Valu
                 Vec::new()
             }
         }
-        Some("final") => finish_segment(st, live, &v).await,
+        Some("final") => finish_segment(st, live, conv, &v).await,
         _ => vec![v],
     }
 }
 
 /// A decoded segment: gated, scored, then an `utterance` (live), an
-/// `ambient_flag` (ambient) or nothing.
-async fn finish_segment(st: &Arc<AppState>, live: &mut Live, v: &Value) -> Vec<Value> {
+/// `ambient_flag` (ambient) or nothing. In ambient the line also goes through
+/// the ambient machine, which may add a `wake` or an `ambient_verdict`.
+async fn finish_segment(
+    st: &Arc<AppState>,
+    live: &mut Live,
+    conv: Option<(&str, u64)>,
+    v: &Value,
+) -> Vec<Value> {
     let text = v["text"].as_str().unwrap_or_default();
     let (start, end) = (
         v["start"].as_f64().unwrap_or(0.0),
@@ -1360,7 +1490,7 @@ async fn finish_segment(st: &Arc<AppState>, live: &mut Live, v: &Value) -> Vec<V
             let back = live.received.saturating_sub((end * RATE as f64) as usize);
             live.echo.clip_is_echo(&clip, back)
         });
-    let verdict = if mode == Mode::Live && live.enrolled.is_some() {
+    let verdict = if matches!(mode, Mode::Live | Mode::Ambient) && live.enrolled.is_some() {
         score(st, live, start, end).await
     } else {
         None
@@ -1395,7 +1525,92 @@ async fn finish_segment(st: &Arc<AppState>, live: &mut Live, v: &Value) -> Vec<V
     if let Some(d) = verdict {
         event["speaker"] = json!({"score": d.score, "is_him": d.is_him, "reason": d.reason});
     }
-    vec![event]
+    let mut sent = vec![event];
+    if mode == Mode::Ambient {
+        let heard = ambient_line(live, text, verdict).await;
+        // The sender sends its own, so it gets each exactly once and before
+        // a `done`; the other members get it through the conversation.
+        if let Some((key, id)) = conv {
+            for event in &heard {
+                publish_event(key, id, event.clone());
+            }
+        }
+        sent.extend(heard);
+    }
+    sent
+}
+
+/// Who the ambient machine is told said a line: the speaker guard's verdict
+/// when it scored one, else unknown (no enrollment, too short, no model).
+fn ambient_speaker(verdict: Option<speaker::Verdict>) -> machine::Speaker {
+    match verdict {
+        Some(d) if d.reason == speaker::Reason::Scored && d.is_him => machine::Speaker::Him,
+        Some(d) if d.reason == speaker::Reason::Scored => machine::Speaker::Other,
+        _ => machine::Speaker::Unknown,
+    }
+}
+
+fn context_json(context: &[LogLine]) -> Value {
+    let lines: Vec<Value> = context
+        .iter()
+        .map(|l| {
+            let who = match l.speaker {
+                machine::Speaker::Him => "him",
+                machine::Speaker::Other => "other",
+                machine::Speaker::Unknown => "unknown",
+            };
+            json!({"speaker": who, "text": l.text, "at_ms": l.at_ms})
+        })
+        .collect();
+    json!(lines)
+}
+
+/// One ambient line through the machine, and the gate when it asks: the
+/// `wake` and `ambient_verdict` events it makes. `mode_changed` and the wake
+/// candidates are the machine's own bookkeeping and are not sent.
+async fn ambient_line(
+    live: &mut Live,
+    text: &str,
+    verdict: Option<speaker::Verdict>,
+) -> Vec<Value> {
+    let now = live.now_ms();
+    let similarity = verdict.and_then(|d| d.score);
+    let machine::Ingest { output, gate: req } =
+        live.ambient
+            .ingest(now, ambient_speaker(verdict), text, similarity);
+    let mut sent: Vec<Value> = output
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::Wake)
+        .map(|e| {
+            json!({
+                "type": "wake", "text": e.text, "remainder": output.utterance,
+                "at_ms": e.at_ms, "context": context_json(&e.context),
+            })
+        })
+        .collect();
+    if let Some(req) = req {
+        // The gate is blocking (a model, when one is configured).
+        let judged = tokio::task::spawn_blocking(move || {
+            let verdict = gate().evaluate(&req.text, &req.context);
+            machine::gate_event(&req, verdict).map(|e| (e, verdict.score))
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some((event, score)) = judged {
+            let kind = if event.kind == EventKind::IdeaFlagged {
+                "idea"
+            } else {
+                "can_help"
+            };
+            sent.push(json!({
+                "type": "ambient_verdict", "kind": kind, "score": score, "text": event.text,
+                "at_ms": event.at_ms, "context": context_json(&event.context),
+            }));
+        }
+    }
+    sent
 }
 
 /// The speaker guard's verdict on the segment; `None` when the audio is gone.
