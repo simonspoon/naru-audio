@@ -18,6 +18,7 @@ use naru_audio::manager::{BackendLoader, KeepAlive, ModelManager, Settings};
 use naru_audio::profile::Profile;
 use naru_audio::registry::{self, Registry};
 use naru_audio::server::{AppState, router};
+use naru_audio::speaker::{self, Clip, Library, SpeakerVerifier};
 use naru_audio::stt::audio;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -1070,4 +1071,144 @@ async fn every_conversation_socket_gets_the_wake() {
     assert_eq!(close, Some(1000), "{rest:?}");
     assert_eq!(wake_events(&rest), 0, "{rest:?}");
     eprintln!("ran: control wake {on_ctl}");
+}
+
+// ---- voice library (naru task 2260) --------------------------------------
+
+fn voice(name: &str) -> Vec<f32> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/speaker")
+        .join(name);
+    audio::decode(std::fs::File::open(path).unwrap()).unwrap()
+}
+
+/// `clip` of speech then 1 s of silence, so the VAD closes the segment.
+fn spoken(pcm: Vec<f32>) -> Vec<f32> {
+    let mut out = pcm;
+    out.extend(vec![0.0f32; 16_000]);
+    out
+}
+
+/// Writes `people` (`(name, owner, clips)`) into `home`'s library, embedded
+/// with the pulled speaker model. `None` (skip) when it is not pulled.
+fn write_library(home: &Path, live_guard: bool, people: &[(&str, bool, &[&str])]) -> Option<()> {
+    let dir = home.join("models").join(speaker::DEFAULT_MODEL);
+    if !dir.exists() {
+        eprintln!("skip: {} not pulled", speaker::DEFAULT_MODEL);
+        return None;
+    }
+    let verifier = SpeakerVerifier::load(&dir).unwrap();
+    let mut lib = Library::default();
+    lib.live_guard = live_guard;
+    for (name, owner, clips) in people {
+        let id = lib.add_person(name, *owner);
+        let person = lib.people.iter_mut().find(|p| p.id == id).unwrap();
+        for (i, clip) in clips.iter().enumerate() {
+            person.clips.push(Clip {
+                id: id * 100 + i as u64,
+                created_at: 0,
+                seconds: 1.0,
+                embedding: verifier.embed(&voice(clip)).unwrap(),
+                has_audio: false,
+            });
+        }
+    }
+    lib.save(home).unwrap();
+    Some(())
+}
+
+fn heard_utterances(events: &[Value]) -> Vec<&Value> {
+    events.iter().filter(|e| e["type"] == "utterance").collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_guard_off_never_drops_another_voice() {
+    let Some(home) = model_home() else { return };
+    let Some(()) = write_library(home.path(), false, &[("Me", true, &["a1.wav", "a2.wav"])]) else {
+        return;
+    };
+    let addr = serve(home.path()).await;
+    let (mut ws, state) = ready(&addr, json!({})).await;
+    assert_eq!(state["enrolled"], true, "{state}");
+    assert_eq!(state["live_guard"], false, "{state}");
+    send_audio(&mut ws, &spoken(voice("b1.wav"))).await;
+    let events = stop(&mut ws).await;
+    let heard = heard_utterances(&events);
+    assert_eq!(heard.len(), 1, "{events:?}");
+    // still scored for the tag: someone else
+    assert_eq!(heard[0]["speaker"]["is_him"], false, "{}", heard[0]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_guard_on_drops_another_voice_but_not_a_short_reply() {
+    let Some(home) = model_home() else { return };
+    let Some(()) = write_library(home.path(), true, &[("Me", true, &["a1.wav", "a2.wav"])]) else {
+        return;
+    };
+    let addr = serve(home.path()).await;
+    let (mut ws, state) = ready(&addr, json!({})).await;
+    assert_eq!(state["live_guard"], true, "{state}");
+    // the other voice for 5 s is dropped ...
+    send_audio(&mut ws, &spoken(voice("b1.wav"))).await;
+    // ... his own voice is admitted ...
+    send_audio(&mut ws, &spoken(voice("a3.wav"))).await;
+    // ... and a short reply in the other voice is never dropped
+    let b = voice("b2.wav");
+    send_audio(&mut ws, &spoken(b[..b.len().min(24_000)].to_vec())).await;
+    let events = stop(&mut ws).await;
+    let heard = heard_utterances(&events);
+    let ends: Vec<f64> = heard
+        .iter()
+        .map(|u| u["end"].as_f64().unwrap() - u["start"].as_f64().unwrap())
+        .collect();
+    eprintln!("{} utterances, lengths {ends:?}", heard.len());
+    assert_eq!(heard.len(), 2, "{events:?}");
+    assert_eq!(heard[0]["speaker"]["is_him"], true, "{}", heard[0]);
+    assert!(ends[1] < 2.0, "{ends:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_library_written_mid_session_is_picked_up() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let (mut ws, state) = ready(&addr, json!({})).await;
+    assert_eq!(state["enrolled"], false, "{state}");
+    send_audio(&mut ws, &spoken(voice("b1.wav"))).await;
+    next_of(&mut ws, "utterance").await;
+    let Some(()) = write_library(home.path(), true, &[("Me", true, &["a1.wav", "a2.wav"])]) else {
+        return;
+    };
+    send_audio(&mut ws, &spoken(voice("b2.wav"))).await;
+    send_audio(&mut ws, &spoken(voice("a3.wav"))).await;
+    let events = stop(&mut ws).await;
+    let heard = heard_utterances(&events);
+    // b2 was dropped by the guard that arrived mid-session; only a3 is left
+    assert_eq!(heard.len(), 1, "{events:?}");
+    assert_eq!(heard[0]["speaker"]["person"]["name"], "Me", "{}", heard[0]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ambient_lines_name_the_person_whatever_the_guard() {
+    let Some(home) = model_home() else { return };
+    let Some(()) = write_library(
+        home.path(),
+        false,
+        &[
+            ("Me", true, &["a1.wav", "a2.wav"]),
+            ("Sam", false, &["b1.wav", "b2.wav"]),
+        ],
+    ) else {
+        return;
+    };
+    let addr = serve(home.path()).await;
+    let (mut ws, _) = ready(&addr, json!({"mode": "ambient"})).await;
+    send_audio(&mut ws, &spoken(voice("a3.wav"))).await;
+    send_audio(&mut ws, &spoken(voice("b3.wav"))).await;
+    let events = stop(&mut ws).await;
+    let names: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "ambient_flag")
+        .map(|e| &e["speaker"]["person"]["name"])
+        .collect();
+    assert_eq!(names, ["Me", "Sam"], "{events:?}");
 }

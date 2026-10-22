@@ -1,20 +1,22 @@
-//! Speaker verification and enrollment (naru task 2028), the `wespeaker-sv-en`
-//! catalog model: a WeSpeaker ResNet34 embedding (via sherpa-onnx) turns a clip
-//! into a vector, and cosine similarity against the enrolled voice says whether
-//! it is "him" — the speaker guard `docs/live-mode-spec.md` leaves to the
-//! server. Loaded fresh per request like `prep::diarize::Diarizer`.
+//! Speaker verification and the voice library (naru tasks 2028, 2260), the
+//! `wespeaker-sv-en` catalog model: a WeSpeaker ResNet34 embedding (via
+//! sherpa-onnx) turns a clip into a vector, and cosine similarity against a
+//! named person's clips says who spoke. The owner is "him", the voice the live
+//! guard admits (`docs/live-mode-spec.md`). Loaded fresh per request like
+//! `prep::diarize::Diarizer`.
 //!
 //! **Fails open** everywhere (memory: he often answers with just "yes"): no
-//! enrollment, no pulled model, an enrollment made with another model, or a
-//! clip shorter than [`MIN_SAMPLES`] all say `is_him = true`, so a guard built
-//! on this never drops a short reply or goes silent on a missing model.
+//! library, no pulled model, a library made with another model, or a clip
+//! shorter than [`MIN_SAMPLES`] all say `is_him = true`, so a guard built on
+//! this never drops a short reply or goes silent on a missing model.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
 
-/// The catalog model name; also tagged into every enrollment.
+/// The catalog model name; also tagged into the library.
 pub const DEFAULT_MODEL: &str = "wespeaker-sv-en";
 /// The embedding model's file in the pulled model directory.
 pub const EMBEDDING_FILENAME: &str = "embedding.onnx";
@@ -36,9 +38,9 @@ pub enum SpeakerError {
     CreateFailed,
     /// The extractor produced no embedding for the clip.
     EmbedFailed,
-    /// Enrolling needs at least one usable clip.
-    NoClips,
-    /// An enrollment's file could not be read or written.
+    /// A person or clip id that does not exist.
+    NotFound(String),
+    /// The library's file could not be read or written.
     Store(String),
 }
 
@@ -50,8 +52,8 @@ impl std::fmt::Display for SpeakerError {
             }
             SpeakerError::CreateFailed => write!(f, "failed to create the speaker extractor"),
             SpeakerError::EmbedFailed => write!(f, "the speaker model produced no embedding"),
-            SpeakerError::NoClips => write!(f, "enrolling needs at least one clip"),
-            SpeakerError::Store(m) => write!(f, "enrollment store: {m}"),
+            SpeakerError::NotFound(m) => write!(f, "{m}"),
+            SpeakerError::Store(m) => write!(f, "speaker store: {m}"),
         }
     }
 }
@@ -95,95 +97,388 @@ impl SpeakerVerifier {
         normalize(&mut v);
         Ok(v)
     }
-
-    /// Enrolls from `clips`, each embedded then averaged. Clips under
-    /// [`MIN_SAMPLES`] are skipped; none usable is [`SpeakerError::NoClips`].
-    pub fn enroll(&self, clips: &[Vec<f32>]) -> Result<Enrollment, SpeakerError> {
-        let mut embeddings = Vec::new();
-        for clip in clips.iter().filter(|c| c.len() >= MIN_SAMPLES) {
-            embeddings.push(self.embed(clip)?);
-        }
-        Enrollment::from_embeddings(DEFAULT_MODEL, &embeddings)
-    }
 }
 
-/// The enrolled voice: the mean of several clips' embeddings. Stored as JSON
-/// tagged with the model, since embeddings of different models are not
+/// One recorded sample of a person's voice. The audio, when kept, is
+/// `speaker/clips/<id>.wav` (16 kHz mono); only the embedding is scored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Clip {
+    pub id: u64,
+    /// Unix seconds.
+    pub created_at: u64,
+    /// Length of the audio; 0 when unknown (a migrated enrollment).
+    pub seconds: f32,
+    /// L2-normalised.
+    pub embedding: Vec<f32>,
+    pub has_audio: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Person {
+    pub id: u64,
+    pub name: String,
+    /// The voice the live guard admits ("him"); at most one person.
+    pub owner: bool,
+    pub clips: Vec<Clip>,
+}
+
+/// Who a line was attributed to.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PersonRef {
+    pub id: u64,
+    pub name: String,
+}
+
+/// The library of named people and their voice clips, `speaker/people.json`.
+/// Tagged with the model, since embeddings of different models are not
 /// comparable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Enrollment {
+pub struct Library {
     pub model: String,
-    /// How many clips went into `embedding`.
-    pub count: usize,
-    /// L2-normalised mean of the clips' normalised embeddings.
-    pub embedding: Vec<f32>,
+    /// Whether the live guard drops other voices; off until switched on.
+    #[serde(default)]
+    pub live_guard: bool,
+    pub people: Vec<Person>,
+    /// The next clip id to hand out; never reused, so a clip's audio URL never
+    /// serves another clip.
+    #[serde(default)]
+    next_clip_id: u64,
+    /// Clip WAVs to delete once the library is saved (see [`Library::update`]).
+    #[serde(skip)]
+    pending_delete: Vec<PathBuf>,
+    /// WAVs written since the library was loaded, removed if the update fails.
+    #[serde(skip)]
+    written: Vec<PathBuf>,
 }
 
-impl Enrollment {
-    /// Averages already-normalised `embeddings`; they must share one length.
-    pub fn from_embeddings(model: &str, embeddings: &[Vec<f32>]) -> Result<Self, SpeakerError> {
-        let first = embeddings.first().ok_or(SpeakerError::NoClips)?;
-        let mut mean = vec![0f32; first.len()];
-        for e in embeddings {
-            if e.len() != mean.len() {
-                return Err(SpeakerError::EmbedFailed);
-            }
-            for (m, x) in mean.iter_mut().zip(e) {
-                *m += x;
-            }
+impl Default for Library {
+    fn default() -> Self {
+        Library {
+            model: DEFAULT_MODEL.to_string(),
+            live_guard: false,
+            people: Vec::new(),
+            next_clip_id: 0,
+            pending_delete: Vec::new(),
+            written: Vec::new(),
         }
-        normalize(&mut mean);
-        Ok(Enrollment {
-            model: model.to_string(),
-            count: embeddings.len(),
-            embedding: mean,
-        })
     }
+}
 
+/// A library file's modification time and size.
+pub type Stamp = (std::time::SystemTime, u64);
+
+/// Serialises read-modify-write of the library across requests and sessions.
+static STORE: Mutex<()> = Mutex::new(());
+
+/// The name of the owner created when nothing names one.
+pub const OWNER_NAME: &str = "Me";
+
+fn store_err(e: impl std::fmt::Display) -> SpeakerError {
+    SpeakerError::Store(e.to_string())
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The pre-library single enrollment, read only to migrate it.
+#[derive(Deserialize)]
+struct LegacyEnrollment {
+    model: String,
+    embedding: Vec<f32>,
+}
+
+impl Library {
     pub fn path(home: &Path) -> PathBuf {
-        home.join("speaker").join("enrollment.json")
+        home.join("speaker").join("people.json")
     }
 
-    /// `Ok(None)` when nothing is enrolled.
-    pub fn load(home: &Path) -> Result<Option<Self>, SpeakerError> {
+    pub fn clip_path(home: &Path, clip: u64) -> PathBuf {
+        home.join("speaker")
+            .join("clips")
+            .join(format!("{clip}.wav"))
+    }
+
+    /// Changes whenever the file is rewritten; a live session reloads on it.
+    pub fn stamp(home: &Path) -> Option<Stamp> {
+        let meta = std::fs::metadata(Self::path(home)).ok()?;
+        Some((meta.modified().ok()?, meta.len()))
+    }
+
+    /// [`load`](Self::load) with the stamp taken first, so a write landing
+    /// during the load leaves the stamp stale and gets reloaded.
+    pub fn load_stamped(home: &Path) -> (Result<Self, SpeakerError>, Option<Stamp>) {
+        let stamp = Self::stamp(home);
+        (Self::load(home), stamp)
+    }
+
+    /// An empty library when nothing is stored. With no `people.json`, the old
+    /// single enrollment (`enrollment.json`, else the `.off-20261022` copy) is
+    /// migrated into an owner named "Me" and left in place.
+    pub fn load(home: &Path) -> Result<Self, SpeakerError> {
+        let _guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        Self::load_unlocked(home)
+    }
+
+    fn load_unlocked(home: &Path) -> Result<Self, SpeakerError> {
         match std::fs::read(Self::path(home)) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| SpeakerError::Store(e.to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(SpeakerError::Store(e.to_string())),
+            Ok(bytes) => return serde_json::from_slice(&bytes).map_err(store_err),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(store_err(e)),
         }
+        let dir = home.join("speaker");
+        for name in ["enrollment.json", "enrollment.json.off-20261022"] {
+            // An unreadable or corrupt candidate is skipped for the next one.
+            let Ok(bytes) = std::fs::read(dir.join(name)) else {
+                continue;
+            };
+            let Ok(old) = serde_json::from_slice::<LegacyEnrollment>(&bytes) else {
+                continue;
+            };
+            let library = Library {
+                model: old.model,
+                next_clip_id: 2,
+                people: vec![Person {
+                    id: 1,
+                    name: OWNER_NAME.to_string(),
+                    owner: true,
+                    clips: vec![Clip {
+                        id: 1,
+                        created_at: now_secs(),
+                        seconds: 0.0,
+                        embedding: old.embedding,
+                        has_audio: false,
+                    }],
+                }],
+                ..Library::default()
+            };
+            library.save(home)?;
+            return Ok(library);
+        }
+        Ok(Library::default())
     }
 
     /// Atomic: written beside the file, then renamed over it.
     pub fn save(&self, home: &Path) -> Result<(), SpeakerError> {
         let path = Self::path(home);
-        let store = |e: std::io::Error| SpeakerError::Store(e.to_string());
-        std::fs::create_dir_all(path.parent().expect("has a parent")).map_err(store)?;
+        std::fs::create_dir_all(path.parent().expect("has a parent")).map_err(store_err)?;
         let tmp = path.with_extension("json.tmp");
-        let json = serde_json::to_vec(self).map_err(|e| SpeakerError::Store(e.to_string()))?;
-        std::fs::write(&tmp, json).map_err(store)?;
-        std::fs::rename(&tmp, &path).map_err(store)
+        let json = serde_json::to_vec(self).map_err(store_err)?;
+        std::fs::write(&tmp, json).map_err(store_err)?;
+        std::fs::rename(&tmp, &path).map_err(store_err)
     }
 
-    /// Removes the enrollment; `true` if there was one.
-    pub fn delete(home: &Path) -> Result<bool, SpeakerError> {
-        match std::fs::remove_file(Self::path(home)) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(SpeakerError::Store(e.to_string())),
+    /// Loads, applies `f`, and saves if it succeeded, all under the store lock.
+    pub fn update<T>(
+        home: &Path,
+        f: impl FnOnce(&mut Library) -> Result<T, SpeakerError>,
+    ) -> Result<T, SpeakerError> {
+        let _guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut library = Self::load_unlocked(home)?;
+        let saved = f(&mut library).and_then(|out| library.save(home).map(|()| out));
+        // Files go only once the library no longer lists them, and the ones a
+        // failed update wrote are not left behind.
+        let files = match saved {
+            Ok(_) => &library.pending_delete,
+            Err(_) => &library.written,
+        };
+        for file in files {
+            let _ = std::fs::remove_file(file);
+        }
+        saved
+    }
+
+    pub fn owner(&self) -> Option<&Person> {
+        self.people.iter().find(|p| p.owner)
+    }
+
+    pub fn person(&self, id: u64) -> Result<&Person, SpeakerError> {
+        self.people
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| SpeakerError::NotFound(format!("person {id} not found")))
+    }
+
+    fn person_mut(&mut self, id: u64) -> Result<&mut Person, SpeakerError> {
+        self.people
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| SpeakerError::NotFound(format!("person {id} not found")))
+    }
+
+    /// The clips of `person` that can be scored against `model`.
+    pub fn usable<'a>(&self, person: &'a Person, model: &str) -> Vec<&'a Clip> {
+        if self.model != model {
+            return Vec::new();
+        }
+        person.clips.iter().collect()
+    }
+
+    /// Whether the owner has a clip that can be scored against `model`.
+    pub fn owner_ready(&self, model: &str) -> bool {
+        self.owner()
+            .is_some_and(|o| !self.usable(o, model).is_empty())
+    }
+
+    /// Adds a person; `owner` makes them the owner, clearing it on the others.
+    pub fn add_person(&mut self, name: &str, owner: bool) -> u64 {
+        let id = self.people.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        if owner {
+            self.people.iter_mut().for_each(|p| p.owner = false);
+        }
+        self.people.push(Person {
+            id,
+            name: name.to_string(),
+            owner,
+            clips: Vec::new(),
+        });
+        id
+    }
+
+    /// The owner's id, creating "Me" when nobody owns the library yet.
+    pub fn ensure_owner(&mut self) -> u64 {
+        match self.owner() {
+            Some(o) => o.id,
+            None => self.add_person(OWNER_NAME, true),
         }
     }
+
+    /// Renames and/or re-owns; setting `owner` true clears it on the others.
+    pub fn patch_person(
+        &mut self,
+        id: u64,
+        name: Option<&str>,
+        owner: Option<bool>,
+    ) -> Result<(), SpeakerError> {
+        self.person(id)?;
+        if owner == Some(true) {
+            self.people.iter_mut().for_each(|p| p.owner = false);
+        }
+        let person = self.person_mut(id)?;
+        if let Some(name) = name {
+            person.name = name.to_string();
+        }
+        if let Some(owner) = owner {
+            person.owner = owner;
+        }
+        Ok(())
+    }
+
+    /// Removes a person and their clip audio.
+    pub fn remove_person(&mut self, home: &Path, id: u64) -> Result<(), SpeakerError> {
+        let files: Vec<PathBuf> = (self.person(id)?.clips.iter())
+            .map(|c| Self::clip_path(home, c.id))
+            .collect();
+        self.pending_delete.extend(files);
+        self.people.retain(|p| p.id != id);
+        Ok(())
+    }
+
+    /// Adds a clip to `person`, keeping its 16 kHz audio as a WAV.
+    pub fn add_clip(
+        &mut self,
+        home: &Path,
+        person: u64,
+        pcm: &[f32],
+        embedding: Vec<f32>,
+    ) -> Result<Clip, SpeakerError> {
+        self.person(person)?;
+        if self.people.iter().all(|p| p.clips.is_empty()) {
+            self.model = DEFAULT_MODEL.to_string();
+        } else if self.model != DEFAULT_MODEL {
+            return Err(SpeakerError::Store(format!(
+                "the library was built with {}; remove its clips to start over",
+                self.model
+            )));
+        }
+        let highest = self
+            .people
+            .iter()
+            .flat_map(|p| &p.clips)
+            .map(|c| c.id)
+            .max()
+            .unwrap_or(0);
+        let id = self.next_clip_id.max(highest + 1);
+        self.next_clip_id = id + 1;
+        let path = Self::clip_path(home, id);
+        std::fs::create_dir_all(path.parent().expect("has a parent")).map_err(store_err)?;
+        write_wav(&path, pcm)?;
+        self.written.push(path);
+        let clip = Clip {
+            id,
+            created_at: now_secs(),
+            seconds: pcm.len() as f32 / SAMPLE_RATE as f32,
+            embedding,
+            has_audio: true,
+        };
+        self.person_mut(person)?.clips.push(clip.clone());
+        Ok(clip)
+    }
+
+    pub fn remove_clip(&mut self, home: &Path, person: u64, clip: u64) -> Result<(), SpeakerError> {
+        let p = self.person_mut(person)?;
+        let before = p.clips.len();
+        p.clips.retain(|c| c.id != clip);
+        if p.clips.len() == before {
+            return Err(SpeakerError::NotFound(format!("clip {clip} not found")));
+        }
+        self.pending_delete.push(Self::clip_path(home, clip));
+        Ok(())
+    }
+
+    /// Removes every clip of `person` (their audio too); `true` if there were any.
+    pub fn clear_clips(&mut self, home: &Path, person: u64) -> Result<bool, SpeakerError> {
+        let clips = std::mem::take(&mut self.person_mut(person)?.clips);
+        let had = !clips.is_empty();
+        self.pending_delete
+            .extend(clips.iter().map(|c| Self::clip_path(home, c.id)));
+        Ok(had)
+    }
+}
+
+fn write_wav(path: &Path, pcm: &[f32]) -> Result<(), SpeakerError> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE as u32,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec).map_err(store_err)?;
+    for s in pcm {
+        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        writer.write_sample(v).map_err(store_err)?;
+    }
+    writer.finalize().map_err(store_err)
+}
+
+/// How a person's clips combine into one score against a clip's embedding:
+/// the cosine to the normalised mean of their clips. Measured against the best
+/// (max) clip over leave-one-out fixtures in `tests/speaker.rs`: margins were
+/// 0.336 (mean) and 0.333 (max), so the mean, which also smooths a noisy clip.
+fn person_score(clips: &[&Clip], embedding: &[f32]) -> Option<f32> {
+    let mut mean = vec![0f32; embedding.len()];
+    let mut count = 0;
+    for c in clips
+        .iter()
+        .filter(|c| c.embedding.len() == embedding.len())
+    {
+        mean.iter_mut().zip(&c.embedding).for_each(|(m, x)| *m += x);
+        count += 1;
+    }
+    (count > 0).then(|| cosine(embedding, &mean))
 }
 
 /// Why a verdict came out as it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
-    /// Scored against the enrollment.
+    /// Scored against the library.
     Scored,
+    /// Nobody in the library has a clip to score against.
     NoEnrollment,
-    /// The enrollment was made with a different model.
+    /// The library was made with a different model.
     ModelMismatch,
     /// Under [`MIN_SAMPLES`].
     TooShort,
@@ -193,7 +488,9 @@ pub enum Reason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Verdict {
+    /// The best person's score.
     pub score: Option<f32>,
+    /// The best match is the owner (or nothing could be scored: fail open).
     pub is_him: bool,
     pub reason: Reason,
 }
@@ -208,51 +505,104 @@ impl Verdict {
     }
 }
 
+/// A verdict and the person it matched, if any.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Identity {
+    pub verdict: Verdict,
+    /// The best-scoring person at or above the threshold.
+    pub person: Option<PersonRef>,
+}
+
 /// The pure decision. `embedding` is the clip's embedding, `None` when the
-/// model could not produce one. Every case but a scored one fails open.
+/// model could not produce one. Every case but a scored one fails open. With
+/// `only_owner` only the owner is a candidate (the legacy `verify`); else every
+/// person with a usable clip is scored and the best at or above `threshold`
+/// wins. A scored clip matching nobody is `is_him: false` with no person.
 pub fn judge(
-    enrollment: Option<&Enrollment>,
+    library: Option<&Library>,
+    only_owner: bool,
     model: &str,
     samples: usize,
     embedding: Option<&[f32]>,
     threshold: f32,
-) -> Verdict {
-    let Some(enrolled) = enrollment else {
-        return Verdict::open(Reason::NoEnrollment);
+) -> Identity {
+    let open = |reason| Identity {
+        verdict: Verdict::open(reason),
+        person: None,
     };
-    if enrolled.model != model {
-        return Verdict::open(Reason::ModelMismatch);
+    let Some(library) = library else {
+        return open(Reason::NoEnrollment);
+    };
+    let candidates: Vec<(&Person, Vec<&Clip>)> = library
+        .people
+        .iter()
+        .filter(|p| p.owner || !only_owner)
+        .map(|p| (p, library.usable(p, model)))
+        .filter(|(_, clips)| !clips.is_empty())
+        .collect();
+    if candidates.is_empty() {
+        let any = library.people.iter().any(|p| !p.clips.is_empty());
+        return open(if any && library.model != model {
+            Reason::ModelMismatch
+        } else {
+            Reason::NoEnrollment
+        });
     }
     if samples < MIN_SAMPLES {
-        return Verdict::open(Reason::TooShort);
+        return open(Reason::TooShort);
     }
-    match embedding {
-        Some(e) if e.len() == enrolled.embedding.len() => {
-            let score = cosine(e, &enrolled.embedding);
-            Verdict {
-                score: Some(score),
-                is_him: score >= threshold,
-                reason: Reason::Scored,
-            }
-        }
-        _ => Verdict::open(Reason::ModelUnavailable),
+    let Some(embedding) = embedding else {
+        return open(Reason::ModelUnavailable);
+    };
+    let scored: Vec<(&Person, f32)> = candidates
+        .iter()
+        .filter_map(|(p, clips)| person_score(clips, embedding).map(|s| (*p, s)))
+        .collect();
+    // The owner wins whenever they clear the threshold, even if someone else
+    // scores higher: wrongly dropping him is worse than admitting another.
+    // Someone's clips scored but the owner's could not (a dimension mismatch):
+    // fail open rather than call the owner another voice.
+    if candidates.iter().any(|(p, _)| p.owner) && !scored.iter().any(|(p, _)| p.owner) {
+        return open(Reason::ModelUnavailable);
+    }
+    let best = scored
+        .iter()
+        .copied()
+        .find(|(p, s)| p.owner && *s >= threshold)
+        .or_else(|| scored.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)));
+    let Some((person, score)) = best else {
+        return open(Reason::ModelUnavailable);
+    };
+    let matched = score >= threshold;
+    Identity {
+        verdict: Verdict {
+            score: Some(score),
+            is_him: matched && person.owner,
+            reason: Reason::Scored,
+        },
+        person: matched.then(|| PersonRef {
+            id: person.id,
+            name: person.name.clone(),
+        }),
     }
 }
 
-/// Verdict for `pcm` against `enrollment`, embedding only when it can matter
-/// (an enrollment exists, the clip is long enough, the model is present).
-pub fn verify(
+/// [`judge`] on `pcm`, embedding only when it can matter (someone to score
+/// against, the clip long enough, the model present).
+pub fn identify(
     verifier: Option<&SpeakerVerifier>,
-    enrollment: Option<&Enrollment>,
+    library: Option<&Library>,
+    only_owner: bool,
     pcm: &[f32],
     threshold: f32,
-) -> Verdict {
-    let embedding = match (verifier, enrollment) {
+) -> Identity {
+    let embedding = match (verifier, library) {
         (Some(v), Some(_)) if pcm.len() >= MIN_SAMPLES => v.embed(pcm).ok(),
         _ => None,
     };
     judge(
-        enrollment,
+        library,
+        only_owner,
         DEFAULT_MODEL,
         pcm.len(),
         embedding.as_deref(),
@@ -288,8 +638,42 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
-    fn enrolled(v: &[f32]) -> Enrollment {
-        Enrollment::from_embeddings(DEFAULT_MODEL, &[v.to_vec()]).unwrap()
+    /// A library of `(name, owner, embeddings)` people.
+    fn library(people: &[(&str, bool, &[&[f32]])]) -> Library {
+        let mut lib = Library::default();
+        let mut clip = 0;
+        for (i, (name, owner, clips)) in people.iter().enumerate() {
+            lib.people.push(Person {
+                id: i as u64 + 1,
+                name: name.to_string(),
+                owner: *owner,
+                clips: clips
+                    .iter()
+                    .map(|e| {
+                        clip += 1;
+                        Clip {
+                            id: clip,
+                            created_at: 0,
+                            seconds: 1.0,
+                            embedding: e.to_vec(),
+                            has_audio: false,
+                        }
+                    })
+                    .collect(),
+            });
+        }
+        lib
+    }
+
+    fn id(lib: &Library, emb: &[f32], thr: f32, only_owner: bool) -> Identity {
+        judge(
+            Some(lib),
+            only_owner,
+            DEFAULT_MODEL,
+            MIN_SAMPLES,
+            Some(emb),
+            thr,
+        )
     }
 
     #[test]
@@ -302,74 +686,259 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_is_the_normalised_mean() {
-        let e = Enrollment::from_embeddings("m", &[vec![1.0, 0.0], vec![0.0, 1.0]]).unwrap();
-        assert_eq!(e.count, 2);
-        let r = std::f32::consts::FRAC_1_SQRT_2;
-        assert!((e.embedding[0] - r).abs() < 1e-6 && (e.embedding[1] - r).abs() < 1e-6);
-        assert!(matches!(
-            Enrollment::from_embeddings("m", &[]),
-            Err(SpeakerError::NoClips)
-        ));
-        assert!(Enrollment::from_embeddings("m", &[vec![1.0], vec![1.0, 0.0]]).is_err());
+    fn threshold_decides_a_scored_clip() {
+        let lib = library(&[("Me", true, &[&[1.0, 0.0]])]);
+        let same = id(&lib, &[1.0, 0.0], 0.5, true);
+        assert!(same.verdict.is_him && same.verdict.reason == Reason::Scored);
+        assert_eq!(same.person.unwrap().name, "Me");
+        let other = id(&lib, &[0.0, 1.0], 0.5, true);
+        assert!(
+            !other.verdict.is_him && other.verdict.score == Some(0.0) && other.person.is_none()
+        );
+        // exactly at the threshold admits
+        assert!(id(&lib, &[0.6, 0.8], 0.6, true).verdict.is_him);
+        assert!(!id(&lib, &[0.6, 0.8], 0.7, true).verdict.is_him);
     }
 
     #[test]
-    fn threshold_decides_a_scored_clip() {
-        let e = enrolled(&[1.0, 0.0]);
-        let long = MIN_SAMPLES;
-        let same = judge(Some(&e), DEFAULT_MODEL, long, Some(&[1.0, 0.0]), 0.5);
-        assert!(same.is_him && same.reason == Reason::Scored);
-        let other = judge(Some(&e), DEFAULT_MODEL, long, Some(&[0.0, 1.0]), 0.5);
-        assert!(!other.is_him && other.score == Some(0.0));
-        // exactly at the threshold admits
-        let edge = judge(Some(&e), DEFAULT_MODEL, long, Some(&[0.6, 0.8]), 0.6);
-        assert!(edge.is_him);
-        let strict = judge(Some(&e), DEFAULT_MODEL, long, Some(&[0.6, 0.8]), 0.7);
-        assert!(!strict.is_him);
+    fn a_person_scores_against_the_mean_of_their_clips() {
+        let lib = library(&[("Me", true, &[&[1.0, 0.0], &[0.0, 1.0]])]);
+        // a clip identical to one of the two sits 45 degrees from their mean
+        let score = id(&lib, &[0.0, 1.0], 0.5, true).verdict.score.unwrap();
+        assert!((score - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+        // a clip between them scores 1
+        assert!(id(&lib, &[0.6, 0.6], 0.99, true).verdict.is_him);
+    }
+
+    #[test]
+    fn the_owner_wins_when_they_clear_the_threshold() {
+        let lib = library(&[("Me", true, &[&[1.0, 0.0]]), ("Sam", false, &[&[0.6, 0.8]])]);
+        // Sam scores 1.0 and Me 0.6, but Me clears 0.5: Me
+        let id1 = id(&lib, &[0.6, 0.8], 0.5, false);
+        assert!(id1.verdict.is_him && id1.person.unwrap().name == "Me");
+        assert_eq!(id1.verdict.score.map(|s| (s * 10.0).round()), Some(6.0));
+        // below the owner's threshold the best person wins as before
+        let id2 = id(&lib, &[0.6, 0.8], 0.7, false);
+        assert!(!id2.verdict.is_him && id2.person.unwrap().name == "Sam");
+    }
+
+    #[test]
+    fn the_best_person_wins_and_names_the_line() {
+        let lib = library(&[("Me", true, &[&[1.0, 0.0]]), ("Sam", false, &[&[0.0, 1.0]])]);
+        let me = id(&lib, &[0.9, 0.1], 0.7, false);
+        assert!(me.verdict.is_him && me.person.as_ref().unwrap().name == "Me");
+        let sam = id(&lib, &[0.1, 0.9], 0.7, false);
+        assert!(!sam.verdict.is_him && sam.verdict.reason == Reason::Scored);
+        assert_eq!(
+            sam.person,
+            Some(PersonRef {
+                id: 2,
+                name: "Sam".into()
+            })
+        );
+        // scored but matches nobody: other, unnamed
+        let nobody = id(&lib, &[0.7, -0.7], 0.9, false);
+        assert!(!nobody.verdict.is_him && nobody.person.is_none());
+        // only the owner is a candidate for the legacy verify
+        let legacy = id(&lib, &[0.1, 0.9], 0.7, true);
+        assert!(!legacy.verdict.is_him && legacy.person.is_none());
     }
 
     #[test]
     fn every_fail_open_path_is_him() {
-        let e = enrolled(&[1.0, 0.0]);
+        let lib = library(&[("Me", true, &[&[1.0, 0.0]])]);
         let orthogonal: &[f32] = &[0.0, 1.0];
-        let v = judge(None, DEFAULT_MODEL, MIN_SAMPLES, Some(orthogonal), 0.5);
+        let run = |l: Option<&Library>, model, samples, emb| {
+            judge(l, true, model, samples, emb, 0.5).verdict
+        };
+        let v = run(None, DEFAULT_MODEL, MIN_SAMPLES, Some(orthogonal));
         assert!(v.is_him && v.reason == Reason::NoEnrollment);
-        let v = judge(Some(&e), "other-model", MIN_SAMPLES, Some(orthogonal), 0.5);
+        let empty = Library::default();
+        let v = run(Some(&empty), DEFAULT_MODEL, MIN_SAMPLES, Some(orthogonal));
+        assert!(v.is_him && v.reason == Reason::NoEnrollment);
+        let v = run(Some(&lib), "other-model", MIN_SAMPLES, Some(orthogonal));
         assert!(v.is_him && v.reason == Reason::ModelMismatch);
-        let v = judge(
-            Some(&e),
-            DEFAULT_MODEL,
-            MIN_SAMPLES - 1,
-            Some(orthogonal),
-            0.5,
-        );
+        let v = run(Some(&lib), DEFAULT_MODEL, MIN_SAMPLES - 1, Some(orthogonal));
         assert!(v.is_him && v.reason == Reason::TooShort && v.score.is_none());
-        let v = judge(Some(&e), DEFAULT_MODEL, MIN_SAMPLES, None, 0.5);
+        let v = run(Some(&lib), DEFAULT_MODEL, MIN_SAMPLES, None);
         assert!(v.is_him && v.reason == Reason::ModelUnavailable);
-        let v = judge(
-            Some(&e),
+        let v = run(
+            Some(&lib),
             DEFAULT_MODEL,
             MIN_SAMPLES,
             Some(&[1.0, 0.0, 0.0]),
-            0.5,
         );
         assert!(v.is_him && v.reason == Reason::ModelUnavailable);
         // no verifier at all (model not pulled): open, even with a long clip
-        let v = verify(None, Some(&e), &vec![0.0; MIN_SAMPLES * 2], 0.5);
+        let v = identify(None, Some(&lib), true, &vec![0.0; MIN_SAMPLES * 2], 0.5).verdict;
         assert!(v.is_him && v.reason == Reason::ModelUnavailable);
     }
 
     #[test]
-    fn enrollment_round_trips_and_deletes() {
+    fn library_round_trips_and_edits() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(Enrollment::load(home.path()).unwrap(), None);
-        let e = enrolled(&[0.6, 0.8]);
-        e.save(home.path()).unwrap();
-        assert_eq!(Enrollment::load(home.path()).unwrap(), Some(e));
-        assert!(Enrollment::delete(home.path()).unwrap());
-        assert!(!Enrollment::delete(home.path()).unwrap());
-        assert_eq!(Enrollment::load(home.path()).unwrap(), None);
+        let h = home.path();
+        assert_eq!(Library::load(h).unwrap(), Library::default());
+        let (me, sam) = Library::update(h, |l| {
+            let me = l.ensure_owner();
+            let sam = l.add_person("Sam", false);
+            l.add_clip(h, me, &vec![0.1; 16_000], vec![1.0, 0.0])?;
+            l.add_clip(h, sam, &vec![0.1; 8_000], vec![0.0, 1.0])?;
+            Ok((me, sam))
+        })
+        .unwrap();
+        let lib = Library::load(h).unwrap();
+        assert_eq!(lib.owner().unwrap().id, me);
+        assert!(lib.owner_ready(DEFAULT_MODEL) && !lib.owner_ready("x"));
+        let clip = lib.person(sam).unwrap().clips[0].clone();
+        assert!(clip.has_audio && (clip.seconds - 0.5).abs() < 1e-6);
+        assert!(Library::clip_path(h, clip.id).is_file());
+        // owner moves; the old owner is cleared
+        Library::update(h, |l| l.patch_person(sam, Some("Samantha"), Some(true))).unwrap();
+        let lib = Library::load(h).unwrap();
+        assert_eq!(lib.owner().unwrap().name, "Samantha");
+        assert_eq!(lib.people.iter().filter(|p| p.owner).count(), 1);
+        // deleting a person removes their audio
+        Library::update(h, |l| l.remove_person(h, sam)).unwrap();
+        assert!(!Library::clip_path(h, clip.id).exists());
+        assert!(matches!(
+            Library::update(h, |l| l.remove_clip(h, me, 99)),
+            Err(SpeakerError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn the_old_enrollment_migrates_to_an_owner_and_stays() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("speaker");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = r#"{"model":"wespeaker-sv-en","count":2,"embedding":[0.6,0.8]}"#;
+        // the .off copy is used when there is no live file
+        std::fs::write(dir.join("enrollment.json.off-20261022"), old).unwrap();
+        let lib = Library::load(home.path()).unwrap();
+        let me = lib.owner().unwrap();
+        assert_eq!((me.name.as_str(), me.clips.len()), ("Me", 1));
+        assert_eq!(me.clips[0].embedding, vec![0.6, 0.8]);
+        assert!(!me.clips[0].has_audio && !lib.live_guard);
+        assert!(Library::path(home.path()).is_file());
+        assert!(dir.join("enrollment.json.off-20261022").is_file());
+        // once people.json exists the old file is ignored
+        std::fs::write(dir.join("enrollment.json"), old.replace("0.6", "0.1")).unwrap();
+        assert_eq!(Library::load(home.path()).unwrap(), lib);
+        // enrollment.json is preferred when people.json is absent
+        std::fs::remove_file(Library::path(home.path())).unwrap();
+        let lib = Library::load(home.path()).unwrap();
+        assert_eq!(lib.owner().unwrap().clips[0].embedding, vec![0.1, 0.8]);
+        assert!(dir.join("enrollment.json").is_file());
+    }
+
+    #[test]
+    fn an_owner_who_cannot_be_scored_fails_open() {
+        let lib = library(&[
+            ("Me", true, &[&[1.0, 0.0, 0.0]]),
+            ("Sam", false, &[&[0.0, 1.0]]),
+        ]);
+        let v = id(&lib, &[0.0, 1.0], 0.5, false).verdict;
+        assert!(v.is_him && v.reason == Reason::ModelUnavailable);
+    }
+
+    #[test]
+    fn a_failed_update_keeps_old_audio_and_drops_new() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let pcm = vec![0.1; 16_000];
+        let me = Library::update(h, |l| {
+            let me = l.ensure_owner();
+            l.add_clip(h, me, &pcm, vec![1.0, 0.0])?;
+            Ok(me)
+        })
+        .unwrap();
+        let old = Library::clip_path(h, Library::load(h).unwrap().owner().unwrap().clips[0].id);
+        assert!(old.is_file());
+        let failed = Library::update(h, |l| {
+            l.clear_clips(h, me)?;
+            let clip = l.add_clip(h, me, &pcm, vec![0.0, 1.0])?;
+            assert!(Library::clip_path(h, clip.id).is_file());
+            Err::<(), _>(SpeakerError::Store("boom".into()))
+        });
+        assert!(failed.is_err());
+        assert!(old.is_file(), "old audio survives a failed replace");
+        assert_eq!(Library::load(h).unwrap().owner().unwrap().clips.len(), 1);
+        let wavs = || std::fs::read_dir(h.join("speaker/clips")).unwrap().count();
+        assert_eq!(wavs(), 1, "the new audio is not leaked");
+        // a successful replace removes the old audio only after saving
+        Library::update(h, |l| {
+            l.clear_clips(h, me)?;
+            l.add_clip(h, me, &pcm, vec![0.0, 1.0]).map(|_| ())
+        })
+        .unwrap();
+        assert!(!old.exists());
+        assert_eq!(wavs(), 1);
+    }
+
+    #[test]
+    fn a_corrupt_enrollment_falls_through_to_the_next_candidate() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("speaker");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("enrollment.json"), "").unwrap();
+        std::fs::write(
+            dir.join("enrollment.json.off-20261022"),
+            r#"{"model":"wespeaker-sv-en","count":1,"embedding":[0.6,0.8]}"#,
+        )
+        .unwrap();
+        let lib = Library::load(home.path()).unwrap();
+        assert_eq!(lib.owner().unwrap().clips[0].embedding, vec![0.6, 0.8]);
+        // nothing usable: an empty library, not an error
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("speaker")).unwrap();
+        std::fs::write(home.path().join("speaker/enrollment.json"), "{").unwrap();
+        assert_eq!(Library::load(home.path()).unwrap(), Library::default());
+    }
+
+    #[test]
+    fn clip_ids_are_not_reused() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let pcm = vec![0.1; 16_000];
+        let ids = |l: &mut Library, me| {
+            let a = l.add_clip(h, me, &pcm, vec![1.0]).unwrap().id;
+            l.remove_clip(h, me, a).unwrap();
+            let b = l.add_clip(h, me, &pcm, vec![1.0]).unwrap().id;
+            (a, b)
+        };
+        let (a, b) = Library::update(h, |l| {
+            let me = l.ensure_owner();
+            Ok(ids(l, me))
+        })
+        .unwrap();
+        assert!(b > a);
+        // the counter survives a reload
+        let c = Library::update(h, |l| {
+            let me = l.ensure_owner();
+            l.remove_clip(h, me, b)?;
+            Ok(l.add_clip(h, me, &pcm, vec![1.0])?.id)
+        })
+        .unwrap();
+        assert!(c > b);
+    }
+
+    #[test]
+    fn the_stamp_is_taken_before_the_load() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join("speaker");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("enrollment.json"),
+            r#"{"model":"wespeaker-sv-en","count":1,"embedding":[1.0]}"#,
+        )
+        .unwrap();
+        // the load migrates and so writes people.json; the stamp predates it
+        // and differs from the file's now, so the next check reloads
+        let (lib, stamp) = Library::load_stamped(home.path());
+        assert!(lib.unwrap().owner().is_some());
+        assert_eq!(stamp, None);
+        assert_ne!(Library::stamp(home.path()), stamp);
     }
 
     #[test]

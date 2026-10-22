@@ -46,7 +46,7 @@ use crate::echo::EchoCanceller;
 use crate::error::ApiError;
 use crate::live_mode::{LiveState, Mode, SegmentFate};
 use crate::registry::manifest::Kind;
-use crate::speaker::{self, DEFAULT_MODEL, DEFAULT_THRESHOLD, Enrollment, SpeakerVerifier};
+use crate::speaker::{self, DEFAULT_MODEL, DEFAULT_THRESHOLD, Identity, Library, SpeakerVerifier};
 use crate::stt::vad::Vad;
 
 /// Typed binary frames: the first byte.
@@ -65,6 +65,10 @@ const RESUME_TTL: Duration = Duration::from_secs(60);
 
 /// Audio kept for scoring a finished segment: the backlog plus the decode lag.
 const RING_SAMPLES: usize = 45 * RATE;
+
+/// A segment shorter than this is always admitted by the live guard: a "yes"
+/// or a number is too short to tell whose voice it is.
+const GUARD_MIN_SECONDS: f64 = 2.0;
 
 /// The most one enrollment recording keeps.
 const ENROLL_MAX_SAMPLES: usize = 120 * RATE;
@@ -359,6 +363,8 @@ enum ClientMessage {
     },
     Enroll {
         action: String,
+        /// The person a `begin`ning recording is for; the owner when absent.
+        person: Option<u64>,
     },
     Speak {
         id: String,
@@ -421,11 +427,15 @@ struct Live {
     state: LiveState,
     seq: u64,
     hold_until: Option<Instant>,
-    enrolled: Option<Arc<Enrollment>>,
+    /// The voice library, reloaded when `people.json` changes.
+    library: Arc<Library>,
+    library_stamp: Option<(std::time::SystemTime, u64)>,
     verifier: Option<Arc<SpeakerVerifier>>,
     verifier_tried: bool,
     /// Raw microphone audio of a running enrollment recording.
     enrolling: Option<Vec<f32>>,
+    /// Who the running recording is for; the owner when `None`.
+    enroll_person: Option<u64>,
     /// The audio fed to the VAD, as `Segments` positions it.
     ring: VecDeque<f32>,
     ring_start: usize,
@@ -444,15 +454,17 @@ struct Live {
 }
 
 impl Live {
-    fn new(mode: Mode, seq: u64, enrolled: Option<Enrollment>, typed: bool) -> Self {
+    fn new(mode: Mode, seq: u64, library: Library, typed: bool) -> Self {
         let mut live = Live {
             state: LiveState::new(),
             seq,
             hold_until: None,
-            enrolled: enrolled.map(Arc::new),
+            library: Arc::new(library),
+            library_stamp: None,
             verifier: None,
             verifier_tried: false,
             enrolling: None,
+            enroll_person: None,
             ring: VecDeque::new(),
             ring_start: 0,
             received: 0,
@@ -467,6 +479,24 @@ impl Live {
         };
         live.set_mode(mode);
         live
+    }
+
+    /// Picks up a changed `people.json`, so library edits reach a running
+    /// session; an unreadable file keeps the library as it was.
+    fn refresh_library(&mut self, home: &Path) {
+        // A cheap stat; the file is read only when it changed.
+        if Library::stamp(home) != self.library_stamp {
+            let (library, stamp) = Library::load_stamped(home);
+            if let Ok(library) = library {
+                self.library = Arc::new(library);
+            }
+            self.library_stamp = stamp;
+        }
+    }
+
+    /// The owner has recorded something.
+    fn enrolled(&self) -> bool {
+        self.library.owner().is_some_and(|o| !o.clips.is_empty())
     }
 
     /// Milliseconds since the session began: the ambient machine's clock.
@@ -541,8 +571,9 @@ impl Live {
             "mode": mode_name(self.mode()),
             "seq": self.seq,
             "agent_speaking": self.agent_speaking(),
-            "enrolled": self.enrolled.is_some(),
+            "enrolled": self.enrolled(),
             "enrolling": self.enrolling.is_some(),
+            "live_guard": self.library.live_guard,
             "speaking": ids,
             "resumed": resumed.is_some(),
         });
@@ -814,20 +845,20 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         close: close_code::ERROR,
     })?;
 
-    // A missing or unreadable enrollment is "not enrolled": the guard fails open.
-    let enrolled = {
+    // A missing or unreadable library is an empty one: the guard fails open.
+    let (library, library_stamp) = {
         let home = st.registry.home().to_path_buf();
-        tokio::task::spawn_blocking(move || Enrollment::load(&home))
+        tokio::task::spawn_blocking(move || Library::load_stamped(&home))
     }
     .await
-    .map_err(|e| internal(st, req_id, e.to_string()))?
-    .unwrap_or_else(|e| {
+    .map_err(|e| internal(st, req_id, e.to_string()))?;
+    let library = library.unwrap_or_else(|e| {
         st.log.line(
             "warn",
             Some(req_id),
             &format!("live_enrollment_unreadable {e}"),
         );
-        None
+        Library::default()
     });
 
     // A conversation's mode and seq win over the resumed ones.
@@ -841,9 +872,10 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
     let mut live = Live::new(
         mode,
         previous.as_ref().map_or(0, |p| p.seq),
-        enrolled,
+        library,
         start.typed_frames,
     );
+    live.library_stamp = library_stamp;
     live.ambient.set_wake_words(&wake_words());
     let ready = json!({
         "type": "ready", "session": session_id, "model": cfg.model, "load_ms": load_ms,
@@ -1226,8 +1258,8 @@ async fn client_message(
             *stopping = true;
             let _ = input.send(Input::Stop);
         }
-        ClientMessage::Enroll { action } => {
-            let mut events = enroll(st, req_id, live, &action).await;
+        ClientMessage::Enroll { action, person } => {
+            let mut events = enroll(st, req_id, live, &action, person).await;
             if let Some(key) = conv {
                 let before = events.len();
                 events.retain(|e| e["type"] != "state");
@@ -1343,12 +1375,20 @@ async fn speak(
     }));
 }
 
-/// `enroll` actions: `begin` records the microphone, `finish` enrolls the
-/// recording, `cancel` drops it, `clear` deletes the stored enrollment.
-async fn enroll(st: &Arc<AppState>, req_id: &str, live: &mut Live, action: &str) -> Vec<Value> {
+/// `enroll` actions: `begin` records the microphone (for `person`, else the
+/// owner), `finish` adds the recording to that person as a new clip, `cancel`
+/// drops it, `clear` deletes the owner's clips.
+async fn enroll(
+    st: &Arc<AppState>,
+    req_id: &str,
+    live: &mut Live,
+    action: &str,
+    person: Option<u64>,
+) -> Vec<Value> {
     match action {
         "begin" => {
             live.enrolling = Some(Vec::new());
+            live.enroll_person = person;
             vec![live.state_event(None)]
         }
         "cancel" => {
@@ -1363,8 +1403,9 @@ async fn enroll(st: &Arc<AppState>, req_id: &str, live: &mut Live, action: &str)
                     None,
                 )];
             };
+            let target = live.enroll_person.take();
             let st2 = st.clone();
-            let result = tokio::task::spawn_blocking(move || -> Result<Enrollment, ApiError> {
+            let result = tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
                 if clip.len() < speaker::MIN_SAMPLES {
                     return Err(ApiError::new(
                         axum::http::StatusCode::BAD_REQUEST,
@@ -1373,18 +1414,28 @@ async fn enroll(st: &Arc<AppState>, req_id: &str, live: &mut Live, action: &str)
                     ));
                 }
                 let verifier = load_verifier(&st2)?;
-                let enrollment = verifier
-                    .enroll(&[clip])
+                let embedding = verifier
+                    .embed(&clip)
                     .map_err(|e| internal(&st2, "live", e.to_string()))?;
-                enrollment
-                    .save(st2.registry.home())
-                    .map_err(|e| internal(&st2, "live", e.to_string()))?;
-                Ok(enrollment)
+                let home = st2.registry.home();
+                Library::update(home, |l| {
+                    let id = match target {
+                        Some(id) => l.person(id)?.id,
+                        None => l.ensure_owner(),
+                    };
+                    l.add_clip(home, id, &clip, embedding).map(|_| ())
+                })
+                .map_err(|e| match e {
+                    speaker::SpeakerError::NotFound(m) => {
+                        ApiError::new(axum::http::StatusCode::NOT_FOUND, "not_found", m)
+                    }
+                    e => internal(&st2, "live", e.to_string()),
+                })
             })
             .await;
             match result {
-                Ok(Ok(enrollment)) => {
-                    live.enrolled = Some(Arc::new(enrollment));
+                Ok(Ok(())) => {
+                    live.refresh_library(st.registry.home());
                     live.verifier = None;
                     live.verifier_tried = false;
                     vec![live.state_event(None)]
@@ -1406,10 +1457,19 @@ async fn enroll(st: &Arc<AppState>, req_id: &str, live: &mut Live, action: &str)
         }
         "clear" => {
             let home = st.registry.home().to_path_buf();
-            let deleted = tokio::task::spawn_blocking(move || Enrollment::delete(&home)).await;
-            match deleted {
+            let cleared = tokio::task::spawn_blocking({
+                let home = home.clone();
+                move || {
+                    Library::update(&home, |l| match l.owner().map(|o| o.id) {
+                        Some(owner) => l.clear_clips(&home, owner),
+                        None => Ok(false),
+                    })
+                }
+            })
+            .await;
+            match cleared {
                 Ok(Ok(_)) => {
-                    live.enrolled = None;
+                    live.refresh_library(&home);
                     live.verifier = None;
                     vec![live.state_event(None)]
                 }
@@ -1494,16 +1554,24 @@ async fn finish_segment(
             let back = live.received.saturating_sub((end * RATE as f64) as usize);
             live.echo.clip_is_echo(&clip, back)
         });
-    let verdict = if matches!(mode, Mode::Live | Mode::Ambient) && live.enrolled.is_some() {
+    live.refresh_library(st.registry.home());
+    let scoring = live.library.people.iter().any(|p| !p.clips.is_empty());
+    let identity = if matches!(mode, Mode::Live | Mode::Ambient) && scoring {
         score(st, live, start, end).await
     } else {
         None
     };
+    let verdict = identity.as_ref().map(|i| i.verdict);
+    // The live guard is opt-in, needs the owner's voice, and never drops a
+    // short reply; scoring above is only a tag when it is off.
+    let guard = live.library.live_guard
+        && live.library.owner_ready(DEFAULT_MODEL)
+        && end - start >= GUARD_MIN_SECONDS;
     let admitted = match mode {
         _ if echo => false,
         Mode::Live => {
             live.state
-                .segment_fate(false, verdict.is_none_or(|d| d.is_him))
+                .segment_fate(false, !guard || verdict.is_none_or(|d| d.is_him))
                 == SegmentFate::Admit
         }
         Mode::Ambient => !live.agent_speaking() && !live.in_hold(),
@@ -1526,12 +1594,14 @@ async fn finish_segment(
         "id": id, "segment": v["segment"], "text": text, "start": start, "end": end,
         "decode_ms": v["decode_ms"],
     });
-    if let Some(d) = verdict {
-        event["speaker"] = json!({"score": d.score, "is_him": d.is_him, "reason": d.reason});
+    if let Some(Identity { verdict: d, person }) = &identity {
+        event["speaker"] = json!({
+            "score": d.score, "is_him": d.is_him, "reason": d.reason, "person": person,
+        });
     }
     let mut sent = vec![event];
     if mode == Mode::Ambient {
-        let heard = ambient_line(live, text, verdict).await;
+        let heard = ambient_line(live, text, identity.as_ref()).await;
         // The sender sends its own, so it gets each exactly once and before
         // a `done`; the other members get it through the conversation.
         if let Some((key, id)) = conv {
@@ -1544,12 +1614,16 @@ async fn finish_segment(
     sent
 }
 
-/// Who the ambient machine is told said a line: the speaker guard's verdict
-/// when it scored one, else unknown (no enrollment, too short, no model).
-fn ambient_speaker(verdict: Option<speaker::Verdict>) -> machine::Speaker {
-    match verdict {
-        Some(d) if d.reason == speaker::Reason::Scored && d.is_him => machine::Speaker::Him,
-        Some(d) if d.reason == speaker::Reason::Scored => machine::Speaker::Other,
+/// Who the ambient machine is told said a line: the best matching person when
+/// the library scored one (the owner is him, anyone else is other, named), a
+/// scored line matching nobody is an unnamed other, else unknown (no
+/// enrollment, too short, no model).
+fn ambient_speaker(identity: Option<&Identity>) -> machine::Speaker {
+    match identity {
+        Some(i) if i.verdict.reason == speaker::Reason::Scored && i.verdict.is_him => {
+            machine::Speaker::Him
+        }
+        Some(i) if i.verdict.reason == speaker::Reason::Scored => machine::Speaker::Other,
         _ => machine::Speaker::Unknown,
     }
 }
@@ -1563,7 +1637,11 @@ fn context_json(context: &[LogLine]) -> Value {
                 machine::Speaker::Other => "other",
                 machine::Speaker::Unknown => "unknown",
             };
-            json!({"speaker": who, "text": l.text, "at_ms": l.at_ms})
+            let mut line = json!({"speaker": who, "text": l.text, "at_ms": l.at_ms});
+            if let Some(name) = &l.person {
+                line["person"] = json!(name);
+            }
+            line
         })
         .collect();
     json!(lines)
@@ -1572,16 +1650,18 @@ fn context_json(context: &[LogLine]) -> Value {
 /// One ambient line through the machine, and the gate when it asks: the
 /// `wake` and `ambient_verdict` events it makes. `mode_changed` and the wake
 /// candidates are the machine's own bookkeeping and are not sent.
-async fn ambient_line(
-    live: &mut Live,
-    text: &str,
-    verdict: Option<speaker::Verdict>,
-) -> Vec<Value> {
+async fn ambient_line(live: &mut Live, text: &str, identity: Option<&Identity>) -> Vec<Value> {
     let now = live.now_ms();
-    let similarity = verdict.and_then(|d| d.score);
+    let similarity = identity.and_then(|i| i.verdict.score);
+    // Only another person is named; the owner is "him".
+    let name = identity
+        .filter(|i| !i.verdict.is_him)
+        .and_then(|i| i.person.as_ref())
+        .map(|p| p.name.clone());
+    live.ambient.set_next_person(name.clone());
     let machine::Ingest { output, gate: req } =
         live.ambient
-            .ingest(now, ambient_speaker(verdict), text, similarity);
+            .ingest(now, ambient_speaker(identity), text, similarity);
     let mut sent: Vec<Value> = output
         .events
         .iter()
@@ -1617,16 +1697,11 @@ async fn ambient_line(
     sent
 }
 
-/// The speaker guard's verdict on the segment; `None` when the audio is gone.
-/// The guard fails open (`speaker::verify`): a missing model or a short
-/// clip is "him".
-async fn score(
-    st: &Arc<AppState>,
-    live: &mut Live,
-    start: f64,
-    end: f64,
-) -> Option<speaker::Verdict> {
-    let enrollment = live.enrolled.clone()?;
+/// Who the speaker library says spoke the segment; `None` when the audio is
+/// gone. Fails open (`speaker::judge`): a missing model or a short clip is
+/// "him".
+async fn score(st: &Arc<AppState>, live: &mut Live, start: f64, end: f64) -> Option<Identity> {
+    let library = live.library.clone();
     let pcm = live.clip(start, end)?;
     if live.verifier.is_none() && !live.verifier_tried && pcm.len() >= speaker::MIN_SAMPLES {
         live.verifier_tried = true;
@@ -1639,9 +1714,10 @@ async fn score(
     }
     let verifier = live.verifier.clone();
     tokio::task::spawn_blocking(move || {
-        speaker::verify(
+        speaker::identify(
             verifier.as_deref(),
-            Some(&enrollment),
+            Some(&library),
+            false,
             &pcm,
             DEFAULT_THRESHOLD,
         )

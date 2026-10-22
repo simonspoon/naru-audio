@@ -75,9 +75,9 @@ Text frames:
 | `{"type":"mode","mode":"muted"}` | switch mode. A change cuts the open segment, then emits `state`; the same mode is ignored |
 | `{"type":"agent_speaking","value":true}` | the client is playing a reply. While true the microphone is shut; on `false` it stays shut for 400 ms more (the reply's tail is in the room), and any speak still being made is cancelled. Emits `state` on a change |
 | `{"type":"speak","id":"t1","text":"…","voice":"af_heart","model":"kokoro-v1.0"}` | synthesise `text`; `voice` and `model` are optional and mean what they do for `POST /v1/audio/speech`. `id` is 1 to 128 characters and unique among running speaks. A newer `speak` cancels the older ones |
-| `{"type":"enroll","action":"begin"}` | record the microphone (up to 120 s) as the enrollment clip; the VAD hears silence meanwhile |
-| `{"type":"enroll","action":"finish"}` | embed the recording (at least 1 s) with `wespeaker-sv-en` and store it, replacing any earlier enrollment |
-| `{"type":"enroll","action":"cancel"}` / `"clear"` | drop the recording / delete the stored enrollment |
+| `{"type":"enroll","action":"begin","person":<id>}` | record the microphone (up to 120 s) as a clip for `person` (optional; the owner, created as "Me" if there is none); the VAD hears silence meanwhile |
+| `{"type":"enroll","action":"finish"}` | embed the recording (at least 1 s) with `wespeaker-sv-en` and ADD it, with its audio, to that person's clips |
+| `{"type":"enroll","action":"cancel"}` / `"clear"` | drop the recording / delete the owner's clips |
 | `{"type":"flush"}` | close the open segment now |
 | `{"type":"stop"}` | finish: every pending `utterance`, then `done`, then close 1000 |
 
@@ -85,13 +85,13 @@ Text frames:
 
 | Event | Fields |
 | --- | --- |
-| `state` | `mode`, `seq`, `agent_speaking`, `enrolled`, `enrolling`, `speaking` (running speak ids), `resumed`, and on a resume `previous_mode`, `lost_speaks`. `seq` rises by one on every `state`, so a client can spot a gap. In a conversation `seq` is the conversation's, shared by every socket in it |
+| `state` | `mode`, `seq`, `agent_speaking`, `enrolled` (the owner has clips), `enrolling`, `live_guard`, `speaking` (running speak ids), `resumed`, and on a resume `previous_mode`, `lost_speaks`. `seq` rises by one on every `state`, so a client can spot a gap. In a conversation `seq` is the conversation's, shared by every socket in it |
 | `level` | `rms` (the loudest frame since the last event, 0 to 1), `gate` (whether the microphone is reaching the VAD). At most every 100 ms, only while frames arrive. Sent to every socket of the conversation |
 | `speech` | `active`, `at`: the VAD's edges, as §2.4 |
 | `partial` | `segment`, `start`, `text`: the open utterance so far. Only in `live` mode and while the agent is not speaking. An empty `text` clears a partial whose segment was then dropped |
-| `utterance` | `id` (0, 1, 2… per session), `segment`, `text`, `start`, `end` (seconds since `start`), `decode_ms`, and `speaker` (`score`, `is_him`, `reason`) when an enrollment exists |
+| `utterance` | `id` (0, 1, 2… per session), `segment`, `text`, `start`, `end` (seconds since `start`), `decode_ms`, and `speaker` (`score`, `is_him`, `reason`, `person`: `{id, name}` of the best match at or above the threshold, else `null`) when the library has clips |
 | `ambient_flag` | the same fields as `utterance`, for every segment heard in `ambient` mode (the speaker guard scores it too when an enrollment exists). The `wake` or `ambient_verdict` it leads to, if any, follows it |
-| `wake` | `text` (the line that woke), `remainder` (the words after the wake word, or `null`), `at_ms` (ms since the session began), `context` (the last ~30 s before it, oldest first: `speaker` `him`/`other`/`unknown`, `text`, `at_ms`). The wake word was heard in `ambient` mode (Ambient, below). Sent to every socket of the conversation |
+| `wake` | `text` (the line that woke), `remainder` (the words after the wake word, or `null`), `at_ms` (ms since the session began), `context` (the last ~30 s before it, oldest first: `speaker` `him`/`other`/`unknown`, `person` (the name, only on an `other` line matched to a named person), `text`, `at_ms`). The wake word was heard in `ambient` mode (Ambient, below). Sent to every socket of the conversation |
 | `ambient_verdict` | `kind` (`idea` or `can_help`), `score` (0 to 1: 1 − P(ignore), above 0.9), `text`, `at_ms`, `context` as `wake`. The ambient gate flagged a line of his. Sent to every socket of the conversation |
 | `speak_audio` | `id`, `seq` (from 0), `rate`, `final`, `data` (base64 s16le mono, at most 16 KiB raw per chunk). The last event of an id has `final: true` and empty `data`; `cancelled: true` when it was cut |
 | `error` | `code`, `message`, `fatal`, and `id` for a speak. `fatal: true` is followed by the close; `false` leaves the session open |
@@ -104,8 +104,8 @@ The microphone reaches the VAD only when the mode's gate is open: `live` — liv
 speaking and out of the echo hold (`LiveState::mic_open`); `ambient` — the agent not speaking; `muted` and `idle`
 never. A shut gate feeds the VAD **silence of the same length**, not nothing, so its clock and any open segment
 carry on. A finished segment then goes through `LiveState::segment_fate`: in `live` it must also pass the speaker
-guard (`speaker::verify`). The guard **fails open** — no enrollment, a clip under 1 s, or the model not pulled is
-"him" — so a short "yes" is never dropped. A dropped segment sends nothing but a clearing `partial`.
+guard (`speaker::identify`), which is off unless `live_guard` is set (`docs/live-mode-spec.md`, Speaker guard). The guard
+**fails open** — no owner clips, a segment under 2 s, or the model not pulled is "him" — so a short "yes" is never dropped. A dropped segment sends nothing but a clearing `partial`.
 
 ## Ambient (naru task 2208)
 

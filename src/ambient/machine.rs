@@ -22,6 +22,8 @@ pub enum Speaker {
 pub struct LogLine {
     pub at_ms: u64,
     pub speaker: Speaker,
+    /// The named person an `Other` line was matched to, if the speaker library knew them.
+    pub person: Option<String>,
     pub text: String,
 }
 
@@ -134,10 +136,21 @@ impl TranscriptLog {
     pub const CAPACITY: usize = 500;
 
     pub fn append(&mut self, now_ms: u64, speaker: Speaker, text: &str) {
+        self.append_named(now_ms, speaker, None, text);
+    }
+
+    pub fn append_named(
+        &mut self,
+        now_ms: u64,
+        speaker: Speaker,
+        person: Option<String>,
+        text: &str,
+    ) {
         self.prune(now_ms);
         self.lines.push_back(LogLine {
             at_ms: now_ms,
             speaker,
+            person,
             text: text.to_string(),
         });
         while self.lines.len() > Self::CAPACITY {
@@ -394,6 +407,8 @@ pub struct AmbientMachine {
     agent_speaking: bool,
     agent_quiet_at: Option<u64>,
     custom_wake: Vec<Vec<String>>,
+    /// The person's name for the next ingested line; consumed by it.
+    next_person: Option<String>,
 }
 
 impl Default for AmbientMachine {
@@ -419,7 +434,13 @@ impl AmbientMachine {
             agent_speaking: false,
             agent_quiet_at: None,
             custom_wake: Vec::new(),
+            next_person: None,
         }
+    }
+
+    /// Names who said the next `ingest`ed line, for its log entry.
+    pub fn set_next_person(&mut self, person: Option<String>) {
+        self.next_person = person;
     }
 
     pub fn mode(&self) -> Mode {
@@ -505,7 +526,8 @@ impl AmbientMachine {
         let context = self.log.recent(now, Self::CONTEXT_WINDOW_MS);
         let gate = self.ingest_line(now, speaker, line, similarity, &context, &mut output);
         // Swift's `defer`: the line joins the log after every path out.
-        self.log.append(now, speaker, line);
+        let person = self.next_person.take();
+        self.log.append_named(now, speaker, person, line);
         Ingest { output, gate }
     }
 

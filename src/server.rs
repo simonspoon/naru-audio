@@ -27,7 +27,7 @@ use axum::http::header::{CONTENT_TYPE, HOST, ORIGIN};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
@@ -97,6 +97,30 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/audio/speaker/enrollment",
             delete(speaker::delete_enrollment),
+        )
+        .route(
+            "/v1/audio/speaker/people",
+            get(speaker::list_people).post(speaker::create_person),
+        )
+        .route(
+            "/v1/audio/speaker/people/{id}",
+            patch(speaker::patch_person).delete(speaker::delete_person),
+        )
+        .route(
+            "/v1/audio/speaker/people/{id}/clips",
+            post(speaker::add_clip).layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
+        )
+        .route(
+            "/v1/audio/speaker/people/{id}/clips/{clip}",
+            delete(speaker::delete_clip),
+        )
+        .route(
+            "/v1/audio/speaker/people/{id}/clips/{clip}/audio",
+            get(speaker::clip_audio),
+        )
+        .route(
+            "/v1/audio/speaker/guard",
+            get(speaker::get_guard).put(speaker::put_guard),
         )
         .route("/v1/audio/speech", post(speech::speech))
         .route(

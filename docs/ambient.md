@@ -35,8 +35,9 @@ and returns `NullGate`, so the server always starts.
 Each audio socket has its own `AmbientMachine`, on a clock of milliseconds since the session began. In `ambient`
 mode every admitted segment (the one that becomes an `ambient_flag`) is also ingested:
 
-- **Speaker.** With an enrollment the speaker guard scores the segment in ambient too: scored and his is `Him`,
-  scored and not his is `Other`; no enrollment, a clip under 1 s or no model is `Unknown` (which may still wake, as
+- **Speaker.** With a voice library the segment is scored against every person in ambient too (whether or not the live
+  guard is on): the owner wins whenever their score clears the threshold, else the best match at or above it: the owner is `Him`, another named person is `Other` (the
+  line carries the name), scored and matching nobody is an unnamed `Other`; no enrollment, a clip under 1 s or no model is `Unknown` (which may still wake, as
   the machine allows).
 - **Wake words.** The built-in spellings plus `ambient.wake_words` from naru's config file, read once at session
   start: `NARU_AUDIO_WAKE_CONFIG`, else `~/.naru/config.json` when `~/.naru` exists, else `~/.mesa/config.json`.

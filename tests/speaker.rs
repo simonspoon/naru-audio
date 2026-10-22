@@ -22,7 +22,8 @@ use tower::ServiceExt;
 
 use naru_audio::registry::{self, Registry};
 use naru_audio::speaker::{
-    self, DEFAULT_MODEL, DEFAULT_THRESHOLD, Enrollment, MIN_SAMPLES, Reason, SpeakerVerifier,
+    self, Clip, DEFAULT_MODEL, DEFAULT_THRESHOLD, Identity, Library, MIN_SAMPLES, Reason,
+    SpeakerVerifier,
 };
 use naru_audio::stt::audio;
 
@@ -58,71 +59,146 @@ fn verifier() -> Option<&'static SpeakerVerifier> {
     .as_ref()
 }
 
-fn score(v: &SpeakerVerifier, enrolled: &Enrollment, clip: &str) -> f32 {
-    let pcm = samples(clip);
-    let e = v.embed(&pcm).expect("embed");
-    speaker::cosine(&e, &enrolled.embedding)
+fn embed(v: &SpeakerVerifier, clip: &str) -> Vec<f32> {
+    v.embed(&samples(clip)).expect("embed")
 }
 
-/// Fixture scores (WeSpeaker, TTS voices Daniel = A, Samantha = B): same
-/// voice 0.94-0.99, different voice 0.59-0.62. `DEFAULT_THRESHOLD` sits in
-/// that gap, nearer the low end so a real voice's noise rejects him less.
+/// A library of `(name, owner, clip fixtures)` people, embedded with `v`.
+fn library(v: &SpeakerVerifier, people: &[(&str, bool, &[&str])]) -> Library {
+    let mut lib = Library::default();
+    for (name, owner, clips) in people {
+        let id = lib.add_person(name, *owner);
+        let person = lib.people.iter_mut().find(|p| p.id == id).unwrap();
+        for (i, clip) in clips.iter().enumerate() {
+            person.clips.push(Clip {
+                id: (id * 100) + i as u64,
+                created_at: 0,
+                seconds: 1.0,
+                embedding: embed(v, clip),
+                has_audio: false,
+            });
+        }
+    }
+    lib
+}
+
+fn verify(v: &SpeakerVerifier, lib: &Library, only_owner: bool, clip: &str) -> Identity {
+    speaker::identify(
+        Some(v),
+        Some(lib),
+        only_owner,
+        &samples(clip),
+        DEFAULT_THRESHOLD,
+    )
+}
+
+type Method = fn(&[&Vec<f32>], &[f32]) -> f32;
+
+fn max_cosine(clips: &[&Vec<f32>], e: &[f32]) -> f32 {
+    clips
+        .iter()
+        .map(|c| speaker::cosine(e, c))
+        .fold(f32::MIN, f32::max)
+}
+
+fn mean_cosine(clips: &[&Vec<f32>], e: &[f32]) -> f32 {
+    let mut mean = vec![0f32; e.len()];
+    for c in clips {
+        mean.iter_mut().zip(c.iter()).for_each(|(m, x)| *m += x);
+    }
+    speaker::cosine(e, &mean)
+}
+
+/// Task 2260: how a person's clips combine into a score. Leave-one-out over
+/// the fixtures: enrol a voice from all but one of its clips, score the
+/// held-out clip (same voice) and the other voice's clips (different), and
+/// compare the best-clip (max) score with the cosine to the mean embedding.
+/// `person_score` in `src/speaker.rs` uses the winner, the mean.
 #[test]
-fn same_voice_scores_above_a_different_voice() {
+fn clips_combine_by_mean_embedding() {
     let Some(v) = verifier() else { return };
-    let enrolled = v.enroll(&[samples("a1.wav")]).unwrap();
-    let same = score(v, &enrolled, "a2.wav").min(score(v, &enrolled, "a3.wav"));
-    let different = score(v, &enrolled, "b1.wav").max(score(v, &enrolled, "b2.wav"));
-    eprintln!("same {same:.3} different {different:.3}");
-    assert!(same - different > 0.0);
-    assert!(different < DEFAULT_THRESHOLD && DEFAULT_THRESHOLD < same);
+    let a: Vec<Vec<f32>> = ["a1.wav", "a2.wav", "a3.wav"]
+        .iter()
+        .map(|c| embed(v, c))
+        .collect();
+    let b: Vec<Vec<f32>> = ["b1.wav", "b2.wav", "b3.wav"]
+        .iter()
+        .map(|c| embed(v, c))
+        .collect();
+    let methods: [(&str, Method); 2] = [("max", max_cosine), ("mean", mean_cosine)];
+    let mut margins = Vec::new();
+    for (name, method) in methods {
+        let (mut same, mut different) = (Vec::new(), Vec::new());
+        for (voice, other) in [(&a, &b), (&b, &a)] {
+            for held in 0..voice.len() {
+                let rest: Vec<&Vec<f32>> = (0..voice.len())
+                    .filter(|i| *i != held)
+                    .map(|i| &voice[i])
+                    .collect();
+                same.push(method(&rest, &voice[held]));
+                different.extend(other.iter().map(|e| method(&rest, e)));
+            }
+        }
+        let lo = same.iter().cloned().fold(f32::MAX, f32::min);
+        let hi = different.iter().cloned().fold(f32::MIN, f32::max);
+        eprintln!(
+            "{name}: same-voice min {lo:.3}, different-voice max {hi:.3}, margin {:.3}",
+            lo - hi
+        );
+        margins.push(lo - hi);
+        if name == "mean" {
+            assert!(hi < DEFAULT_THRESHOLD && DEFAULT_THRESHOLD < lo);
+        }
+    }
+    eprintln!("margin max {:.3} vs mean {:.3}", margins[0], margins[1]);
+    assert!(margins[1] >= margins[0]);
 }
 
 #[test]
-fn enrolled_voice_verifies_and_the_other_does_not() {
+fn owner_verifies_and_the_other_voice_does_not() {
     let Some(v) = verifier() else { return };
-    let enrolled = v.enroll(&[samples("a1.wav"), samples("a2.wav")]).unwrap();
-    assert_eq!(enrolled.count, 2);
+    let lib = library(v, &[("Me", true, &["a1.wav", "a2.wav"])]);
     for (clip, him) in [("a3.wav", true), ("b1.wav", false), ("b3.wav", false)] {
-        let verdict = speaker::verify(Some(v), Some(&enrolled), &samples(clip), DEFAULT_THRESHOLD);
-        assert_eq!(verdict.is_him, him, "{clip}: {verdict:?}");
-        assert_eq!(verdict.reason, Reason::Scored);
+        let id = verify(v, &lib, true, clip);
+        assert_eq!(id.verdict.is_him, him, "{clip}: {id:?}");
+        assert_eq!(id.verdict.reason, Reason::Scored);
     }
 }
 
 #[test]
-fn several_clips_beat_one() {
+fn ambient_tagging_names_the_right_person() {
     let Some(v) = verifier() else { return };
-    let one = v.enroll(&[samples("a1.wav")]).unwrap();
-    let two = v.enroll(&[samples("a1.wav"), samples("a2.wav")]).unwrap();
-    // a3 is held out of both enrollments
-    let (s1, s2) = (score(v, &one, "a3.wav"), score(v, &two, "a3.wav"));
-    eprintln!("held-out a3: one clip {s1:.3}, two clips {s2:.3}");
-    assert!(s2 > s1);
+    let lib = library(
+        v,
+        &[
+            ("Me", true, &["a1.wav", "a2.wav"]),
+            ("Sam", false, &["b1.wav", "b2.wav"]),
+        ],
+    );
+    let name = |clip| {
+        let id = verify(v, &lib, false, clip);
+        (id.verdict.is_him, id.person.map(|p| p.name))
+    };
+    assert_eq!(name("a3.wav"), (true, Some("Me".to_string())));
+    assert_eq!(name("b3.wav"), (false, Some("Sam".to_string())));
+    // a voice nobody in the library matches is an unnamed other
+    let only_me = library(v, &[("Me", true, &["a1.wav", "a2.wav"])]);
+    let id = verify(v, &only_me, false, "b3.wav");
+    assert!(!id.verdict.is_him && id.person.is_none() && id.verdict.reason == Reason::Scored);
 }
 
 #[test]
-fn short_reply_and_missing_enrollment_fail_open() {
+fn short_reply_and_missing_library_fail_open() {
     let Some(v) = verifier() else { return };
-    let enrolled = v.enroll(&[samples("a1.wav")]).unwrap();
+    let lib = library(v, &[("Me", true, &["a1.wav"])]);
     // "Yes." in the other voice would be rejected if it were scored
     let mut short = samples("b1.wav");
     short.truncate(MIN_SAMPLES - 1);
-    let verdict = speaker::verify(Some(v), Some(&enrolled), &short, DEFAULT_THRESHOLD);
-    assert!(verdict.is_him && verdict.reason == Reason::TooShort);
-    let verdict = speaker::verify(Some(v), None, &samples("b1.wav"), DEFAULT_THRESHOLD);
-    assert!(verdict.is_him && verdict.reason == Reason::NoEnrollment);
-    let yes = samples("a_short.wav");
-    assert!(speaker::verify(Some(v), Some(&enrolled), &yes, DEFAULT_THRESHOLD).is_him);
-}
-
-#[test]
-fn enrollment_from_unusable_clips_is_refused() {
-    let Some(v) = verifier() else { return };
-    let mut short = samples("a1.wav");
-    short.truncate(MIN_SAMPLES - 1);
-    assert!(v.enroll(&[short]).is_err());
-    assert!(v.enroll(&[]).is_err());
+    let id = speaker::identify(Some(v), Some(&lib), true, &short, DEFAULT_THRESHOLD);
+    assert!(id.verdict.is_him && id.verdict.reason == Reason::TooShort);
+    let id = speaker::identify(Some(v), None, true, &samples("b1.wav"), DEFAULT_THRESHOLD);
+    assert!(id.verdict.is_him && id.verdict.reason == Reason::NoEnrollment);
+    assert!(verify(v, &lib, true, "a_short.wav").verdict.is_him);
 }
 
 // ---- HTTP routes --------------------------------------------------------
@@ -219,10 +295,18 @@ async fn routes_without_the_model_use_the_documented_errors() {
     assert_eq!(body["reason"], "no_enrollment");
     assert_eq!(body["score"], Value::Null);
     // an enrollment but no model: a clip that needs scoring is 409 ...
-    Enrollment::from_embeddings(DEFAULT_MODEL, &[vec![1.0, 0.0]])
-        .unwrap()
-        .save(home.path())
-        .unwrap();
+    Library::update(home.path(), |l| {
+        l.ensure_owner();
+        l.people[0].clips.push(Clip {
+            id: 1,
+            created_at: 0,
+            seconds: 1.0,
+            embedding: vec![1.0, 0.0],
+            has_audio: false,
+        });
+        Ok(())
+    })
+    .unwrap();
     let (status, body) = call(
         home.path(),
         "POST",
@@ -278,6 +362,10 @@ async fn enrollment_survives_a_restart_and_deletes() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["count"], 2);
+    let lib = Library::load(home.path()).unwrap();
+    let me = lib.owner().unwrap();
+    assert_eq!((me.name.as_str(), me.clips.len()), ("Me", 2));
+    assert!(me.clips.iter().all(|c| c.has_audio));
     // every call builds a fresh router: the enrollment is read off disk
     let (_, body) = call(
         home.path(),
@@ -314,4 +402,197 @@ async fn enrollment_survives_a_restart_and_deletes() {
     )
     .await;
     assert_eq!(body["reason"], "no_enrollment");
+}
+
+async fn json_call(
+    home: &Path,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
+    let (status, bytes) = raw_call(home, method, path, body).await;
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+async fn raw_call(
+    home: &Path,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(HOST, "127.0.0.1:7870")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.map(|b| b.to_string()).unwrap_or_default()))
+        .unwrap();
+    let resp = app(home).oneshot(req).await.unwrap();
+    let status = resp.status();
+    (
+        status,
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+}
+
+#[tokio::test]
+async fn people_crud_and_the_guard_switch_without_the_model() {
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    let people = "/v1/audio/speaker/people";
+    // empty library, guard off by default
+    let (status, body) = json_call(h, "GET", people, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        (body["live_guard"].clone(), body["people"].clone()),
+        (json!(false), json!([]))
+    );
+    let (_, body) = json_call(h, "GET", "/v1/audio/speaker/guard", None).await;
+    assert_eq!(body, json!({"live": false}));
+    let (status, body) = json_call(
+        h,
+        "PUT",
+        "/v1/audio/speaker/guard",
+        Some(json!({"live": true})),
+    )
+    .await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"live": true})));
+    let (_, body) = json_call(h, "GET", "/v1/audio/speaker/guard", None).await;
+    assert_eq!(body["live"], true);
+
+    // create, rename, move ownership
+    let (status, me) = json_call(
+        h,
+        "POST",
+        people,
+        Some(json!({"name": " Me ", "owner": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    assert_eq!(
+        (me["name"].clone(), me["owner"].clone()),
+        (json!("Me"), json!(true))
+    );
+    let (_, sam) = json_call(h, "POST", people, Some(json!({"name": "Sam"}))).await;
+    assert_eq!(sam["owner"], false);
+    let (status, _) = json_call(h, "POST", people, Some(json!({"name": "  "}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let sam_path = format!("{people}/{}", sam["id"]);
+    let (status, body) = json_call(
+        h,
+        "PATCH",
+        &sam_path,
+        Some(json!({"name": "Samuel", "owner": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = json_call(h, "GET", people, None).await;
+    let owners: Vec<_> = body["people"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["owner"] == true)
+        .map(|p| p["name"].clone())
+        .collect();
+    assert_eq!(owners, [json!("Samuel")], "{body}");
+    assert_eq!(body["live_guard"], true);
+    // no embeddings leave the daemon
+    assert!(!body.to_string().contains("embedding"));
+    let (status, _) = json_call(
+        h,
+        "PATCH",
+        &format!("{people}/99"),
+        Some(json!({"name": "x"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // clips: no model pulled is 409, an unknown person 404, a clip with no audio 404
+    let (status, body) = call(
+        h,
+        "POST",
+        &format!("{sam_path}/clips"),
+        &[fixture_bytes("a1.wav")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "model_not_pulled");
+    let (status, _) = call(
+        h,
+        "POST",
+        &format!("{people}/99/clips"),
+        &[fixture_bytes("a1.wav")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = raw_call(h, "GET", &format!("{sam_path}/clips/1/audio"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body) = json_call(h, "DELETE", &sam_path, None).await;
+    assert_eq!(
+        (status, body["deleted"].clone()),
+        (StatusCode::OK, json!(true))
+    );
+    let (status, _) = json_call(h, "DELETE", &sam_path, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn clips_round_trip_with_audio() {
+    let Some(_) = verifier() else { return };
+    let real = std::env::var_os("NARU_AUDIO_TEST_HOME")
+        .map(PathBuf::from)
+        .or_else(registry::default_home)
+        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let h = home.path();
+    std::fs::create_dir_all(h.join("models")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        real.join("models").join(DEFAULT_MODEL),
+        h.join("models").join(DEFAULT_MODEL),
+    )
+    .unwrap();
+    #[cfg(not(unix))]
+    return;
+
+    let people = "/v1/audio/speaker/people";
+    let (_, sam) = json_call(h, "POST", people, Some(json!({"name": "Sam"}))).await;
+    let clips = format!("{people}/{}/clips", sam["id"]);
+    // under a second is refused
+    let (status, body) = call(h, "POST", &clips, &[fixture_bytes("a_short.wav")]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, clip) = call(h, "POST", &clips, &[fixture_bytes("b1.wav")]).await;
+    assert_eq!(status, StatusCode::OK, "{clip}");
+    assert_eq!(clip["has_audio"], true);
+    assert!(clip["seconds"].as_f64().unwrap() > 1.0);
+    // listed (no embedding), and the audio comes back as a WAV
+    let (_, body) = json_call(h, "GET", people, None).await;
+    assert_eq!(body["people"][0]["clips"][0]["id"], clip["id"], "{body}");
+    let audio = format!("{clips}/{}/audio", clip["id"]);
+    let (status, wav) = raw_call(h, "GET", &audio, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&wav[..4], b"RIFF");
+    assert!(audio::decode(&wav[..]).unwrap().len() > MIN_SAMPLES);
+    // a restart sees it; the clip then the person delete with their audio
+    let path = Library::clip_path(h, clip["id"].as_u64().unwrap());
+    assert!(path.is_file());
+    let (status, _) = json_call(h, "DELETE", &format!("{clips}/{}", clip["id"]), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!path.exists());
+    let (status, _) = raw_call(h, "GET", &audio, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, clip) = call(h, "POST", &clips, &[fixture_bytes("b2.wav")]).await;
+    let path = Library::clip_path(h, clip["id"].as_u64().unwrap());
+    let (status, _) = json_call(h, "DELETE", &format!("{people}/{}", sam["id"]), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!path.exists());
 }

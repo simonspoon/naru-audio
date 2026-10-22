@@ -107,23 +107,52 @@ returned by this machine are valid only for the state that produced them.
 
 ## Speaker guard
 
-Scoring lives in `src/speaker.rs` (naru task 2028), not in the state machine. The `wespeaker-sv-en` catalog model
-(WeSpeaker ResNet34 via sherpa-onnx, `kind = "speaker"`) embeds 16 kHz mono audio; an enrollment is the L2-normalised
-mean of several clips' embeddings, stored as `$NARU_AUDIO_HOME/speaker/enrollment.json` tagged with the model name
-(embeddings of different models are not comparable, so a mismatched enrollment is ignored). A clip is "him" iff its
-cosine score against the enrollment is at least the threshold (`DEFAULT_THRESHOLD` = 0.7, overridable per request).
-On the TTS fixtures in `tests/fixtures/speaker/` the same voice scored 0.94-0.99 and a different voice 0.59-0.62;
-re-measure against a real enrollment before the switch.
+Scoring lives in `src/speaker.rs` (naru tasks 2028, 2260), not in the state machine. The `wespeaker-sv-en` catalog
+model (WeSpeaker ResNet34 via sherpa-onnx, `kind = "speaker"`) embeds 16 kHz mono audio. The voice library is
+`$NARU_AUDIO_HOME/speaker/people.json`: `{model, live_guard, people: [{id, name, owner, clips: [{id, created_at,
+seconds, embedding, has_audio}]}]}`, tagged with the model name (embeddings of different models are not comparable,
+so a mismatched library is ignored). Ids are integers. Each clip's audio is kept as a 16 kHz mono WAV in
+`speaker/clips/<clip id>.wav` (`has_audio`). At most one person is the owner: "him". When `people.json` is absent, an
+old `speaker/enrollment.json` (else `enrollment.json.off-20261022`) is migrated into an owner named "Me" with one clip
+(`has_audio: false`, `seconds: 0`); the old file is left in place.
 
-**Fails open** (short replies such as "yes" or a number must never be dropped): no enrollment, a model that is not
-pulled, a mismatched enrollment, or a clip under 1 s (`MIN_SAMPLES`) all answer `is_him: true`, with `reason`
+A person's score is the cosine of the clip to the L2-normalised mean of their clips' embeddings (max-over-clips scored
+a 0.333 leave-one-out margin on the fixtures, the mean 0.336). A clip matches the owner when their score is at or above the threshold (even if someone else scores higher), else the best-scoring person at or above it (`DEFAULT_THRESHOLD` = 0.7, overridable per `verify` request). On the TTS fixtures in
+`tests/fixtures/speaker/` the same voice scored 0.94-0.99 and a different voice 0.59-0.62; re-measure against real
+enrollments.
+
+**Fails open** (short replies such as "yes" or a number must never be dropped): no people with clips, a model that is not
+pulled, a mismatched library, or a clip under 1 s (`MIN_SAMPLES`) all answer `is_him: true`, with `reason`
 `no_enrollment`, `model_unavailable`, `model_mismatch` or `too_short` (`scored` otherwise).
+
+The **live guard** is a separate switch, `live_guard` (default off). It drops a segment in `live` mode only when
+`live_guard` is true, the owner has at least one usable clip, the segment is at least 2.0 s long, and the match
+is not the owner (another person, or nobody). Shorter segments are always admitted; with the switch off `live` never
+drops a segment for speaker reasons. Scoring still runs for the `speaker` tag. A running session reloads
+`people.json` when it changes, so library edits and the switch apply without a restart. Ambient tagging scores every
+person regardless of the switch: the owner is `Him`, another named person is `Other` with the person's name, a scored
+line matching nobody is `Other` unnamed, an unscored one is `Unknown`.
 
 The machine's side is `LiveState::segment_fate(other_voice, is_him)`: `Admit` iff `segment_goes_to_guard` and the
 guard said him, else `Drop`.
 
-Routes (opt-in, nothing calls them until the switch; multipart like `/v1/audio/transcriptions`):
-`POST /v1/audio/speaker/enroll` (one or more `file` clips, replaces the enrollment; 400 when none is 1 s or longer),
-`POST /v1/audio/speaker/verify` (`file`, optional `threshold`; answers `{score, is_him, reason, threshold}`),
-`DELETE /v1/audio/speaker/enrollment`. A request that needs the model while it is not pulled is 409
-`model_not_pulled` (§2.6); a verify with no enrollment, or a clip too short to score, never needs it.
+Routes (opt-in, nothing calls them until the switch). A request that needs the model while it is not pulled is 409
+`model_not_pulled` (§2.6); an unknown person or clip is 404 `not_found`. JSON bodies unless noted; clips are multipart
+like `/v1/audio/transcriptions`.
+
+| Route | |
+|---|---|
+| `GET /v1/audio/speaker/people` | `{model, live_guard, people: [{id, name, owner, clips: [{id, created_at, seconds, has_audio}]}]}`; no embeddings |
+| `POST /v1/audio/speaker/people` | `{name, owner?}` makes a person (the same shape as one list entry) |
+| `PATCH /v1/audio/speaker/people/{id}` | `{name?, owner?}`; `owner: true` clears it on the others |
+| `DELETE /v1/audio/speaker/people/{id}` | `{deleted: true}`; removes its clips' WAVs |
+| `POST /v1/audio/speaker/people/{id}/clips` | multipart `file` WAV; embeds and keeps it; answers the clip `{id, created_at, seconds, has_audio}`; 400 under 1 s |
+| `GET /v1/audio/speaker/people/{id}/clips/{clip}/audio` | `audio/wav`; 404 when the clip has no audio |
+| `DELETE /v1/audio/speaker/people/{id}/clips/{clip}` | `{deleted: true}` |
+| `GET` / `PUT /v1/audio/speaker/guard` | `{live: bool}` (PUT takes the same body) |
+
+Legacy single-voice routes, same response shapes, now over the owner: `POST /v1/audio/speaker/enroll` (one or more
+`file` clips replace the owner's clips, creating the owner "Me" if there is none, and keep their audio; 400 when none is
+1 s or longer; answers `{model, count, dim}`), `POST /v1/audio/speaker/verify` (`file`, optional `threshold`; scored
+against the owner only; answers `{score, is_him, reason, threshold}`), `DELETE /v1/audio/speaker/enrollment` (removes
+the owner's clips). A verify with no enrolled owner, or a clip too short to score, never needs the model.
