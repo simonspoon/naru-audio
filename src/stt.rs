@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod engine;
 pub mod gate;
+pub mod hallucination;
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 pub(crate) mod mlx;
 pub(crate) mod sherpa;

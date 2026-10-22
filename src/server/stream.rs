@@ -32,6 +32,7 @@ use super::{AppState, RequestId, manager_error};
 use crate::error::ApiError;
 use crate::manager::{Guard, KeepAlive};
 use crate::stt::audio::TARGET_SAMPLE_RATE;
+use crate::stt::hallucination;
 use crate::stt::vad::{Segmenter, Span, Vad};
 use crate::stt::{SttError, SttModel, VadConfig, Vocabulary};
 
@@ -210,6 +211,8 @@ pub(super) enum Input {
 pub(super) enum Job {
     Decode {
         pcm: Vec<f32>,
+        /// The speech's samples within `pcm`, without the padding.
+        speech: std::ops::Range<usize>,
         /// The speech, in seconds since `start`; the padding is not in it.
         start: f64,
         end: f64,
@@ -798,8 +801,10 @@ impl Segments {
         let pcm = self.slice(from, audio_end.min(self.received)).to_vec();
         self.floor = end;
         self.backlog.fetch_add(pcm.len(), Ordering::SeqCst);
+        let speech = (start - from).min(pcm.len())..(end - from).min(pcm.len());
         let _ = self.jobs.send(Job::Decode {
             pcm,
+            speech,
             start: start as f64 / RATE as f64,
             end: end as f64 / RATE as f64,
             hotwords: self.hotwords.clone(),
@@ -889,6 +894,7 @@ fn decode_with(
     let mut index = 0;
     // A partial was sent for `index`, so its segment needs a final.
     let mut partialled = false;
+    let mut speech_range = 0..0;
     while let Some(job) = jobs.blocking_recv() {
         // The client has gone: stop, and let the model go.
         if events.is_closed() {
@@ -897,10 +903,14 @@ fn decode_with(
         let (pcm, start, end, hotwords) = match job {
             Job::Decode {
                 pcm,
+                speech,
                 start,
                 end,
                 hotwords,
-            } => (pcm, start, end, hotwords),
+            } => {
+                speech_range = speech;
+                (pcm, start, end, hotwords)
+            }
             Job::Partial {
                 pcm,
                 start,
@@ -946,6 +956,16 @@ fn decode_with(
                 let _ = events.send(Event::Fail(e));
                 return;
             }
+        };
+        let text = match hallucination::is_hallucination(&text, &pcm[speech_range.clone()]) {
+            Some(reason) => {
+                crate::log::Logger::stderr().info(
+                    None,
+                    &format!("stt_hallucination reason={reason} text={text:?}"),
+                );
+                String::new()
+            }
+            None => text,
         };
         // A gated segment has no text and no `final`, unless partials
         // were sent for it: an empty `final` closes them (§2.4).
@@ -1162,6 +1182,7 @@ mod tests {
     fn segment(pcm: f32) -> Job {
         Job::Decode {
             pcm: vec![pcm],
+            speech: 0..1,
             start: 0.0,
             end: 1.0,
             hotwords: None,
