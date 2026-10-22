@@ -234,16 +234,29 @@ fn join(key: &str, seed: Option<Mode>) -> Result<(Member, Mode, u64), Fail> {
 }
 
 /// Moves the conversation to `mode` and tells every member; the same mode
-/// is ignored.
-fn publish_mode(key: &str, mode: Mode) {
+/// is ignored. The conversation's `seq` after it, if it still exists.
+fn publish_mode(key: &str, mode: Mode) -> Option<u64> {
     let mut table = CONVERSATIONS.lock().unwrap();
-    if let Some(conv) = table.get_mut(key)
-        && conv.mode != mode
-    {
+    let conv = table.get_mut(key)?;
+    if conv.mode != mode {
         conv.mode = mode;
         conv.seq += 1;
         let _ = conv.tx.send((conv.seq, mode));
     }
+    Some(conv.seq)
+}
+
+/// One line per received `mode` frame.
+fn log_mode(st: &AppState, req_id: &str, conv: Option<&str>, mode: Mode, seq: Option<u64>) {
+    let seq = seq.map_or("-".to_string(), |s| s.to_string());
+    st.log.info(
+        Some(req_id),
+        &format!(
+            "live_mode conversation={} mode={} seq={seq}",
+            conv.unwrap_or("-"),
+            mode_name(mode)
+        ),
+    );
 }
 
 /// A new `state` for every member with the mode unchanged (one member's
@@ -743,7 +756,7 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         }
     };
     if control {
-        return control_session(req_id, socket, start).await;
+        return control_session(st, req_id, socket, start).await;
     }
     let Some(rate) = start.rate else {
         return Err(violation(
@@ -924,6 +937,7 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
 /// A `control` socket: joins `start.conversation` and carries its mode
 /// both ways, with no audio, model or VAD.
 async fn control_session(
+    st: &AppState,
     req_id: &str,
     socket: &mut WebSocket,
     start: LiveStart,
@@ -962,7 +976,10 @@ async fn control_session(
                 let Some(msg) = msg? else { return Ok(Ended::Gone) };
                 match msg {
                     Message::Text(text) => match parse(&text)? {
-                        ClientMessage::Mode { mode } => publish_mode(&key, parse_mode(&mode)?),
+                        ClientMessage::Mode { mode } => {
+                            let mode = parse_mode(&mode)?;
+                            log_mode(st, req_id, Some(&key), mode, publish_mode(&key, mode));
+                        }
                         ClientMessage::Stop => {
                             if send(socket, json!({"type": "done"})).await.is_err() {
                                 return Ok(Ended::Gone);
@@ -1220,13 +1237,16 @@ async fn client_message(
         ClientMessage::Mode { mode } => {
             let mode = parse_mode(&mode)?;
             if let Some(key) = conv {
-                publish_mode(key, mode);
-            } else if mode != live.mode() {
-                // What the old mode heard is the old mode's: cut it first.
-                let _ = input.send(Input::Flush);
-                live.set_mode(mode);
-                sent.push(live.state_event(None));
-                remember_state(session_id, live);
+                log_mode(st, req_id, conv, mode, publish_mode(key, mode));
+            } else {
+                log_mode(st, req_id, None, mode, None);
+                if mode != live.mode() {
+                    // What the old mode heard is the old mode's: cut it first.
+                    let _ = input.send(Input::Flush);
+                    live.set_mode(mode);
+                    sent.push(live.state_event(None));
+                    remember_state(session_id, live);
+                }
             }
         }
         ClientMessage::AgentSpeaking { value } => {
