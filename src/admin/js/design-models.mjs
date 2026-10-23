@@ -336,6 +336,8 @@ export const DESIGN_MODELS = {
   'voxcpm2-8bit-mlx': VOX,
   'omnivoice-bf16-mlx': OMNI,
   'breeze-tts-2-mlx': BREEZE,
+  'breeze-tts-2-8bit-mlx': BREEZE,
+  'breeze-tts-2-4bit-mlx': BREEZE,
 };
 
 /** Model-specific data for `id`, or the generic fallback. `hint` (the

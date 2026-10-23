@@ -422,6 +422,8 @@ fn only_known_models_are_flagged_non_commercial() {
     assert_eq!(
         nc,
         [
+            "breeze-tts-2-4bit-mlx",
+            "breeze-tts-2-8bit-mlx",
             "breeze-tts-2-mlx",
             "omnivoice-bf16-mlx",
             "pocket-tts-int8",

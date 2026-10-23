@@ -138,6 +138,8 @@ request.
 | `voxcpm2-8bit-mlx` | TTS, clones or designs a voice, 48 kHz | mlx | 3.2 GB |
 | `omnivoice-bf16-mlx` | TTS, clones or designs a voice, 646 languages, does not stream, **non-commercial** | mlx | 1.6 GB |
 | `breeze-tts-2-mlx` | TTS, clones or designs a voice, **non-commercial** | mlx | 7.6 GB |
+| `breeze-tts-2-8bit-mlx` | `breeze-tts-2-mlx` quantized to 8 bit (mxfp8), **non-commercial** | mlx | 4.6 GB |
+| `breeze-tts-2-4bit-mlx` | `breeze-tts-2-mlx` quantized to 4 bit (mxfp4), **non-commercial** | mlx | 3.0 GB |
 
 Supporting models, pulled automatically or on demand:
 

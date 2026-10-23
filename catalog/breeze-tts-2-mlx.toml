@@ -18,9 +18,8 @@
 # cadence without error (confirmed 2026-09-26 by pulling this model and
 # running `say` end to end); no shim is needed for it.
 #
-# Only mlx-community's full-precision conversion is used, not their 4-bit
-# or 8-bit ones: task-1446 does not ask for a smaller quantization, and the
-# bf16 repo is the one whose size (~7.6 GB total) matches the brief.
+# This is the full-precision conversion (~7.6 GB total); the 8-bit and 4-bit
+# ones are the sibling entries breeze-tts-2-8bit-mlx and breeze-tts-2-4bit-mlx.
 #
 # Licence: this is BreezeBlue's own research/non-commercial grant, not an
 # OSI license — "This Agreement permits research and non-commercial use of

@@ -27,6 +27,8 @@ use tower::ServiceExt;
 const HOSTPORT: &str = "127.0.0.1:7870";
 /// Built in, and listed on macOS only.
 const MLX: &[&str] = &[
+    "breeze-tts-2-4bit-mlx",
+    "breeze-tts-2-8bit-mlx",
     "breeze-tts-2-mlx",
     "chatterbox-tts-8bit-mlx",
     "chatterbox-turbo-8bit-mlx",

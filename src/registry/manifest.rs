@@ -19,6 +19,14 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/breeze-tts-2-mlx.toml"),
     ),
     (
+        "breeze-tts-2-4bit-mlx.toml",
+        include_str!("../../catalog/breeze-tts-2-4bit-mlx.toml"),
+    ),
+    (
+        "breeze-tts-2-8bit-mlx.toml",
+        include_str!("../../catalog/breeze-tts-2-8bit-mlx.toml"),
+    ),
+    (
         "chatterbox-tts-8bit-mlx.toml",
         include_str!("../../catalog/chatterbox-tts-8bit-mlx.toml"),
     ),
@@ -679,6 +687,8 @@ mod tests {
             cat.models.keys().collect::<Vec<_>>(),
             [
                 "audio-tagging-ced-tiny",
+                "breeze-tts-2-4bit-mlx",
+                "breeze-tts-2-8bit-mlx",
                 "breeze-tts-2-mlx",
                 "chatterbox-tts-8bit-mlx",
                 "chatterbox-turbo-8bit-mlx",
@@ -1046,6 +1056,31 @@ mod tests {
                     && url.ends_with(&format!("/{}", f.path)),
                 "{url}"
             );
+        }
+    }
+
+    #[test]
+    fn builtin_breeze_quantized_clone_and_instruct_and_are_non_commercial() {
+        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
+        for (id, repo) in [
+            ("breeze-tts-2-8bit-mlx", "Breeze-TTS-2-mlx-8bit"),
+            ("breeze-tts-2-4bit-mlx", "Breeze-TTS-2-mlx-4bit"),
+        ] {
+            let m = &cat.models[id];
+            assert_eq!(m.model.kind, Kind::Tts);
+            assert_eq!(m.model.backend, "mlx");
+            assert!(m.model.non_commercial, "{id}");
+            assert!(m.clones(), "{id}");
+            assert!(m.clone_requires_transcript(), "{id}");
+            assert!(m.instructs(), "{id}");
+            let license_url = m.model.license_url.as_deref().unwrap();
+            assert!(
+                license_url.starts_with(&format!(
+                    "https://huggingface.co/mlx-community/{repo}/blob/"
+                )) && license_url.ends_with("/LICENSE"),
+                "{license_url}"
+            );
+            assert!(m.files.iter().any(|f| f.path == "LICENSE"), "{id}");
         }
     }
 

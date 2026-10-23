@@ -1,0 +1,123 @@
+# Breeze TTS 2 (BreezeBlue), mlx-community's 4-bit (mxfp4) conversion.
+# Same model, licence, capabilities and prompt format as the bf16 entry
+# (breeze-tts-2-mlx.toml, see its header); only the weights differ: one
+# model.safetensors (~3.0 GB total) instead of two shards, and
+# config.json carries a "quantization" block (4 bits, mode mxfp4).
+#
+# Every [[file]] of the repo at the pinned commit but README.md,
+# .gitattributes and the demo mp4 (not needed to run); sizes and LFS hash from the HF API, the small files'
+# hashes computed 2026-10-23 from the files at the pinned commit.
+
+[model]
+name        = "breeze-tts-2-4bit-mlx"
+kind        = "tts"
+backend     = "mlx"
+# Listed on Intel too, so it shows there with x_available:false (§3.6).
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["en", "zh"]
+license     = "BreezeBlue Research and Non-Commercial License"
+license_url = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/blob/3a06d26b172ea4ae1da2f42d708383e9c79d5526/LICENSE"
+non_commercial = true                    # see the bf16 file's LICENSE excerpt
+
+[backend.mlx]
+# Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.
+clone = true
+# Its `generate` raises outright without a transcript alongside the
+# reference clip (breeze_tts.py: "Breeze voice cloning requires ref_text
+# with ref_audio.").
+clone_requires_transcript = true
+# Takes the request's `instructions` as mlx-audio's `instruct`, to make a
+# voice up from a description instead of cloning one.
+instruct = true
+
+# One free-text instruction, for a voice design or direction on a clone
+# alike (`breeze_tts.py`: `target = f"{speaker}<ins_bos>{instruct}<ins_eos>{text}"`).
+# Inline tags are BreezeBlue's own model card syntax, not something
+# mlx-audio's `breeze_tts.py` parses specially — they are plain text the
+# model was trained to recognise, English in parentheses and Chinese in
+# brackets. `cfg_scale`'s default is `generate`'s own (no CFG unless set);
+# 4 is the card's recommendation for voice design/direction, not a code
+# default.
+[backend.mlx.prompt_format]
+style = "free_text"
+inline = { syntax = "(tag) or [标签]", tags = ["laugh", "sigh", "clears throat", "笑", "叹气"], example = "(laugh) That's hilarious!" }
+knobs = [{ name = "cfg_scale", default = 4.0, min = 0.0, max = 10.0 }]
+hint = "Speak slowly and warmly, like reading a bedtime story"
+
+[[file]]
+path   = "LICENSE"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/LICENSE"
+sha256 = "2a143ae167cb0253d95bafa694e415570dcce336d712230d205c538523bbd855"
+size   = 18_856
+
+[[file]]
+path   = "NOTICE"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/NOTICE"
+sha256 = "70bc248b98e5bb527f160c86be56d60ef8c63776c43051273643db036ebee40d"
+size   = 146
+
+[[file]]
+path   = "config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/config.json"
+sha256 = "f6871e70a5e937cf23f8ca6eb252ea377c9e489f87f3f7c70b76066ff5768bdf"
+size   = 12_379
+
+[[file]]
+path   = "generation_config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/generation_config.json"
+sha256 = "2ef3f2c0ab8d9ad241059138a795433c5410fd9954efb9625674ecd2a9529434"
+size   = 251
+
+[[file]]
+path   = "model.safetensors"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/model.safetensors"
+sha256 = "e8499e75e043b16d0734897869a124198aca2fa88436eb83c855d58a39fdac0a"
+size   = 2_325_487_160
+
+[[file]]
+path   = "model.safetensors.index.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/model.safetensors.index.json"
+sha256 = "fe6889d333789126501d6f3c5aa9fe198b00477403c7c1507d86f8cf3b32e381"
+size   = 98_863
+
+[[file]]
+path   = "special_tokens_map.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/special_tokens_map.json"
+sha256 = "194f265bb588d142a16f27d9576104eb3dab3d7ba9961541d2d6e3d5e77e6470"
+size   = 886
+
+[[file]]
+path   = "tokenizer.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/tokenizer.json"
+sha256 = "d3ec9ac3eb2392389b9f5112e85d8b43316494addb587ba7b7a9d61eac23af96"
+size   = 33_386_945
+
+[[file]]
+path   = "tokenizer_config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/tokenizer_config.json"
+sha256 = "2c084fd6725c2284e8aa6da095a8d036d48fe79665595bfcd50371821b620e44"
+size   = 1_157_960
+
+[[file]]
+path   = "audio_tokenizer/config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/audio_tokenizer/config.json"
+sha256 = "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167"
+size   = 2_336
+
+[[file]]
+path   = "audio_tokenizer/configuration.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/audio_tokenizer/configuration.json"
+sha256 = "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd"
+size   = 76
+
+[[file]]
+path   = "audio_tokenizer/model.safetensors"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/audio_tokenizer/model.safetensors"
+sha256 = "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258"
+size   = 682_293_092
+
+[[file]]
+path   = "audio_tokenizer/preprocessor_config.json"
+url    = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-4bit/resolve/3a06d26b172ea4ae1da2f42d708383e9c79d5526/audio_tokenizer/preprocessor_config.json"
+sha256 = "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb"
+size   = 234
