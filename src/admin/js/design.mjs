@@ -12,20 +12,21 @@ import { el, toast, playButton, waveformSvg, peaks, decodeWav } from './ui.mjs';
 import { designModel } from './design-models.mjs';
 
 const TEST_LINE = 'Warm coffee, a quiet morning, and nothing on fire yet.';
-const RECENT_KEY = 'naru-audio-design-recent';
-
-function recentPrompts() {
-  try {
-    return JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
-  } catch {
-    return [];
-  }
-}
-
-function pushRecentPrompt(text) {
-  const list = [text, ...recentPrompts().filter((p) => p !== text)].slice(0, 8);
-  localStorage.setItem(RECENT_KEY, JSON.stringify(list));
-}
+// Ready-made test lines, one click each: a spread of length and mood to hear
+// how a designed voice reacts.
+const SAMPLE_LINES = [
+  'Yes.',
+  'Hey, are you still there? I thought I lost you for a second.',
+  'Wait, you actually got the job? That is amazing, I am so happy for you!',
+  'Take a slow breath in, and let it go. There is no rush at all.',
+  'I kept the porch light on for weeks, hoping he would come home.',
+  'No. I told you three times already, and I am done repeating myself.',
+  'Come closer, I will tell you a secret. Just between the two of us.',
+  'Sleep well, little one. I will be right here when you wake up.',
+  'Ha! I did not see that coming at all. Okay, okay, you win this round.',
+  'Could you remind me what time the train leaves tomorrow morning?',
+  'The storm rolled in just after dusk. By midnight the river had crept over the old stone bridge, and the whole village gathered at the church on the hill, sharing blankets and stories until the sun came up.',
+];
 
 export function mount(view, params) {
   let disposed = false;
@@ -53,7 +54,7 @@ export function mount(view, params) {
     { class: 'inp design-select', style: 'margin-left:auto;width:auto;min-width:0', title: 'How many takes to generate' },
     [1, 2, 3, 4, 5].map((n) => el('option', { value: n }, [String(n)])),
   );
-  const recentList = el('div', {});
+  const samplesList = el('div', {});
 
   const leftCard = el('div', { class: 'card' }, [
     el('div', { class: 'step' }, [
@@ -111,8 +112,8 @@ export function mount(view, params) {
     el('div', { style: 'color:var(--muted);font-size:13px;margin-top:8px' }, [
       'Every take speaks this line, so you compare like with like.',
     ]),
-    el('div', { class: 'lab', style: 'margin-top:14px' }, ['Recent prompts']),
-    recentList,
+    el('div', { class: 'lab', style: 'margin-top:14px' }, ['Sample lines · click to use']),
+    samplesList,
   ]);
 
   view.append(el('div', { class: 'side' }, [leftCard, rightCard]));
@@ -286,20 +287,20 @@ export function mount(view, params) {
     renderPreview();
   }
 
-  function renderRecent() {
-    recentList.replaceChildren(
-      ...recentPrompts().map((p) =>
+  function renderSamples() {
+    samplesList.replaceChildren(
+      ...SAMPLE_LINES.map((line) =>
         el(
           'div',
           {
             class: 'kv',
             style: 'cursor:pointer',
             onclick: () => {
-              descBox.value = p;
+              testLineInput.value = line;
               renderPreview();
             },
           },
-          [el('span', {}, [p])],
+          [el('span', {}, [line])],
         ),
       ),
     );
@@ -341,8 +342,6 @@ export function mount(view, params) {
       toast('describe the voice first', true);
       return;
     }
-    pushRecentPrompt(description);
-    renderRecent();
     takes = [];
     pickedIndex = null;
     renderTakes();
@@ -418,7 +417,7 @@ export function mount(view, params) {
   descBox.addEventListener('input', renderPreview);
   testLineInput.addEventListener('input', renderPreview);
   renderModelUi();
-  renderRecent();
+  renderSamples();
   refresh();
   return () => {
     disposed = true;
