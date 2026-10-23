@@ -284,9 +284,10 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   short sentences pair up) with the reference re-applied to each. A cloned
   Qwen3-TTS voice samples at `temperature` 0.55, `top_p` 0.8, `top_k` 20,
   tighter than mlx-audio's own, which lets the timbre drift between
-  sentences; `knobs` override them. Every request's audio is also saved as
-  `~/.naru-audio/recent/<id>.wav` (the `id=` in its `tts_request` log line);
-  the newest 50 are kept.
+  sentences; `knobs` override them. With `serve --keep-recent` (below), every
+  request's audio is also saved as `~/.naru-audio/recent/<id>.wav` (the
+  `id=` in its `tts_request` log line); the newest 50 are kept. By default
+  nothing is saved.
 
 Per-model notes:
 
@@ -346,7 +347,7 @@ All state lives in `$NARU_AUDIO_HOME`, default `~/.naru-audio`:
 ├── models/<name>/  pulled models
 ├── voices/<name>/  cloned voices
 ├── prep/           Sample Studio clips and samples
-├── recent/         the newest 50 synthesised replies
+├── recent/         only with --keep-recent: the newest 50 synthesised replies
 ├── state/          measured memory use per model
 ├── tmp/            partial downloads and locks
 └── mlx/            the MLX sidecar's venv (Apple Silicon)
@@ -378,6 +379,7 @@ Environment variables:
 | `NARU_AUDIO_HOME` | State directory (default `~/.naru-audio`). |
 | `NARU_AUDIO_LISTEN` | `serve`'s bind address (default `127.0.0.1:7870`); same as `--listen`. |
 | `NARU_AUDIO_LOG` | `serve`'s log file; same as `--log-file`. |
+| `NARU_AUDIO_KEEP_RECENT` | `1` turns on `serve --keep-recent`, a debugging aid for agents: each `/speech` reply is saved to `recent/<id>.wav` (newest 50). Off by default. |
 | `NARU_AUDIO_STT_MODEL`, `NARU_AUDIO_TTS_MODEL` | Default models; override `config.toml`. |
 | `NARU_AUDIO_KEEP_ALIVE` | Default keep-alive; overrides `config.toml`. |
 | `NARU_AUDIO_URL` | Where the client commands find the daemon (default `http://127.0.0.1:7870`). |
@@ -438,6 +440,25 @@ It calls `GET /health` on `$NARU_AUDIO_URL` and exits:
 | 4 | The daemon is up but the default STT model is not ready, for example not pulled. The message says what to run. |
 
 `GET /health` itself answers from memory and never waits behind a decode.
+
+## Privacy
+
+By default naru-audio stores none of what you say or have it say. It does
+not write spoken text, transcripts, microphone audio or generated audio to
+disk. Its log records request lines (route, status, timings, ids,
+character and sentence counts, model and voice names) and never writes the
+spoken text or transcripts itself; error lines carry the underlying error
+message from the library or MLX sidecar. Audio and text in a request are held in memory while it runs.
+
+What is stored is what you create on purpose: pulled models, cloned voices
+and their reference clips and transcripts, and Sample Studio clips and
+samples under `prep/`.
+
+`naru-audio serve --keep-recent` (or `NARU_AUDIO_KEEP_RECENT=1`) is a
+debugging aid for agents, for checking a reply's pitch or voice after the
+fact: it saves each `/speech` reply's audio to `recent/<id>.wav`, newest 50.
+Leave it off otherwise. Turning it off does not delete an existing
+`recent/` folder; remove it yourself.
 
 ## Troubleshooting
 

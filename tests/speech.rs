@@ -156,11 +156,33 @@ impl Server {
         )
     }
 
+    /// `fake`, with `serve --keep-recent` on.
+    fn fake_keeping_recent() -> Self {
+        let record = Arc::new(Record::default());
+        Self::start_keeping(
+            fake_home(),
+            "fake-tts",
+            Arc::new(FakeLoader(record.clone())),
+            record,
+            true,
+        )
+    }
+
     fn start(
         home: tempfile::TempDir,
         tts_default: &str,
         loader: Arc<dyn Loader>,
         record: Arc<Record>,
+    ) -> Self {
+        Self::start_keeping(home, tts_default, loader, record, false)
+    }
+
+    fn start_keeping(
+        home: tempfile::TempDir,
+        tts_default: &str,
+        loader: Arc<dyn Loader>,
+        record: Arc<Record>,
+        keep_recent: bool,
     ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -179,6 +201,7 @@ impl Server {
             registry,
             models: Arc::new(models),
             pulls: Arc::new(naru_audio::server::PullTracker::new()),
+            keep_recent,
         }));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.spawn(async move {
@@ -596,11 +619,23 @@ fn seed_defaults_to_the_constant_and_is_validated() {
     assert_eq!(server.record.loads.load(Ordering::SeqCst), loads);
 }
 
-/// Each speech request leaves its audio as `recent/<id>.wav` under the
-/// home (a real wav of what was sent), and only the newest 50 stay.
+/// By default a speech request stores nothing: no `recent/` under the home.
+#[test]
+fn speech_stores_no_audio_by_default() {
+    let server = Server::fake();
+    let reply = server.speech(json!({"input": "One. Two."}));
+    assert_eq!(reply.status, 200);
+    // The save, were it on, comes just after the body ends.
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!server._home.path().join("recent").exists());
+}
+
+/// With `--keep-recent`, each speech request leaves its audio as
+/// `recent/<id>.wav` under the home (a real wav of what was sent), and only
+/// the newest 50 stay.
 #[test]
 fn recent_wavs_are_written_and_pruned_to_fifty() {
-    let server = Server::fake();
+    let server = Server::fake_keeping_recent();
     let recent = server._home.path().join("recent");
     std::fs::create_dir_all(&recent).unwrap();
     let old = std::time::SystemTime::now() - Duration::from_secs(3600);

@@ -176,7 +176,8 @@ pub(super) async fn speech(
         .map_err(|e| manager_error(&st, &req_id, e))?;
     let sample_rate = model.tts().sample_rate();
 
-    let recent = Some(Recent {
+    // Only with `serve --keep-recent`; otherwise no audio is kept.
+    let recent = st.keep_recent.then(|| Recent {
         home: st.registry.home().to_path_buf(),
         id: recent_id,
         log: st.log.clone(),

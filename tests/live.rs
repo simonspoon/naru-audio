@@ -103,6 +103,7 @@ async fn serve(home: &Path) -> String {
         registry,
         models: Arc::new(models),
         pulls: Arc::new(naru_audio::server::PullTracker::new()),
+        keep_recent: false,
     }));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("127.0.0.1:{port}")

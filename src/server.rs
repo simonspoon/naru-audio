@@ -58,6 +58,10 @@ pub struct AppState {
     /// §2.5 `POST /api/pull` in-flight tracking, for `GET /api/pulls` and
     /// `DELETE /api/pulls/{name}`.
     pub pulls: Arc<PullTracker>,
+    /// `serve --keep-recent`: a debugging aid that saves each `/speech`
+    /// reply's audio under `<home>/recent`. Off by default, so no spoken
+    /// content is stored.
+    pub keep_recent: bool,
 }
 
 /// The request's `X-Request-Id`, for handlers' log lines.
@@ -1026,6 +1030,7 @@ mod tests {
             registry,
             models: Arc::new(models),
             pulls: Arc::new(PullTracker::new()),
+            keep_recent: false,
         }))
     }
 

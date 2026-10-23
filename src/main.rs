@@ -39,6 +39,16 @@ enum Command {
         /// $(brew --prefix)/var/log/naru-audio.log under Homebrew, else stderr.
         #[arg(long, env = "NARU_AUDIO_LOG")]
         log_file: Option<PathBuf>,
+        /// Debugging aid for agents: save the audio of each /speech reply to
+        /// $NARU_AUDIO_HOME/recent/<id>.wav (newest 50). Off by default, so
+        /// nothing that was spoken is stored.
+        #[arg(
+            long,
+            env = "NARU_AUDIO_KEEP_RECENT",
+            action = clap::ArgAction::SetTrue,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        keep_recent: bool,
     },
     /// Download models, and what they require, into $NARU_AUDIO_HOME.
     Pull {
@@ -176,12 +186,13 @@ enum Format {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let (listen, allow_remote, log_file) = match Cli::parse().command {
+    let (listen, allow_remote, log_file, keep_recent) = match Cli::parse().command {
         Command::Serve {
             listen,
             allow_remote,
             log_file,
-        } => (listen, allow_remote, log_file),
+            keep_recent,
+        } => (listen, allow_remote, log_file, keep_recent),
         Command::Health => return health(&daemon_url()),
         Command::Ps => return ps(&daemon_url()),
         Command::Transcribe {
@@ -295,6 +306,7 @@ async fn main() -> ExitCode {
         registry,
         models: Arc::new(models),
         pulls: Arc::new(naru_audio::server::PullTracker::new()),
+        keep_recent,
     }));
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("naru-audio: server error: {e}");
@@ -1077,7 +1089,38 @@ async fn stream(
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_pull_names, speech_request};
+    use super::{Cli, Command, expand_pull_names, speech_request};
+    use clap::Parser;
+
+    fn keep_recent(args: &[&str]) -> Result<bool, clap::Error> {
+        match Cli::try_parse_from(args)?.command {
+            Command::Serve { keep_recent, .. } => Ok(keep_recent),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn keep_recent_flag_parses() {
+        assert!(!keep_recent(&["naru-audio", "serve"]).unwrap());
+        assert!(keep_recent(&["naru-audio", "serve", "--keep-recent"]).unwrap());
+        // One test owns the env var, so nothing else races on it.
+        for (v, want) in [
+            ("1", true),
+            ("true", true),
+            ("yes", true),
+            ("on", true),
+            ("0", false),
+            ("false", false),
+            ("no", false),
+            ("off", false),
+        ] {
+            unsafe { std::env::set_var("NARU_AUDIO_KEEP_RECENT", v) };
+            assert_eq!(keep_recent(&["naru-audio", "serve"]).unwrap(), want, "{v}");
+        }
+        unsafe { std::env::set_var("NARU_AUDIO_KEEP_RECENT", "bogus") };
+        assert!(keep_recent(&["naru-audio", "serve"]).is_err());
+        unsafe { std::env::remove_var("NARU_AUDIO_KEEP_RECENT") };
+    }
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
