@@ -1,7 +1,8 @@
 // Design tab (mockup: na-admin-design): pick a design-capable model, build
 // a description with that model's own wizard form (fields, presets and tips
 // from design-models.mjs, with a live preview of the exact `instructions`
-// string), generate three takes of a shared test line,
+// string), generate takes of a shared test line (how many is picked, each
+// on its own seed so they differ),
 // pick one, name it, and save it as a voice on `x_design_voice_model` (the
 // model that can actually hold the voice — VoiceDesign models can't clone
 // themselves).
@@ -47,6 +48,11 @@ export function mount(view, params) {
   const saveHint = el('span', { style: 'color:var(--muted);font-size:13px' });
   const createBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:200px' }, ['Create voice']);
   const testLineInput = el('input', { class: 'inp', value: TEST_LINE });
+  const countSelect = el(
+    'select',
+    { class: 'inp design-select', style: 'margin-left:auto;width:auto;min-width:0', title: 'How many takes to generate' },
+    [1, 2, 3, 4, 5].map((n) => el('option', { value: n }, [String(n)])),
+  );
   const recentList = el('div', {});
 
   const leftCard = el('div', { class: 'card' }, [
@@ -81,12 +87,9 @@ export function mount(view, params) {
       el('span', { class: 'num' }, ['3']),
       el('div', { style: 'flex:1' }, [
         el('div', { style: 'display:flex;align-items:center' }, [
-          el('div', { class: 'lab', style: 'margin:0' }, ['Takes · same description, three tries']),
-          el(
-            'button',
-            { class: 'btn', style: 'margin-left:auto', onclick: generateTakes },
-            ['↻ Generate 3'],
-          ),
+          el('div', { class: 'lab', style: 'margin:0' }, ['Takes · same description, a new seed each']),
+          countSelect,
+          el('button', { class: 'btn', style: 'margin-left:8px', onclick: generateTakes }, ['↻ Generate']),
         ]),
         takesGrid,
       ]),
@@ -343,7 +346,11 @@ export function mount(view, params) {
     takes = [];
     pickedIndex = null;
     renderTakes();
-    for (let i = 0; i < 3; i++) {
+    // The server's default seed is fixed, so takes sent without one come out
+    // identical: each take gets its own, consecutive from a random base.
+    const base = crypto.getRandomValues(new Uint32Array(1))[0];
+    const count = Number(countSelect.value);
+    for (let i = 0; i < count; i++) {
       try {
         const res = await request('/v1/audio/speech', {
           method: 'POST',
@@ -354,6 +361,7 @@ export function mount(view, params) {
             instructions: description,
             response_format: 'wav',
             stream: false,
+            seed: base + i,
           }),
         });
         const arrayBuffer = await res.arrayBuffer();

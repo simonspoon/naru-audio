@@ -242,7 +242,7 @@ const QWEN = {
   pitfalls: [
     'Keep it under about 500 characters (the hosted API limit; a soft guide for the open model).',
     'Avoid vague words ("nice", "normal"), "female voice" alone, and celebrity imitation.',
-    'Accents are weak. Results vary run to run: compare the three takes.',
+    'Accents are weak. Results vary run to run: generate a few takes and compare.',
     'Keep voice description out of the spoken text.',
   ],
   presets: OPEN_PRESETS,

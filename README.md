@@ -42,7 +42,7 @@ models, and memory use. The tabs:
 | **Models** | Search and filter the whole catalog (TTS, STT, on disk, running). Pull with progress and cancel, remove, load or unload a model, see its license, and choose the default STT and TTS models. |
 | **Voices** | Pick a model, then browse its built-in, cloned and designed voices. Type a line and hear it, set a voice as the model's default, export, rename or delete a voice, or import one back. |
 | **Clone** | Make a voice from a recording: drop in a file, record one, or take a saved sample; trim it to 5-15 s, auto-transcribe it, hear a test line, then save. Needs Apple Silicon and the MLX sidecar. |
-| **Design** | Make up a voice from a description (quick-pick chips such as female, low, warm), compare three takes of a test line, and save the one you like. |
+| **Design** | Make up a voice from a description (quick-pick chips such as female, low, warm), compare takes of a test line (pick how many, each on its own seed), and save the one you like. |
 | **Playground** | **Speak**: type text, pick a model, voice and the model's own controls, and play or save the audio. **Listen**: upload or record audio and get a transcript. |
 | **Samples** | Your voice-prep library. Upload or record a clip of any length and open it in **Sample Studio**: separate speakers, remove crosstalk and background, pick the best takes, crop and cut, run a denoise chain, edit against the transcript, and save a clean sample to clone from. |
 
