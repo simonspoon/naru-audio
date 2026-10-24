@@ -190,15 +190,20 @@ export function mount(view, params) {
       kv('description', v.description ?? '—'),
     ];
     if (v.has_transcript) {
-      const transcriptRow = el('div', { class: 'kv' }, [el('span', {}, ['transcript']), el('span', {}, ['loading…'])]);
-      nodes.push(transcriptRow);
+      const text = el('span', { class: 'clamp' }, ['loading…']);
+      const more = el('button', { class: 'more', hidden: true }, ['more']);
+      more.onclick = () => {
+        more.textContent = text.classList.toggle('open') ? 'less' : 'more';
+      };
+      nodes.push(el('div', { class: 'kv stack' }, [el('span', {}, ['transcript']), text, more]));
       request(`/v1/audio/voices/${encodeURIComponent(v.id)}`, {}, { silent: true })
         .then((r) => r.json())
         .then((data) => {
-          transcriptRow.lastChild.textContent = data.text ?? '—';
+          text.textContent = data.text ?? '—';
+          more.hidden = text.scrollHeight <= text.clientHeight;
         })
         .catch(() => {
-          transcriptRow.lastChild.textContent = '—';
+          text.textContent = '—';
         });
     }
     const tryText = el('input', { class: 'inp', value: TRY_IT_DEFAULT });

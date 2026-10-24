@@ -608,6 +608,12 @@ h1, h2, h3 {
 
 .kv { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--hairline); }
 .kv span:first-child { color: var(--muted); }
+/* Long values (voice transcript): label above, clamped to 3 lines with a more/less toggle. */
+.kv.stack { flex-direction: column; gap: 2px; }
+.kv .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.kv .clamp.open { display: block; }
+.kv .more { align-self: flex-start; padding: 0; border: 0; background: none; color: var(--cyan); font: inherit; font-size: 12px; cursor: pointer; }
+.kv .more[hidden] { display: none; }
 /* Semantic alert: keeps a coloured border. */
 .warn { border: 1px solid var(--amber); border-radius: var(--r-sm); color: var(--amber); padding: 0.5rem; font-size: 0.75rem; margin-top: 10px; max-width: 80ch; }
 
