@@ -20,7 +20,7 @@
 // picker or a live samples library can drive either path directly.
 
 import { getJson, request, uploadClip } from './api.mjs';
-import { el, toast, encodeWav, waveformSvg, peaks, playButton } from './ui.mjs';
+import { el, toast, encodeWav, waveformSvg, peaks, playButton, picker } from './ui.mjs';
 
 const MIN_S = 3;
 const MAX_S = 30;
@@ -64,10 +64,11 @@ export function mount(view, params) {
   const sampleHint = el('div', { style: 'color:var(--muted);font-size:13px' });
   const dropZone = el('div', { class: 'drop' });
   const waveWrap = el('div', { class: 'trim-wrap' });
-  const transcriptBox = el('textarea', { class: 'inp', rows: 2 });
-  const nameInput = el('input', { class: 'inp' });
-  const permCheck = el('input', { type: 'checkbox' });
-  const createBtn = el('button', { class: 'btn primary', style: 'margin-left:auto' }, ['Create voice']);
+  const transcriptBox = el('textarea', { class: 'inp', rows: 2, oninput: () => updateCreate() });
+  const nameInput = el('input', { class: 'inp', oninput: () => updateCreate() });
+  const permCheck = el('input', { type: 'checkbox', onchange: () => updateCreate() });
+  const createBtn = el('button', { class: 'btn primary', disabled: true }, ['Create voice']);
+  const createReason = el('div', { style: 'color:var(--muted);font-size:13px;width:100%;text-align:right' });
   const originalPlay = el('span', { class: 'cmp' }, ['no sample loaded']);
   const previewLine = el('div', { class: 'inp', style: 'font-size:14px' }, [TEST_LINE]);
   const previewBtn = el('button', { class: 'btn wide' }, ['▶ Preview clone']);
@@ -102,7 +103,8 @@ export function mount(view, params) {
       el('div', { style: 'flex:1;display:flex;gap:14px;align-items:center;flex-wrap:wrap' }, [
         el('div', {}, [el('div', { class: 'lab' }, ['Name']), nameInput]),
         el('label', { class: 'chk' }, [permCheck, 'I have permission to clone this voice']),
-        createBtn,
+        el('div', { style: 'margin-left:auto' }, [createBtn]),
+        createReason,
       ]),
     ]),
   ]);
@@ -122,21 +124,37 @@ export function mount(view, params) {
   view.append(el('div', { class: 'side' }, [leftCard, rightCard]));
 
   function renderModelBar() {
-    modelBar.replaceChildren(
-      ...models.map((m) =>
-        el(
-          'span',
-          {
-            class: `chip${m.id === selectedModel ? ' on' : ''}`,
-            onclick: () => {
-              selectedModel = m.id;
-              renderModelBar();
-            },
-          },
-          [m.id],
-        ),
-      ),
+    const select = picker(
+      models.map((m) => ({ id: m.id })),
+      selectedModel,
+      (id) => {
+        selectedModel = id;
+        updateCreate();
+      },
+      'inp',
     );
+    select.style.width = 'auto';
+    modelBar.replaceChildren(select);
+  }
+
+  /** The first thing still missing before the voice can be created, or ''
+   * when everything is set. */
+  function createBlocker() {
+    const model = models.find((m) => m.id === selectedModel);
+    if (!model) return 'Pick a model first.';
+    if (!sample) return 'Add a sample first.';
+    const duration = trimEnd - trimStart;
+    if (duration < MIN_S || duration > MAX_S) return `Trim the sample to between ${MIN_S} and ${MAX_S} seconds.`;
+    if (!transcriptBox.value.trim()) return 'Add a transcript of the sample.';
+    if (!nameInput.value.trim()) return 'Name the voice.';
+    if (!permCheck.checked) return 'Confirm you have permission to clone this voice.';
+    return '';
+  }
+
+  function updateCreate() {
+    const reason = createBlocker();
+    createBtn.disabled = !!reason;
+    createReason.textContent = reason;
   }
 
   function trimmedSamples() {
@@ -172,6 +190,7 @@ export function mount(view, params) {
         el('span', {}, ['drag the cyan handles to trim']),
       ]),
     );
+    updateCreate();
   }
 
   function wireDrag(handle, which, duration) {
@@ -221,6 +240,7 @@ export function mount(view, params) {
     if (opts.presetTranscript != null) {
       transcript = opts.presetTranscript;
       transcriptBox.value = transcript;
+      updateCreate();
     } else {
       await transcribeSelection();
     }
@@ -307,6 +327,7 @@ export function mount(view, params) {
       const data = await res.json();
       transcript = data.text ?? '';
       transcriptBox.value = transcript;
+      updateCreate();
     } catch {
       // leave whatever the user already typed
     }
@@ -391,29 +412,8 @@ export function mount(view, params) {
   });
 
   createBtn.addEventListener('click', async () => {
-    const model = models.find((m) => m.id === selectedModel);
-    if (!sample || !model) {
-      toast('pick a model and a sample first', true);
-      return;
-    }
+    if (createBlocker()) return;
     const name = nameInput.value.trim();
-    if (!name) {
-      toast('name the voice first', true);
-      return;
-    }
-    if (!permCheck.checked) {
-      toast('confirm you have permission to clone this voice', true);
-      return;
-    }
-    if (model.x_clone_requires_transcript && !transcriptBox.value.trim()) {
-      toast('this model needs a transcript', true);
-      return;
-    }
-    const duration = trimEnd - trimStart;
-    if (duration < MIN_S || duration > MAX_S) {
-      toast(`trim to between ${MIN_S} and ${MAX_S} seconds`, true);
-      return;
-    }
     const form = new FormData();
     form.append('name', name);
     form.append('model', selectedModel);
@@ -436,14 +436,16 @@ export function mount(view, params) {
       return;
     }
     if (disposed) return;
-    if (!selectedModel && models.length) selectedModel = models[0].id;
+    if (!models.some((m) => m.id === selectedModel)) selectedModel = models[0]?.id ?? null;
     renderModelBar();
+    updateCreate();
   }
 
   window.naruAdmin = window.naruAdmin ?? {};
   window.naruAdmin.clone = { loadFile, pickSample };
 
   renderSampleSelect();
+  updateCreate();
   refresh();
   refreshSamples();
   return () => {
