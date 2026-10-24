@@ -12,9 +12,10 @@ export const MAX_HISTORY = 100;
 /** Pieces shorter than this are dropped from the kept list (no audible content, and the server caps a request at 2048 segments). */
 const MIN_PIECE_S = 0.1;
 
-/** Colours for speaker lanes: distinct, readable on the dark theme. */
-export const SPEAKER_COLORS = ['#00e5ff', '#ffb444', '#b06bff', '#2bff9c', '#ff2bd6', '#6aa8ff'];
+/** Palette colours for speaker lanes (`--<name>-rgb` triplets), so they follow the theme. */
+export const SPEAKER_COLORS = ['cyan', 'amber', 'violet', 'green', 'magenta', 'text'];
 
+/** The palette colour name of speaker `id`'s lane. */
 export function speakerColor(id) {
   const n = SPEAKER_COLORS.length;
   return SPEAKER_COLORS[((id % n) + n) % n];

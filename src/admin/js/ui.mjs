@@ -231,3 +231,22 @@ export function fmtUptime(startIso) {
   const m = Math.floor(s / 60);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
+
+/** Reads a CSS custom property off <html> at call time, so colours painted by
+ * script (canvases) follow the active theme, as Naru's `theme.ts::cssVar`. */
+export function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+/** `rgba()` of a palette colour's channel triplet (`--<name>-rgb`) in the active theme. */
+export function themeRgba(name, alpha = 1) {
+  return `rgba(${cssVar(`--${name}-rgb`, '93, 127, 143')}, ${alpha})`;
+}
+
+/** Calls `fn` whenever <html>'s `data-theme` changes; returns the disposer. */
+export function onThemeChange(fn) {
+  const mo = new MutationObserver(fn);
+  mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  return () => mo.disconnect();
+}

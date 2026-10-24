@@ -23,7 +23,7 @@
 // timeline; the project stores the fixes by word start time.
 
 import { getJson, postJson, request, del } from './api.mjs';
-import { el, toast, decodeWav, peaks } from './ui.mjs';
+import { el, toast, decodeWav, peaks, themeRgba, onThemeChange } from './ui.mjs';
 import { createClipEditor, CLONE_MIN_S, CLONE_MAX_S } from './studio-clip.mjs';
 import { totalSecs } from './studio-edit.mjs';
 
@@ -274,8 +274,8 @@ export function mount(view, params) {
     const procPeaks = procWave ? peaks(procWave.samples, bars) : null;
     const top = Math.max(0.01, ...(rawPeaks ?? []), ...(procPeaks ?? []));
     const grad = ctx.createLinearGradient(0, 0, 0, h);
-    grad.addColorStop(0, '#00e5ff');
-    grad.addColorStop(1, '#b06bff');
+    grad.addColorStop(0, themeRgba('cyan'));
+    grad.addColorStop(1, themeRgba('violet'));
     const draw = (list, fill) => {
       ctx.fillStyle = fill;
       list.forEach((p, i) => {
@@ -286,7 +286,7 @@ export function mount(view, params) {
     if (ab === 'A') {
       if (rawPeaks) draw(rawPeaks, grad);
     } else {
-      if (rawPeaks) draw(rawPeaks, 'rgba(93,127,143,0.45)');
+      if (rawPeaks) draw(rawPeaks, themeRgba('muted', 0.45));
       if (procPeaks) draw(procPeaks, grad);
     }
   }
@@ -1033,6 +1033,7 @@ export function mount(view, params) {
 
   const onResize = () => drawWave();
   window.addEventListener('resize', onResize);
+  const stopThemeWatch = onThemeChange(drawWave);
   renderWords();
   renderLegend();
   tick();
@@ -1043,6 +1044,7 @@ export function mount(view, params) {
     clearTimeout(renderTimer);
     cancelAnimationFrame(raf);
     window.removeEventListener('resize', onResize);
+    stopThemeWatch();
     renderAbort?.abort();
     hearAbort?.abort();
     if (audio) audio.pause();

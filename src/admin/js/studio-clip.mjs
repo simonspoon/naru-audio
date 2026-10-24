@@ -356,7 +356,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
             el('div', { class: 'studio-note' }, ['Keep one speaker — the others are dropped']),
             ...[...stats].sort((a, b) => b.secs - a.secs).map((s) =>
               el('div', { class: 'sc-row' }, [
-                radio(s.speaker, `Speaker ${s.speaker}`, [el('i', { class: 'sc-dot', style: `background:${speakerColor(s.speaker)}` })]),
+                radio(s.speaker, `Speaker ${s.speaker}`, [el('i', { class: 'sc-dot', style: `background:rgb(var(--${speakerColor(s.speaker)}-rgb))` })]),
                 el('span', { class: 'studio-note' }, [`${s.secs.toFixed(1)} s`]),
                 tb(player.playingTag() === `speaker:${s.speaker}` ? '■' : '▶', () => togglePlay(auditionSpans(s.speaker), `speaker:${s.speaker}`), {
                   title: `audition speaker ${s.speaker}`,

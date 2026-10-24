@@ -7,7 +7,7 @@
 // own `<audio>` stream by seeking between them.
 
 import { getJson } from './api.mjs';
-import { el } from './ui.mjs';
+import { el, themeRgba, onThemeChange } from './ui.mjs';
 import { speakerColor } from './studio-edit.mjs';
 
 const OVERVIEW_BUCKETS = 2000;
@@ -219,7 +219,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
     p.width = 8;
     p.height = 8;
     const c = p.getContext('2d');
-    c.strokeStyle = 'rgba(255,59,92,0.85)';
+    c.strokeStyle = themeRgba('red', 0.85);
     c.lineWidth = 1.5;
     c.beginPath();
     c.moveTo(0, 8);
@@ -231,7 +231,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
     c.stroke();
     return p;
   }
-  const hatchTile = hatch();
+  let hatchTile = hatch();
 
   function drawColumns(ctx, w, y0, h, src) {
     const mid = y0 + h / 2;
@@ -263,8 +263,8 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
 
     // ruler
     ctx.font = '12px "Share Tech Mono", monospace';
-    ctx.fillStyle = '#5d7f8f';
-    ctx.strokeStyle = '#16384a';
+    ctx.fillStyle = themeRgba('muted');
+    ctx.strokeStyle = themeRgba('edge', 0.45);
     const len = view.end - view.start;
     const nice = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800];
     const stepT = nice.find((s) => len / s <= 10) ?? 3600;
@@ -279,7 +279,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
 
     // speaker tint behind the waveform
     for (const lane of data.lanes) {
-      ctx.fillStyle = `${speakerColor(lane.speaker)}${data.activeSpeaker === lane.speaker ? '30' : '14'}`;
+      ctx.fillStyle = themeRgba(speakerColor(lane.speaker), data.activeSpeaker === lane.speaker ? 0.19 : 0.08);
       for (const s of lane.spans) {
         if (s.end < view.start || s.start > view.end) continue;
         ctx.fillRect(x(s.start), wy, Math.max(1, x(s.end) - x(s.start)), waveH());
@@ -289,7 +289,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
     // waveform: dim everywhere, bright where kept
     const src = detailCovers() ? detail : overview;
     if (src) {
-      ctx.fillStyle = 'rgba(93,127,143,0.55)';
+      ctx.fillStyle = themeRgba('muted', 0.55);
       drawColumns(ctx, w, wy, waveH(), src);
       ctx.save();
       ctx.beginPath();
@@ -299,27 +299,27 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
       }
       ctx.clip();
       const grad = ctx.createLinearGradient(0, wy, 0, wy + waveH());
-      grad.addColorStop(0, '#00e5ff');
-      grad.addColorStop(1, '#b06bff');
+      grad.addColorStop(0, themeRgba('cyan'));
+      grad.addColorStop(1, themeRgba('violet'));
       ctx.fillStyle = grad;
       drawColumns(ctx, w, wy, waveH(), src);
       ctx.restore();
     } else {
-      ctx.fillStyle = '#5d7f8f';
+      ctx.fillStyle = themeRgba('muted');
       ctx.fillText('loading waveform…', 8, wy + waveH() / 2);
     }
 
     // outside the crop
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillStyle = themeRgba('bg', 0.6);
     if (crop.start > view.start) ctx.fillRect(0, wy, Math.min(w, x(crop.start)), waveH());
     if (crop.end < view.end) ctx.fillRect(Math.max(0, x(crop.end)), wy, w, waveH());
 
     // cuts: dimmed and struck through
     for (const c of data.cuts) {
       if (c.end < view.start || c.start > view.end) continue;
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillStyle = themeRgba('bg', 0.6);
       ctx.fillRect(x(c.start), wy, Math.max(1, x(c.end) - x(c.start)), waveH());
-      ctx.fillStyle = 'rgba(255,59,92,0.9)';
+      ctx.fillStyle = themeRgba('red', 0.9);
       ctx.fillRect(x(c.start), wy + waveH() / 2 - 1, Math.max(1, x(c.end) - x(c.start)), 2);
     }
 
@@ -329,14 +329,14 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
       if (o.end < view.start || o.start > view.end) continue;
       const ox = x(o.start);
       const ow = Math.max(2, x(o.end) - ox);
-      ctx.fillStyle = data.excludeOverlaps ? 'rgba(255,59,92,0.10)' : 'rgba(255,59,92,0.28)';
+      ctx.fillStyle = themeRgba('red', data.excludeOverlaps ? 0.1 : 0.28);
       ctx.fillRect(ox, wy, ow, waveH());
       ctx.globalAlpha = data.excludeOverlaps ? 0.45 : 1;
       ctx.fillStyle = pattern;
       ctx.fillRect(ox, wy, ow, waveH());
       ctx.globalAlpha = 1;
       if (!data.excludeOverlaps) {
-        ctx.fillStyle = '#ff3b5c';
+        ctx.fillStyle = themeRgba('red');
         ctx.fillRect(ox, wy, ow, 3);
       }
     }
@@ -347,11 +347,11 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
         if (t.end < view.start || t.start > view.end) continue;
         const tx = x(t.start);
         const tw = Math.max(2, x(t.end) - tx);
-        ctx.strokeStyle = t.picked ? '#2bff9c' : 'rgba(93,127,143,0.8)';
+        ctx.strokeStyle = t.picked ? themeRgba('green') : themeRgba('muted', 0.8);
         ctx.lineWidth = t.picked ? 2 : 1;
         ctx.strokeRect(tx + 0.5, RULER_H + 1, tw, TAKES_H - 2 + waveH());
         ctx.lineWidth = 1;
-        ctx.fillStyle = t.picked ? '#2bff9c' : '#5d7f8f';
+        ctx.fillStyle = themeRgba(t.picked ? 'green' : 'muted');
         if (tw > 26) ctx.fillText(t.score.toFixed(2), tx + 4, RULER_H + 13);
       }
     }
@@ -359,7 +359,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
     // speaker lanes under the waveform
     data.lanes.forEach((lane, i) => {
       const ly = wy + waveH() + i * LANE_H;
-      ctx.fillStyle = speakerColor(lane.speaker);
+      ctx.fillStyle = themeRgba(speakerColor(lane.speaker));
       ctx.globalAlpha = data.activeSpeaker == null || data.activeSpeaker === lane.speaker ? 1 : 0.35;
       for (const s of lane.spans) {
         if (s.end < view.start || s.start > view.end) continue;
@@ -377,19 +377,19 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
     if (overview) {
       const mid = h / 2;
       const k = (h / 2 - 2) / top;
-      ctx.fillStyle = 'rgba(0,229,255,0.7)';
+      ctx.fillStyle = themeRgba('cyan', 0.7);
       for (let px = 0; px < w; px += 2) {
         const [lo, hi] = peakRange(overview, (px / w) * duration, ((px + 2) / w) * duration);
         ctx.fillRect(px, mid - hi * k, 1.4, Math.max(1, (hi - lo) * k));
       }
     }
     for (const lane of data.lanes) {
-      ctx.fillStyle = speakerColor(lane.speaker);
+      ctx.fillStyle = themeRgba(speakerColor(lane.speaker));
       for (const s of lane.spans) ctx.fillRect(x(s.start), h - 4, Math.max(1, x(s.end) - x(s.start)), 3);
     }
-    ctx.fillStyle = 'rgba(255,59,92,0.9)';
+    ctx.fillStyle = themeRgba('red', 0.9);
     for (const o of data.overlaps) ctx.fillRect(x(o.start), 0, Math.max(1, x(o.end) - x(o.start)), 3);
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillStyle = themeRgba('bg', 0.55);
     const crop = cropDraft ?? data.crop;
     ctx.fillRect(0, 0, x(crop.start), h);
     ctx.fillRect(x(crop.end), 0, w - x(crop.end), h);
@@ -570,6 +570,10 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
 
   const onResize = () => draw();
   window.addEventListener('resize', onResize);
+  const stopThemeWatch = onThemeChange(() => {
+    hatchTile = hatch();
+    draw();
+  });
 
   fetchOverview();
   draw();
@@ -600,6 +604,7 @@ export function createWave({ clipId, duration, onSeek, onSelect, onCrop }) {
     },
     destroy() {
       window.removeEventListener('resize', onResize);
+      stopThemeWatch();
       detailAbort?.abort();
       clearTimeout(detailTimer);
     },
