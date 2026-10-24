@@ -21,6 +21,8 @@ import * as studio from './studio.mjs';
 
 const TABS = { overview, models, voices, clone, design, playground, samples, studio };
 const DEFAULT_TAB = 'overview';
+// Tabs reached from another tab rather than the sidebar light up their parent.
+const NAV_PARENT = { studio: 'samples' };
 const POLL_MS = 3000;
 
 let currentUnmount = null;
@@ -36,7 +38,8 @@ function parseHash() {
   return { tab: TABS[tab] ? tab : DEFAULT_TAB, params };
 }
 
-function renderTabs(active) {
+function renderTabs(tab) {
+  const active = NAV_PARENT[tab] ?? tab;
   for (const a of document.querySelectorAll('#sidebar a')) {
     a.classList.toggle('on', a.dataset.tab === active);
   }

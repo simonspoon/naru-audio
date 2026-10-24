@@ -903,6 +903,10 @@ input[type='checkbox']:disabled, input[type='radio']:disabled { opacity: 0.5; cu
 .kbd-hint { font: 12px var(--font-mono); color: var(--muted); }
 
 /* Sample Studio (naru task 1571; mockup: sample-studio) */
+.crumbs { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font: 12px var(--font-mono); color: var(--muted); }
+.crumbs a { color: var(--cyan); text-decoration: none; }
+.crumbs a:hover, .crumbs a:focus-visible { text-decoration: underline; }
+.crumbs [aria-current] { color: var(--text); }
 .studio-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
 .studio-head h2 { margin: 0; font-size: 22px; }
 .studio-sub { color: var(--muted); font: 13px var(--font-sans); flex: 1; }

@@ -199,6 +199,7 @@ export function mount(view, params) {
   const pipelineHost = el('div', { class: 'studio-cards' });
   const meterHost = el('div', { class: 'studio-meters' });
   const subtitle = el('span', { class: 'studio-sub' });
+  const crumbName = el('span', { 'aria-current': 'page' }, ['Sample Studio']);
   const abA = el('button', { type: 'button', onclick: () => setAb('A') }, ['A · Raw']);
   const abB = el('button', { type: 'button', onclick: () => setAb('B') }, ['B · Pipeline']);
   const useBtn = el('button', { class: 'studio-use', type: 'button', onclick: useAsCloneSample }, [
@@ -208,6 +209,11 @@ export function mount(view, params) {
 
   view.append(
     el('div', { class: 'studio' }, [
+      el('nav', { class: 'crumbs', 'aria-label': 'Breadcrumb' }, [
+        el('a', { href: '#samples' }, ['Samples']),
+        el('span', { class: 'crumb-sep', 'aria-hidden': 'true' }, ['›']),
+        crumbName,
+      ]),
       el('div', { class: 'studio-head' }, [
         el('h2', {}, ['Sample Studio']),
         subtitle,
@@ -796,8 +802,10 @@ export function mount(view, params) {
   }
 
   function setStatus(text) {
+    const name = (clipMode ? editor?.name() || editor?.clip()?.original_filename : meta?.name) ?? '';
+    crumbName.textContent = name || 'Sample Studio';
     subtitle.replaceChildren(
-      el('b', {}, [(clipMode ? editor?.name() || editor?.clip()?.original_filename : meta?.name) ?? '']),
+      el('b', {}, [name]),
       ` · ${audioSecs().toFixed(1)} s · 16 kHz mono`,
       ...(text ? [el('em', {}, [` · ${text}`])] : []),
     );
