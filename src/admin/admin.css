@@ -1125,6 +1125,18 @@ input[type='checkbox']:disabled, input[type='radio']:disabled { opacity: 0.5; cu
 /* Sample Studio, raw-clip editor (naru task 1576) */
 .sc-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
 .sc-sep { width: 1px; height: 20px; background: var(--hairline); margin: 0 4px; }
+.sc-help { width: min(30rem, 90vw); }
+.sc-keys { display: grid; grid-template-columns: 11rem 1fr; gap: 6px 14px; margin: 6px 0 14px; }
+.sc-keys dt, .sc-keys dd { margin: 0; }
+.sc-keys dd { color: var(--text); }
+.sc-keys kbd {
+  font: 12px var(--font-mono);
+  color: var(--text-h);
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
+}
 .sc-readout { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; margin: 8px 0; }
 .sc-readout b { color: var(--text-h); font: 600 20px var(--font-sans); }
 .sc-readout .lab { margin: 0; }

@@ -187,7 +187,7 @@ export function mount(view, params) {
 
   // ---- layout ---------------------------------------------------------------
 
-  const playBtn = el('button', { class: 'studio-play', type: 'button', onclick: onPlay }, ['▶']);
+  const playBtn = el('button', { class: 'studio-play', type: 'button', title: 'play / stop', 'aria-label': 'Play / stop', onclick: onPlay }, ['▶']);
   const clock = el('span', { class: 'studio-clock' });
   const legend = el('div', { class: 'studio-legend' });
   const canvas = el('canvas', { class: 'studio-canvas' });
@@ -680,6 +680,7 @@ export function mount(view, params) {
             type: 'button',
             class: 'studio-act x',
             title: 'remove step',
+            'aria-label': 'Remove step',
             onclick: () => {
               steps.splice(i, 1);
               chainChanged();

@@ -203,6 +203,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
         class: 'btn',
         type: 'button',
         title: opts.title,
+        'aria-label': opts.aria,
         disabled: opts.disabled || undefined,
         onclick,
       },
@@ -222,17 +223,19 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
       tb('Uncut', uncutSelection, { disabled: !sel || !model.cuts.length, title: 'bring cut audio in the selection back' }),
       tb('Keep only selection', cropToSelection, { disabled: !sel, title: 'crop to the selection' }),
       el('span', { class: 'sc-sep' }),
-      tb('↶', undo, { disabled: !history.canUndo(), title: 'undo (Ctrl/Cmd-Z)' }),
-      tb('↷', redo, { disabled: !history.canRedo(), title: 'redo (Shift-Cmd-Z / Ctrl-Y)' }),
+      tb('↶', undo, { disabled: !history.canUndo(), title: 'undo (Ctrl/Cmd-Z)', aria: 'Undo' }),
+      tb('↷', redo, { disabled: !history.canRedo(), title: 'redo (Shift-Ctrl/Cmd-Z / Ctrl/Cmd-Y)', aria: 'Redo' }),
       tb('Reset', () => mutate((m) => Object.assign(m, newModel(clip.duration_secs), { takes: m.takes })), {
         title: 'drop every crop, cut and speaker choice',
       }),
       el('span', { class: 'sc-sep' }),
-      tb('−', () => wave.zoomBy(0.5), { title: 'zoom out (Ctrl/Cmd-wheel)' }),
-      tb('+', () => wave.zoomBy(2), { title: 'zoom in (Ctrl/Cmd-wheel)' }),
-      tb('Fit', () => wave.fitAll(), {}),
-      tb('◂', () => wave.panBy(-0.4), { title: 'scroll left (shift-drag also pans)' }),
-      tb('▸', () => wave.panBy(0.4), {}),
+      tb('−', () => wave.zoomBy(0.5), { title: 'zoom out (Ctrl/Cmd-wheel)', aria: 'Zoom out' }),
+      tb('+', () => wave.zoomBy(2), { title: 'zoom in (Ctrl/Cmd-wheel)', aria: 'Zoom in' }),
+      tb('Fit', () => wave.fitAll(), { title: 'zoom to the whole clip' }),
+      tb('◂', () => wave.panBy(-0.4), { title: 'scroll left (shift-drag also pans)', aria: 'Scroll left' }),
+      tb('▸', () => wave.panBy(0.4), { title: 'scroll right (shift-drag also pans)', aria: 'Scroll right' }),
+      el('span', { class: 'sc-sep' }),
+      tb('?', showShortcuts, { title: 'keyboard shortcuts (?)', aria: 'Keyboard shortcuts' }),
     );
   }
 
@@ -552,6 +555,68 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
 
   // ---- keyboard ------------------------------------------------------------
 
+  const SHORTCUTS = [
+    ['Space', 'play / stop the kept audio (the selection, if any)'],
+    ['Delete / Backspace', 'cut the selection'],
+    ['Ctrl/Cmd-Z', 'undo'],
+    ['Shift-Ctrl/Cmd-Z / Ctrl/Cmd-Y', 'redo'],
+    ['?', 'show / hide this list'],
+  ];
+  const GESTURES = [
+    ['Drag', 'select a region'],
+    ['Click', 'seek and clear the selection'],
+    ['Shift/Alt-drag', 'pan'],
+    ['Ctrl/Cmd-wheel', 'zoom at the pointer'],
+    ['Sideways scroll', 'pan'],
+    ['Drag an edge handle', 'crop'],
+  ];
+  let closeShortcuts = null;
+
+  /** The "?" overlay: the keys onKey handles and the waveform gestures. Esc,
+   * "?" or a click on the scrim closes it; other keys are swallowed meanwhile. */
+  function showShortcuts() {
+    if (closeShortcuts) return;
+    const prevFocus = document.activeElement;
+    const rows = (list) =>
+      el('dl', { class: 'sc-keys' }, list.flatMap(([k, what]) => [el('dt', {}, [el('kbd', {}, [k])]), el('dd', {}, [what])]));
+    const done = el('button', { class: 'btn', type: 'button', onclick: () => closeShortcuts() }, ['Close']);
+    const backdrop = el(
+      'div',
+      { class: 'modal-backdrop', onclick: (e) => e.target === backdrop && closeShortcuts() },
+      [
+        el('div', { class: 'modal sc-help', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Keyboard shortcuts' }, [
+          el('div', { class: 'lab' }, ['Keyboard']),
+          rows(SHORTCUTS),
+          el('div', { class: 'lab' }, ['On the waveform']),
+          rows(GESTURES),
+          el('div', { class: 'modal-actions' }, [done]),
+        ]),
+      ],
+    );
+    const onHelpKey = (e) => {
+      e.stopPropagation();
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        done.focus();
+        return;
+      }
+      if (e.key === 'Escape' || e.key === '?') {
+        e.preventDefault();
+        closeShortcuts();
+      } else if (e.key !== 'Enter' && e.key !== ' ') e.preventDefault();
+    };
+    closeShortcuts = () => {
+      document.removeEventListener('keydown', onHelpKey, true);
+      backdrop.remove();
+      closeShortcuts = null;
+      // A toolbar re-render while open detaches the "?" button that opened us.
+      (prevFocus?.isConnected ? prevFocus : root.querySelector('[aria-label="Keyboard shortcuts"]'))?.focus?.();
+    };
+    document.addEventListener('keydown', onHelpKey, true);
+    document.body.append(backdrop);
+    done.focus();
+  }
+
   function onKey(e) {
     const tag = e.target?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -567,6 +632,9 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
     } else if ((e.key === 'Delete' || e.key === 'Backspace') && selection) {
       e.preventDefault();
       cutSelection();
+    } else if (e.key === '?' && !mod) {
+      e.preventDefault();
+      showShortcuts();
     } else if (e.key === ' ' && !mod && tag !== 'BUTTON') {
       e.preventDefault();
       if (player.playingTag()) player.stop();
@@ -650,6 +718,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
       clearInterval(sepTimer);
       player.stop();
       wave?.destroy();
+      closeShortcuts?.();
       window.removeEventListener('keydown', onKey);
     },
   };
