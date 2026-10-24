@@ -8,7 +8,7 @@
 // test without a file picker can drive the import path directly.
 
 import { getJson, postJson, putJson, request, del } from './api.mjs';
-import { el, toast, playButton, waveformSvg, peaks, decodeWav, confirmModal } from './ui.mjs';
+import { el, toast, picker, playButton, waveformSvg, peaks, decodeWav, confirmModal } from './ui.mjs';
 
 const FILTERS = ['All', 'Built-in', 'Cloned', 'Designed'];
 const TRY_IT_DEFAULT = 'Warm coffee, a quiet morning, and nothing on fire yet.';
@@ -37,13 +37,26 @@ export function mount(view, params) {
   let voiceList = [];
   let selectedVoiceId = null;
   let filter = 'All';
+  let query = '';
+  const modelCounts = {};
 
   const modelBar = el('div', { class: 'filt' });
   const filtBar = el('div', { class: 'filt' });
+  const search = el('input', {
+    class: 'inp',
+    type: 'search',
+    placeholder: 'Search voices',
+    style: 'margin-bottom:10px',
+    oninput: (e) => {
+      query = e.target.value.trim().toLowerCase();
+      renderGrid();
+    },
+  });
   const grid = el('div', { class: 'vg' });
   const listCard = el('div', { class: 'card' }, [
     el('h3', {}, ['Voices']),
     modelBar,
+    search,
     filtBar,
     grid,
   ]);
@@ -62,28 +75,53 @@ export function mount(view, params) {
   });
   view.append(importInput);
 
+  // The select and Import button are built once (rebuilding would close an
+  // open dropdown and drop focus); updates only relabel options in place.
+  let modelSelect = null;
+  let modelSelectKey = '';
   function renderModelBar() {
-    modelBar.replaceChildren(
-      ...ttsModels.map((m) =>
+    const key = ttsModels.map((m) => m.id).join('\n');
+    if (!modelSelect || key !== modelSelectKey) {
+      modelSelectKey = key;
+      modelSelect = picker(
+        ttsModels.map((m) => ({ id: m.id })),
+        selectedModel,
+        (id) => {
+          selectedModel = id;
+          selectedVoiceId = null;
+          refreshVoices();
+        },
+        'inp',
+      );
+      modelSelect.style.width = 'auto';
+      modelBar.replaceChildren(
+        modelSelect,
         el(
-          'span',
-          {
-            class: m.id === selectedModel ? 'on' : '',
-            onclick: () => {
-              selectedModel = m.id;
-              selectedVoiceId = null;
-              refreshVoices();
-            },
-          },
-          [m.id],
+          'button',
+          { class: 'btn', style: 'margin-left:auto', onclick: () => importInput.click() },
+          ['Import'],
         ),
-      ),
-      el(
-        'button',
-        { class: 'btn', style: 'margin-left:auto', onclick: () => importInput.click() },
-        ['Import'],
-      ),
-    );
+      );
+    }
+    for (const opt of modelSelect.options) {
+      opt.textContent = modelCounts[opt.value] != null ? `${opt.value} (${modelCounts[opt.value]})` : opt.value;
+    }
+    modelSelect.value = selectedModel;
+  }
+
+  // No per-model count endpoint exists, so fetch each model's list quietly
+  // after first render and relabel the options as the counts arrive.
+  function loadCounts() {
+    for (const m of ttsModels) {
+      if (modelCounts[m.id] != null) continue;
+      getJson(`/v1/audio/voices?model=${encodeURIComponent(m.id)}`, { silent: true })
+        .then((r) => {
+          if (disposed) return;
+          modelCounts[m.id] = r.voices.length;
+          renderModelBar();
+        })
+        .catch(() => {});
+    }
   }
 
   function renderFilters() {
@@ -163,12 +201,31 @@ export function mount(view, params) {
     return card;
   }
 
+  let gridGen = 0;
   async function renderGrid() {
+    const my = ++gridGen;
     renderFilters();
-    grid.replaceChildren();
-    const rows = voiceList.filter((v) => matchesFilter(v, filter));
-    for (const v of rows) grid.append(await voiceCard(v));
-    grid.append(addCard());
+    const rows = voiceList.filter(
+      (v) =>
+        matchesFilter(v, filter) &&
+        (!query ||
+          [v.id, v.name, v.label].some((s) => s != null && String(s).toLowerCase().includes(query))),
+    );
+    const nodes = [];
+    if (!rows.length) {
+      nodes.push(
+        el('div', { class: 'placeholder', style: 'grid-column:1/-1' }, [
+          query ? 'No voices match your search.' : 'No voices.',
+        ]),
+      );
+    }
+    for (const v of rows) {
+      const card = await voiceCard(v);
+      if (my !== gridGen || disposed) return;
+      nodes.push(card);
+    }
+    nodes.push(addCard());
+    grid.replaceChildren(...nodes);
   }
 
   function kv(label, value) {
@@ -370,6 +427,8 @@ export function mount(view, params) {
       voiceList = [];
     }
     if (disposed) return;
+    modelCounts[selectedModel] = voiceList.length;
+    renderModelBar();
     if (!selectedVoiceId && voiceList.length) selectedVoiceId = voiceList[0].id;
     renderGrid();
     renderSide();
@@ -385,6 +444,7 @@ export function mount(view, params) {
     if (disposed) return;
     if (!selectedModel && ttsModels.length) selectedModel = ttsModels[0].id;
     await refreshVoices();
+    loadCounts();
   }
 
   window.naruAdmin = window.naruAdmin ?? {};

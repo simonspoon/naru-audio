@@ -196,11 +196,11 @@ export function playButton(getSrc) {
 
 /** A `<select>` of `{id, label}` options, defaulting to `selected` if it
  * appears in `items`. Used for the model/voice pickers on Clone/Design/
- * Playground. */
-export function picker(items, selected, onChange) {
+ * Playground. `cls` is an optional class for the `<select>`. */
+export function picker(items, selected, onChange, cls) {
   const select = el(
     'select',
-    { onchange: (e) => onChange(e.target.value) },
+    { class: cls ?? '', onchange: (e) => onChange(e.target.value) },
     items.map((item) =>
       el('option', { value: item.id, selected: item.id === selected || undefined }, [
         item.label ?? item.id,
