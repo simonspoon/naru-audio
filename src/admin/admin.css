@@ -275,7 +275,7 @@ h1, h2, h3 {
   border-bottom: 1px solid var(--border-bright);
   box-shadow: 0 1px 12px rgba(var(--cyan-rgb), 0.15);
   padding: 0 24px;
-  background: rgba(var(--bg-rgb), 0.85);
+  background: var(--bg);
 }
 /* Brand block, as in Naru: the mark, then the Orbitron wordmark with the
    version stacked under it; "audio" is a small lowercase sub-label. */
