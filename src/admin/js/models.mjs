@@ -17,12 +17,27 @@ export function mount(view, params) {
   let sortKey = null; // a SORTS key; null keeps catalog order
   let sortDir = 'desc';
   let pullTimer = null;
+  let budgetBytes = 0; // /health profile.budget_bytes; 0 until fetched
+  const busy = new Map(); // id -> 'loading' | 'unloading' while /api/load is in flight
 
   const filtBar = el('div', { class: 'filt' });
   const table = el('table', { class: 'tb' });
   const listCard = el('div', { class: 'card' }, [filtBar, el('div', { class: 'tb-wrap' }, [table])]);
-  const sidePanel = el('div', { class: 'card' });
-  view.append(el('div', { class: 'side' }, [listCard, sidePanel]));
+  const sidePanel = el('div', { class: 'card side-sticky' });
+  const memCard = el('div', { class: 'card mem-card' });
+  view.append(memCard, el('div', { class: 'side' }, [listCard, sidePanel]));
+
+  function renderMem() {
+    const used = models.reduce((sum, m) => sum + (m.x_loaded ? (m.x_size_bytes ?? 0) : 0), 0);
+    const pct = budgetBytes ? Math.min(100, Math.round((100 * used) / budgetBytes)) : 0;
+    memCard.replaceChildren(
+      el('div', { class: 'kv' }, [
+        el('span', {}, ['memory budget']),
+        el('span', {}, [`${fmtBytes(used)} / ${budgetBytes ? fmtBytes(budgetBytes) : '—'}`]),
+      ]),
+      el('div', { class: `mem-track${pct >= 85 ? ' warn' : ''}` }, [el('i', { style: `width:${pct}%` })]),
+    );
+  }
 
   function matchesFilter(m) {
     switch (filter) {
@@ -165,6 +180,12 @@ export function mount(view, params) {
 
   function stateCell(m) {
     const pull = pulls.get(m.id);
+    if (busy.has(m.id)) {
+      return el('td', { class: 'st', style: 'color:var(--cyan)' }, [
+        `◌ ${busy.get(m.id)} `,
+        el('span', { class: 'bar indet' }, [el('i')]),
+      ]);
+    }
     if (pull) {
       const pct = pull.model_total ? Math.round((100 * pull.model_completed) / pull.model_total) : 0;
       return el('td', { class: 'st', style: 'color:var(--cyan)' }, [
@@ -211,12 +232,13 @@ export function mount(view, params) {
           'button',
           {
             class: 'btn',
+            disabled: busy.has(m.id),
             onclick: (e) => {
               e.stopPropagation();
               unload(m);
             },
           },
-          ['Unload'],
+          busyLabel(m, 'Unload'),
         ),
       ]);
     }
@@ -226,12 +248,13 @@ export function mount(view, params) {
           'button',
           {
             class: 'btn',
+            disabled: busy.has(m.id),
             onclick: (e) => {
               e.stopPropagation();
               load(m);
             },
           },
-          ['Load'],
+          busyLabel(m, 'Load'),
         ),
       ]);
     }
@@ -283,7 +306,7 @@ export function mount(view, params) {
       return;
     }
     const rows = [
-      kv('state', m.x_loaded ? `running${m.x_loaded_at ? ' ' + fmtUptime(m.x_loaded_at) : ''}` : m.x_pulled ? 'on disk' : 'not pulled'),
+      kv('state', busy.has(m.id) ? busy.get(m.id) : m.x_loaded ? `running${m.x_loaded_at ? ' ' + fmtUptime(m.x_loaded_at) : ''}` : m.x_pulled ? 'on disk' : 'not pulled'),
       kv('memory', m.x_loaded ? fmtBytes(m.x_size_bytes) : '—'),
       kv('voices', m.x_kind === 'tts' ? `${m.x_voice_count} · ${m.x_cloned_voice_count} cloned` : '—'),
       kv('languages', m.x_languages ? m.x_languages.length : '—'),
@@ -300,7 +323,9 @@ export function mount(view, params) {
       );
     }
     if (m.x_loaded) {
-      nodes.push(el('button', { class: 'btn wide', onclick: () => unload(m) }, ['Unload']));
+      nodes.push(
+        el('button', { class: 'btn wide', disabled: busy.has(m.id), onclick: () => unload(m) }, busyLabel(m, 'Unload')),
+      );
     }
     if (m.x_pulled) {
       nodes.push(
@@ -314,23 +339,40 @@ export function mount(view, params) {
     return el('div', { class: 'kv' }, [el('span', {}, [label]), el('span', {}, [String(value)])]);
   }
 
-  async function load(m) {
-    try {
-      await postJson('/api/load', { model: m.id, kind: m.x_kind });
-      toast(`${m.id} loaded`);
-    } catch {
-      return;
-    }
-    refresh();
+  // The API reports no byte progress for a load, so the in-flight state is
+  // indeterminate: a spinner label and an animated bar, never a percentage.
+  function busyLabel(m, idle) {
+    const what = busy.get(m.id);
+    if (!what) return [idle];
+    return [el('span', { class: 'spin' }), what === 'loading' ? 'Loading…' : 'Unloading…'];
   }
 
-  async function unload(m) {
+  async function setBusy(m, what, body, done) {
+    if (busy.has(m.id)) return;
+    busy.set(m.id, what);
+    renderTable();
+    if (m.id === selectedId) renderSide();
     try {
-      await postJson('/api/load', { model: m.id, kind: m.x_kind, keep_alive: 0 });
+      await postJson('/api/load', body);
+      if (done) toast(done);
+      await refresh();
     } catch {
-      return;
+      // postJson already toasted the failure
+    } finally {
+      busy.delete(m.id);
+      if (!disposed) {
+        renderTable();
+        if (m.id === selectedId) renderSide();
+      }
     }
-    refresh();
+  }
+
+  function load(m) {
+    return setBusy(m, 'loading', { model: m.id, kind: m.x_kind }, `${m.id} loaded`);
+  }
+
+  function unload(m) {
+    return setBusy(m, 'unloading', { model: m.id, kind: m.x_kind, keep_alive: 0 });
   }
 
   async function removeModel(m) {
@@ -398,6 +440,7 @@ export function mount(view, params) {
   }
 
   function renderAll() {
+    renderMem();
     renderFilters();
     renderTable();
     renderSide();
@@ -405,11 +448,13 @@ export function mount(view, params) {
 
   async function refresh() {
     if (disposed) return;
+    const health = getJson('/health', { silent: true }).catch(() => null);
     try {
       models = (await getJson('/v1/models')).data;
     } catch {
       return;
     }
+    budgetBytes = (await health)?.profile?.budget_bytes ?? budgetBytes; // keep last-known on failure
     if (disposed) return;
     if (!selectedId && models.length) selectedId = models[0].id;
     renderAll();

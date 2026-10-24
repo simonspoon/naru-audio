@@ -387,6 +387,12 @@ h1, h2, h3 {
 @media (max-width: 820px) {
   .grid, .side { grid-template-columns: 1fr; }
 }
+/* Models detail panel: the document scrolls (#view has no overflow), so
+   sticky sits below the sticky header. Not when stacked on narrow widths. */
+.side-sticky { position: sticky; top: calc(var(--header-h) + 12px); }
+@media (max-width: 820px) {
+  .side-sticky { position: static; }
+}
 
 .card {
   border: 1px solid transparent;
@@ -574,6 +580,31 @@ h1, h2, h3 {
 .lic { font: 12px var(--font-mono); padding: 0 6px; border: 1px solid transparent; border-radius: var(--r-sm); background: var(--surface-raised); box-shadow: var(--ring); }
 .bar { height: 6px; background: var(--surface-raised); border-radius: var(--r-pill); overflow: hidden; width: 110px; display: inline-block; vertical-align: middle; }
 .bar i { display: block; height: 100%; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+/* Indeterminate: no byte progress exists, so a sliding segment, not a percent. */
+.bar.indet { width: 60px; }
+.bar.indet i { width: 40%; animation: indet 1.2s ease-in-out infinite; }
+@keyframes indet { from { margin-left: -40%; } to { margin-left: 100%; } }
+.spin {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border: 2px solid var(--cyan-dim);
+  border-top-color: var(--cyan);
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .bar.indet i, .spin { animation-duration: 3s; }
+}
+/* Memory budget meter (Models page). */
+.mem-card { margin-bottom: 12px; padding: 10px 14px; }
+.mem-card .kv { border-bottom: 0; }
+.mem-track { height: 6px; border-radius: var(--r-pill); background: var(--surface-hover); overflow: hidden; }
+.mem-track i { display: block; height: 100%; background: linear-gradient(90deg, var(--cyan), var(--violet)); transition: width 0.3s; }
+.mem-track.warn i { background: var(--amber); }
 
 .kv { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--hairline); }
 .kv span:first-child { color: var(--muted); }
