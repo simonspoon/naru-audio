@@ -533,19 +533,30 @@ h1, h2, h3 {
 }
 
 /* Models table */
+.tb-wrap { overflow-x: auto; }
 .tb { width: 100%; border-collapse: collapse; }
 .tb th {
   font: 600 13px var(--font-sans);
   color: var(--muted);
   text-align: left;
-  padding: 7px 10px;
+  padding: 0.35rem 0.45rem;
   border-bottom: 1px solid var(--hairline);
+  white-space: nowrap;
 }
-.tb td { padding: 9px 10px; border-bottom: 1px solid var(--hairline); vertical-align: middle; }
+.tb td { padding: 0.35rem 0.45rem; border-bottom: 1px solid var(--hairline); vertical-align: middle; white-space: nowrap; }
 .tb tr { cursor: pointer; }
 .tb tr:hover td { background: var(--surface); }
 .tb tr.sel td { background: var(--surface-raised); }
 .tb tr.sel td:first-child { box-shadow: var(--edge-cyan); }
+.tb th.sortable { cursor: pointer; user-select: none; }
+.tb th.sortable:hover { color: var(--text-h); }
+.tb .size { text-align: right; font-variant-numeric: tabular-nums; }
+/* Only the model name and license may wrap, so the other columns stay on screen. */
+.tb td:first-child, .tb td.license { white-space: normal; }
+.lic .nw { white-space: nowrap; }
+.tb td.kind { font: 12px var(--font-mono); }
+.tb .cap { padding: 0 4px; margin-right: 2px; }
+.tb .btn { padding: 4px 10px; }
 
 .cap {
   display: inline-block;

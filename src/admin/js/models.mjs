@@ -14,11 +14,13 @@ export function mount(view, params) {
   let selectedId = params.model ?? null;
   let filter = 'All';
   let search = '';
+  let sortKey = null; // a SORTS key; null keeps catalog order
+  let sortDir = 'desc';
   let pullTimer = null;
 
   const filtBar = el('div', { class: 'filt' });
   const table = el('table', { class: 'tb' });
-  const listCard = el('div', { class: 'card' }, [filtBar, table]);
+  const listCard = el('div', { class: 'card' }, [filtBar, el('div', { class: 'tb-wrap' }, [table])]);
   const sidePanel = el('div', { class: 'card' });
   view.append(el('div', { class: 'side' }, [listCard, sidePanel]));
 
@@ -68,21 +70,72 @@ export function mount(view, params) {
     const rows = models
       .filter(matchesFilter)
       .filter((m) => !search || m.id.toLowerCase().includes(search.toLowerCase()));
+    if (sortKey) {
+      const by = SORTS[sortKey];
+      rows.sort((a, b) => {
+        const av = by(a);
+        const bv = by(b);
+        const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+        return sortDir === 'asc' ? cmp : -cmp;
+      });
+    }
+    // Headers are rebuilt on every render (sort, 3s poll); keep keyboard focus.
+    const focused = table.contains(document.activeElement) ? document.activeElement.dataset.sort : null;
     table.replaceChildren(
       el('tr', {}, [
-        el('th', {}, ['Model']),
-        el('th', {}, ['Kind']),
+        th('Model', 'name'),
+        th('Kind', 'kind'),
         el('th', {}, ['Can do']),
         el('th', {}, ['License']),
-        el('th', {}, ['State']),
+        th('Size', 'size', 'size'),
+        th('State', 'state'),
         el('th', {}, ['']),
       ]),
       ...rows.map(modelRow),
     );
+    if (focused) table.querySelector(`th[data-sort="${focused}"]`)?.focus();
     if (selectedId && !rows.some((m) => m.id === selectedId)) {
       // Selection fell out of the filtered view; keep it selected (the
       // panel still shows it) but nothing in the table highlights.
     }
+  }
+
+  // Same behaviour as Naru's ccTable: first click sorts descending, the
+  // next flips it; Tab reaches a header, Enter or Space sorts.
+  const SORTS = {
+    name: (m) => m.id.toLowerCase(),
+    kind: (m) => m.x_kind,
+    size: (m) => m.x_size_bytes ?? -1,
+    state: (m) => (m.x_loaded ? 3 : pulls.has(m.id) ? 2 : m.x_pulled ? 1 : 0),
+  };
+
+  function th(label, key, cls = '') {
+    const on = key === sortKey;
+    const click = () => {
+      if (on) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+      else {
+        sortKey = key;
+        sortDir = 'desc';
+      }
+      renderTable();
+    };
+    return el(
+      'th',
+      {
+        class: `${cls} sortable`.trim(),
+        tabindex: '0',
+        'data-sort': key,
+        'aria-sort': on ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none',
+        onclick: click,
+        onkeydown: (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            click();
+          }
+        },
+      },
+      [label, on ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''],
+    );
   }
 
   function capChips(m) {
@@ -101,9 +154,13 @@ export function mount(view, params) {
   function licenseChip(m) {
     const nc = m.x_non_commercial;
     const color = nc ? 'var(--amber)' : 'var(--green)';
-    return el('span', { class: 'lic', style: `color:${color}` }, [
-      nc ? 'NC' : m.x_license ?? '—',
-    ]);
+    // Wraps only between words ("MIT AND Apache-2.0"), never at a hyphen.
+    const words = (nc ? 'NC' : m.x_license ?? '—').split(' ');
+    return el(
+      'span',
+      { class: 'lic', style: `color:${color}` },
+      words.flatMap((w, i) => [i ? ' ' : null, el('span', { class: 'nw' }, [w])]),
+    );
   }
 
   function stateCell(m) {
@@ -118,16 +175,16 @@ export function mount(view, params) {
     }
     if (m.x_loaded) {
       return el('td', { class: 'st', style: 'color:var(--green)' }, [
-        `● running · ${fmtBytes(m.x_size_bytes)}`,
+        '● running',
       ]);
     }
     if (m.x_pulled) {
       return el('td', { class: 'st', style: 'color:var(--muted)' }, [
-        `● on disk · ${fmtBytes(m.x_size_bytes)}`,
+        '● on disk',
       ]);
     }
     return el('td', { class: 'st', style: 'color:var(--muted)' }, [
-      `○ not pulled · ${fmtBytes(m.x_size_bytes)}`,
+      '○ not pulled',
     ]);
   }
 
@@ -203,9 +260,10 @@ export function mount(view, params) {
           m.x_default ? ' ' : null,
           m.x_default ? el('span', { class: 'star' }, ['★']) : null,
         ]),
-        el('td', {}, [m.x_kind.toUpperCase()]),
+        el('td', { class: 'kind' }, [m.x_kind.toUpperCase()]),
         el('td', {}, capChips(m)),
-        el('td', {}, [licenseChip(m)]),
+        el('td', { class: 'license' }, [licenseChip(m)]),
+        el('td', { class: 'size' }, [fmtBytes(m.x_size_bytes)]),
       ],
     );
     tr.append(stateCell(m), actionCell(m));
