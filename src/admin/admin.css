@@ -323,7 +323,7 @@ h1, h2, h3 {
 }
 .pill.ok { color: var(--green); background: rgba(var(--green-rgb), 0.1); }
 .pill.bad { color: var(--red); background: rgba(var(--red-rgb), 0.1); }
-.inp.theme-select { width: auto; padding: 2px 8px; font: 12.5px var(--font-mono); color: var(--text); }
+.inp.theme-select { width: auto; padding: 2px 24px 2px 8px; font: 12.5px var(--font-mono); color: var(--text); }
 
 /* Sidebar: Naru's docked nav — tinted cards with a straight left accent bar;
    the active one is brighter with a 3px bar (padding-left 1px less so the
@@ -616,6 +616,97 @@ h1, h2, h3 {
 }
 .inp:focus { box-shadow: var(--ring-focus); }
 textarea.inp { resize: vertical; }
+/* Form controls (task 2321): selects, sliders, checkboxes and radios in
+   Naru's ring + cyan focus glow instead of the browser's native look. The
+   select chevron is two gradients so it follows the theme's --muted. */
+select.inp, select.sel {
+  appearance: none;
+  padding-right: 26px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+  transition: box-shadow 0.15s;
+}
+select.sel:focus { outline: none; box-shadow: var(--ring-focus); }
+select option { background: var(--panel); color: var(--text); }
+input[type='range'] {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  height: 18px;
+  vertical-align: middle;
+  cursor: pointer;
+}
+input[type='range']:focus { outline: none; }
+input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-field);
+  box-shadow: var(--ring);
+}
+input[type='range']::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-field);
+  box-shadow: var(--ring);
+}
+input[type='range']::-moz-range-progress { height: 6px; border-radius: 999px; background: var(--cyan-dim); }
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4px;
+  border: none;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan-dim);
+  transition: box-shadow 0.15s;
+}
+input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 8px var(--cyan-dim);
+}
+input[type='range']:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--cyan-dim), 0 0 12px var(--cyan-dim); }
+input[type='range']:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px var(--cyan-dim), 0 0 12px var(--cyan-dim); }
+input[type='checkbox'], input[type='radio'] {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  vertical-align: middle;
+  border-radius: 4px;
+  background: var(--surface-field);
+  box-shadow: var(--ring);
+  cursor: pointer;
+  transition: box-shadow 0.15s, background 0.15s;
+}
+input[type='radio'] { border-radius: 50%; }
+input[type='checkbox']::before {
+  content: '';
+  width: 8px;
+  height: 4px;
+  border-left: 2px solid var(--on-accent);
+  border-bottom: 2px solid var(--on-accent);
+  transform: translateY(-1px) rotate(-45deg);
+  visibility: hidden;
+}
+input[type='radio']::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); visibility: hidden; }
+input[type='checkbox']:checked { background: var(--cyan); box-shadow: 0 0 8px var(--cyan-dim); }
+input[type='radio']:checked { box-shadow: var(--ring), 0 0 8px var(--cyan-dim); }
+input[type='checkbox']:checked::before, input[type='radio']:checked::before { visibility: visible; }
+input[type='checkbox']:focus-visible, input[type='radio']:focus-visible { outline: none; box-shadow: var(--ring-focus); }
+input[type='checkbox']:disabled, input[type='radio']:disabled { opacity: 0.5; cursor: default; }
 .ok2 { color: var(--green); font-size: 13px; }
 .chk { color: var(--text); font-size: 14px; display: flex; align-items: center; gap: 6px; }
 .cmp { border-radius: var(--r-sm); background: var(--surface-raised); padding: 10px; margin-top: 6px; }
