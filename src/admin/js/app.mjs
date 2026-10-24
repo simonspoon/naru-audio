@@ -61,6 +61,7 @@ async function pollTopbar() {
     online.textContent = `● Online :${location.port || 80}`;
     online.classList.add('ok');
     online.classList.remove('bad');
+    document.getElementById('brand-version').textContent = `v${health.version}`;
     document.getElementById('tts-pill').textContent = `TTS: ${health.tts.default}`;
     document.getElementById('stt-pill').textContent = `STT: ${health.stt.default}`;
     const used = ps.reduce((sum, m) => sum + (m.resident_bytes ?? 0), 0);

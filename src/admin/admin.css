@@ -185,13 +185,41 @@ h1, h2, h3 {
   padding: 0 24px;
   background: rgba(var(--bg-rgb), 0.85);
 }
+/* Brand block, as in Naru: the mark, then the Orbitron wordmark with the
+   version stacked under it; "audio" is a small lowercase sub-label. */
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
   font: 700 17px var(--font-brand);
+  text-transform: uppercase;
   letter-spacing: 0.35em;
   color: var(--text-h);
   text-shadow: var(--text-glow-wide);
   white-space: nowrap;
+  text-decoration: none;
 }
+.brand-mark { width: 1.3rem; height: 1.3rem; flex: none; }
+.brand-text { display: flex; flex-direction: column; line-height: 1; }
+.brand-sub {
+  margin-left: 0.15em;
+  font-size: 0.6rem;
+  font-weight: 400;
+  letter-spacing: 0.2em;
+  text-transform: lowercase;
+  color: var(--cyan);
+  text-shadow: var(--text-glow-dim);
+}
+.brand-version {
+  font-size: 0.6rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--muted);
+  text-shadow: none;
+  margin-top: 0.2rem;
+}
+.brand-version:empty { display: none; }
 .header-right { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
 .pill {
   border: 1px solid transparent;
