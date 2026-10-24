@@ -320,23 +320,33 @@ h1, h2, h3 {
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .star { color: var(--amber); }
 
+/* Naru's button: rounded cyan tint. One .primary (solid cyan) per panel,
+   .danger the red tint, .wide a full-width stacked side-panel action. */
 .btn {
+  display: inline-block;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   color: var(--cyan);
-  background: rgba(var(--cyan-rgb), 0.1);
-  padding: 3px 10px;
-  font: 500 13px var(--font-sans);
+  background: rgba(var(--cyan-rgb), 0.08);
+  padding: 0.3rem 0.9rem;
+  font: 500 0.9rem var(--font-sans);
+  text-decoration: none;
   cursor: pointer;
+  transition: box-shadow 0.15s, background 0.15s;
 }
-.btn:hover:not(:disabled) { background: rgba(var(--cyan-rgb), 0.2); }
-.btn.v { color: var(--violet); background: rgba(var(--violet-rgb), 0.12); }
-.btn.v:hover:not(:disabled) { background: rgba(var(--violet-rgb), 0.22); }
-.btn.x { color: var(--muted); background: var(--surface-raised); }
-.btn.x:hover:not(:disabled) { background: var(--surface-hover); }
-.btn.r { color: var(--red); background: rgba(var(--red-rgb), 0.12); }
-.btn.r:hover:not(:disabled) { background: rgba(var(--red-rgb), 0.22); }
-.btn:disabled { opacity: 0.4; cursor: default; }
+.btn:hover:not(:disabled) {
+  background: rgba(var(--cyan-rgb), 0.16);
+  box-shadow: 0 0 12px rgba(var(--cyan-rgb), 0.15);
+}
+.btn.primary { color: var(--on-accent); background: var(--cyan); font-weight: 600; }
+.btn.primary:hover:not(:disabled) { background: var(--cyan); filter: brightness(1.12); box-shadow: 0 0 12px var(--cyan-dim); }
+.btn.danger { color: var(--red); background: rgba(var(--red-rgb), 0.1); }
+.btn.danger:hover:not(:disabled) {
+  background: rgba(var(--red-rgb), 0.18);
+  box-shadow: 0 0 12px rgba(var(--red-rgb), 0.25);
+}
+.btn:disabled { color: var(--muted); background: rgba(var(--muted-rgb), 0.1); cursor: default; }
+.btn.wide { display: block; width: 100%; margin-top: 0.5rem; text-align: center; }
 
 /* Voice grid (Overview) */
 .vg { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
@@ -376,23 +386,20 @@ h1, h2, h3 {
 .split-half:hover { flex-grow: 1.6; background: rgba(var(--violet-rgb), 0.08); }
 .split-half + .split-half { border-left: 1px dashed var(--border-bright); }
 .wv { width: 100%; height: 30px; fill: var(--violet); opacity: 0.75; margin-top: 6px; display: block; }
-.play {
+/* Round play button on a voice card; the look is .btn's. */
+.btn.play {
   position: absolute;
   top: 8px;
   right: 8px;
   width: 26px;
   height: 26px;
-  border: 1px solid transparent;
+  padding: 0;
   border-radius: var(--r-pill);
-  color: var(--cyan);
-  background: rgba(var(--cyan-rgb), 0.1);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 11px;
-  cursor: pointer;
 }
-.play:hover { background: rgba(var(--cyan-rgb), 0.2); }
 .wave-placeholder {
   height: 14px;
   background: repeating-linear-gradient(90deg, var(--violet) 0 2px, transparent 2px 5px);
@@ -434,24 +441,6 @@ h1, h2, h3 {
 
 .kv { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--hairline); }
 .kv span:first-child { color: var(--muted); }
-/* Primary action: solid cyan; .r is the danger red tint. */
-.big {
-  display: block;
-  text-align: center;
-  padding: 8px;
-  margin-top: 10px;
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  background: var(--cyan);
-  color: var(--bg);
-  font: 600 14px var(--font-sans);
-  cursor: pointer;
-  width: 100%;
-}
-.big:hover:not(:disabled) { filter: brightness(1.12); }
-.big:disabled { opacity: 0.4; cursor: default; }
-.big.r { background: rgba(var(--red-rgb), 0.12); color: var(--red); }
-.big.r:hover:not(:disabled) { background: rgba(var(--red-rgb), 0.22); filter: none; }
 /* Semantic alert: keeps a coloured border. */
 .warn { border: 1px solid var(--amber); border-radius: var(--r-sm); color: var(--amber); padding: 8px 10px; font-size: 13px; margin-top: 10px; max-width: 80ch; }
 
@@ -519,16 +508,8 @@ h1, h2, h3 {
   align-items: center;
 }
 .drop.over { border-color: var(--cyan); background: var(--surface); }
-.rec {
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  color: var(--red);
-  background: rgba(var(--red-rgb), 0.12);
-  padding: 5px 12px;
-  font: 500 13px var(--font-sans);
-  cursor: pointer;
-}
-.rec.on { background: var(--red); color: var(--bg); }
+/* Record button (.btn.danger) while recording. */
+.btn.rec.on, .btn.rec.on:hover:not(:disabled) { background: var(--red); color: var(--on-accent); }
 .inp {
   border: 1px solid transparent;
   border-radius: var(--r-sm);

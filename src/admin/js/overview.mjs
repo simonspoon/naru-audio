@@ -42,16 +42,16 @@ export function mount(view) {
     let action;
     if (m.x_loaded) {
       dotStyle = 'background:var(--green)';
-      action = el('button', { class: 'btn x', onclick: () => unload(m) }, ['unload']);
+      action = el('button', { class: 'btn', onclick: () => unload(m) }, ['Unload']);
     } else if (m.x_pulled) {
       dotStyle = 'background:var(--muted)';
-      action = el('button', { class: 'btn', onclick: () => load(m) }, ['load']);
+      action = el('button', { class: 'btn', onclick: () => load(m) }, ['Load']);
     } else {
       dotStyle = 'border:1px solid var(--muted);background:transparent';
       action = el(
         'button',
         { class: 'btn', onclick: (e) => pull(m, e.currentTarget) },
-        [`pull ${fmtBytes(m.x_size_bytes)}`],
+        [`Pull ${fmtBytes(m.x_size_bytes)}`],
       );
     }
     const label = [m.id];
@@ -158,7 +158,7 @@ export function mount(view) {
             el(
               'button',
               {
-                class: 'btn v',
+                class: 'btn',
                 onclick: async (e) => {
                   e.stopPropagation();
                   const btn = e.currentTarget;
@@ -176,7 +176,7 @@ export function mount(view) {
                   }
                 },
               },
-              ['generate preview'],
+              ['Generate preview'],
             ),
           );
         }

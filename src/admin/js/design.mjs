@@ -47,7 +47,7 @@ export function mount(view, params) {
   const takesGrid = el('div', { class: 'vg3' });
   const nameInput = el('input', { class: 'inp' });
   const saveHint = el('span', { style: 'color:var(--muted);font-size:13px' });
-  const createBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:200px' }, ['Create voice']);
+  const createBtn = el('button', { class: 'btn primary', style: 'margin-left:auto' }, ['Create voice']);
   const testLineInput = el('input', { class: 'inp', value: TEST_LINE });
   const countSelect = el(
     'select',

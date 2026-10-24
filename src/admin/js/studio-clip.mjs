@@ -200,7 +200,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
     return el(
       'button',
       {
-        class: `btn${opts.cls ? ` ${opts.cls}` : ''}`,
+        class: 'btn',
         type: 'button',
         title: opts.title,
         disabled: opts.disabled || undefined,
@@ -219,21 +219,20 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
       tb(playing === 'selection' ? '■ Stop' : '▶ Selection', playSelection, { disabled: !sel }),
       el('span', { class: 'sc-sep' }),
       tb('✂ Cut', cutSelection, { disabled: !sel, title: 'delete the selected region (Delete)' }),
-      tb('Uncut', uncutSelection, { disabled: !sel || !model.cuts.length, cls: 'x', title: 'bring cut audio in the selection back' }),
+      tb('Uncut', uncutSelection, { disabled: !sel || !model.cuts.length, title: 'bring cut audio in the selection back' }),
       tb('Keep only selection', cropToSelection, { disabled: !sel, title: 'crop to the selection' }),
       el('span', { class: 'sc-sep' }),
-      tb('↶', undo, { disabled: !history.canUndo(), cls: 'x', title: 'undo (Ctrl/Cmd-Z)' }),
-      tb('↷', redo, { disabled: !history.canRedo(), cls: 'x', title: 'redo (Shift-Cmd-Z / Ctrl-Y)' }),
+      tb('↶', undo, { disabled: !history.canUndo(), title: 'undo (Ctrl/Cmd-Z)' }),
+      tb('↷', redo, { disabled: !history.canRedo(), title: 'redo (Shift-Cmd-Z / Ctrl-Y)' }),
       tb('Reset', () => mutate((m) => Object.assign(m, newModel(clip.duration_secs), { takes: m.takes })), {
-        cls: 'x',
         title: 'drop every crop, cut and speaker choice',
       }),
       el('span', { class: 'sc-sep' }),
-      tb('−', () => wave.zoomBy(0.5), { cls: 'x', title: 'zoom out (Ctrl/Cmd-wheel)' }),
-      tb('+', () => wave.zoomBy(2), { cls: 'x', title: 'zoom in (Ctrl/Cmd-wheel)' }),
-      tb('Fit', () => wave.fitAll(), { cls: 'x' }),
-      tb('◂', () => wave.panBy(-0.4), { cls: 'x', title: 'scroll left (shift-drag also pans)' }),
-      tb('▸', () => wave.panBy(0.4), { cls: 'x' }),
+      tb('−', () => wave.zoomBy(0.5), { title: 'zoom out (Ctrl/Cmd-wheel)' }),
+      tb('+', () => wave.zoomBy(2), { title: 'zoom in (Ctrl/Cmd-wheel)' }),
+      tb('Fit', () => wave.fitAll(), {}),
+      tb('◂', () => wave.panBy(-0.4), { title: 'scroll left (shift-drag also pans)' }),
+      tb('▸', () => wave.panBy(0.4), {}),
     );
   }
 
@@ -335,7 +334,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
         head,
         el('div', { class: 'studio-note' }, ['Separate speakers to see who talks when, keep one voice and drop crosstalk. Runs speech recognition over the whole clip, so a long clip takes a while — you can keep editing meanwhile.']),
         speakerCountSelect(),
-        tb('Separate speakers', separateSpeakers, { cls: 'v' }),
+        tb('Separate speakers', separateSpeakers, {}),
       );
       return;
     }
@@ -472,7 +471,7 @@ export function createClipEditor({ clipId, getExtras, onChange }) {
         el('span', { class: 'studio-note' }, ['–']),
         num('max'),
         el('span', { class: 'studio-note' }, ['s']),
-        tb(takesBusy ? 'Scoring…' : '★ Pick best takes', pickTakes, { cls: 'v', disabled: takesBusy }),
+        tb(takesBusy ? 'Scoring…' : '★ Pick best takes', pickTakes, { disabled: takesBusy }),
       ]),
       list.length
         ? el('div', { class: 'sc-takes' }, list.map(takeRow))

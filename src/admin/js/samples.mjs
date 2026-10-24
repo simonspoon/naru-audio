@@ -144,8 +144,8 @@ export function mount(view, params) {
           p.updated_at ? new Date(p.updated_at).toLocaleString() : ''
         }`,
       ]),
-      el('button', { class: 'btn', onclick: () => openStudioClip(p.clip_id) }, ['open']),
-      el('button', { class: 'btn r', onclick: () => deleteProjectFor(p) }, ['delete']),
+      el('button', { class: 'btn', onclick: () => openStudioClip(p.clip_id) }, ['Open']),
+      el('button', { class: 'btn danger', onclick: () => deleteProjectFor(p) }, ['Delete']),
     ]);
   }
 
@@ -187,7 +187,7 @@ export function mount(view, params) {
     ]);
   }
 
-  /** A `.row` that hosts a `playButton()` needs `position:relative` — `.play`
+  /** A `.row` that hosts a `playButton()` needs `position:relative` — `.btn.play`
    * positions itself `absolute` against the nearest positioned ancestor, and
    * plain `.row` (unlike `.vc`/`.cmp`, which other tabs use for this) has
    * none, so without this every play button on the tab stacks at the page's
@@ -219,13 +219,13 @@ export function mount(view, params) {
       el('div', { class: 'lab', style: 'margin-top:10px' }, ['A/B preview']),
       playRow(() => rawUrl, 'raw crop'),
       playRow(() => cleanUrl, 'cleaned'),
-      el('button', { class: 'big', onclick: () => openStudio(s.id) }, ['Open in Sample Studio']),
+      el('button', { class: 'btn primary wide', onclick: () => openStudio(s.id) }, ['Open in Sample Studio']),
       el('div', { class: 'lab', style: 'margin-top:10px' }, ['Rename']),
       el('div', { class: 'row' }, [
         renameInput,
-        el('button', { class: 'btn', onclick: () => renameSample(s) }, ['save']),
+        el('button', { class: 'btn', onclick: () => renameSample(s) }, ['Save']),
       ]),
-      el('button', { class: 'big r', onclick: () => deleteSample(s) }, ['Delete']),
+      el('button', { class: 'btn danger wide', onclick: () => deleteSample(s) }, ['Delete']),
     ]);
   }
 

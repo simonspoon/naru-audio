@@ -67,10 +67,10 @@ export function mount(view, params) {
   const transcriptBox = el('textarea', { class: 'inp', rows: 2 });
   const nameInput = el('input', { class: 'inp' });
   const permCheck = el('input', { type: 'checkbox' });
-  const createBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:200px' }, ['Create voice']);
+  const createBtn = el('button', { class: 'btn primary', style: 'margin-left:auto' }, ['Create voice']);
   const originalPlay = el('span', { class: 'cmp' }, ['no sample loaded']);
   const previewLine = el('div', { class: 'inp', style: 'font-size:14px' }, [TEST_LINE]);
-  const previewBtn = el('button', { class: 'big' }, ['▶ Preview clone']);
+  const previewBtn = el('button', { class: 'btn wide' }, ['▶ Preview clone']);
 
   const leftCard = el('div', { class: 'card' }, [
     el('div', { class: 'step' }, [
@@ -327,7 +327,7 @@ export function mount(view, params) {
     })(),
     el('span', { style: 'color:var(--muted)' }, ['or']),
     (() => {
-      const btn = el('button', { class: 'rec' }, ['● Record']);
+      const btn = el('button', { class: 'btn danger rec' }, ['● Record']);
       btn.addEventListener('click', () => toggleRecord(btn));
       return btn;
     })(),

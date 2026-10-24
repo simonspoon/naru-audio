@@ -138,13 +138,13 @@ export function mount(view, params) {
         el(
           'button',
           {
-            class: 'btn x',
+            class: 'btn',
             onclick: async (e) => {
               e.stopPropagation();
               await del(`/api/pulls/${encodeURIComponent(m.id)}`, { silent: true }).catch(() => {});
             },
           },
-          ['cancel'],
+          ['Cancel'],
         ),
       ]);
     }
@@ -153,13 +153,13 @@ export function mount(view, params) {
         el(
           'button',
           {
-            class: 'btn x',
+            class: 'btn',
             onclick: (e) => {
               e.stopPropagation();
               unload(m);
             },
           },
-          ['unload'],
+          ['Unload'],
         ),
       ]);
     }
@@ -174,7 +174,7 @@ export function mount(view, params) {
               load(m);
             },
           },
-          ['load'],
+          ['Load'],
         ),
       ]);
     }
@@ -188,7 +188,7 @@ export function mount(view, params) {
             startPull(m);
           },
         },
-        ['pull'],
+        ['Pull'],
       ),
     ]);
   }
@@ -236,17 +236,17 @@ export function mount(view, params) {
       nodes.push(
         el(
           'button',
-          { class: 'big', onclick: () => setDefault(m) },
+          { class: 'btn primary wide', onclick: () => setDefault(m) },
           [m.x_default ? '★ Default' : `★ Default for ${m.x_kind.toUpperCase()}`],
         ),
       );
     }
     if (m.x_loaded) {
-      nodes.push(el('button', { class: 'big', onclick: () => unload(m) }, ['Unload']));
+      nodes.push(el('button', { class: 'btn wide', onclick: () => unload(m) }, ['Unload']));
     }
     if (m.x_pulled) {
       nodes.push(
-        el('button', { class: 'big r', onclick: () => removeModel(m) }, ['Delete from disk']),
+        el('button', { class: 'btn danger wide', onclick: () => removeModel(m) }, ['Delete from disk']),
       );
     }
     sidePanel.replaceChildren(...nodes);

@@ -172,7 +172,7 @@ export async function waveformFromResponse(res) {
  * pause, so pausing frees the decode buffer. */
 export function playButton(getSrc) {
   let audio = null;
-  const btn = el('button', { class: 'play', type: 'button' }, ['▶']);
+  const btn = el('button', { class: 'btn play', type: 'button' }, ['▶']);
   btn.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (audio) {

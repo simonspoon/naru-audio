@@ -383,7 +383,7 @@ export function mount(view, params) {
     } else if (transcriptState === 'failed') {
       wordHost.replaceChildren(
         el('span', { class: 'studio-note' }, ['transcript unavailable — the sample\'s saved text is used as is. ']),
-        el('button', { class: 'btn', type: 'button', onclick: loadTranscript }, ['retry']),
+        el('button', { class: 'btn', type: 'button', onclick: loadTranscript }, ['Retry']),
       );
     } else {
       wordHost.replaceChildren(...words.map(wordNode));

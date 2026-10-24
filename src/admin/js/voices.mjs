@@ -81,7 +81,7 @@ export function mount(view, params) {
       el(
         'button',
         { class: 'btn', style: 'margin-left:auto', onclick: () => importInput.click() },
-        ['import'],
+        ['Import'],
       ),
     );
   }
@@ -208,7 +208,7 @@ export function mount(view, params) {
       el(
         'button',
         {
-          class: 'big',
+          class: 'btn primary wide',
           onclick: async () => {
             try {
               const res = await request('/v1/audio/speech', {
@@ -236,7 +236,7 @@ export function mount(view, params) {
         el(
           'button',
           {
-            class: 'big',
+            class: 'btn wide',
             onclick: async () => {
               try {
                 await putJson('/api/defaults', { voices: { [selectedModel]: v.id } });
@@ -255,7 +255,7 @@ export function mount(view, params) {
       el(
         'button',
         {
-          class: 'big',
+          class: 'btn wide',
           onclick: async () => {
             try {
               const res = await request(`/v1/audio/voices/${encodeURIComponent(v.id)}`);
@@ -298,13 +298,13 @@ export function mount(view, params) {
                 refreshVoices();
               },
             },
-            ['save'],
+            ['Save'],
           ),
         ]),
         el(
           'button',
           {
-            class: 'big r',
+            class: 'btn danger wide',
             onclick: async () => {
               if (!confirm(`Delete voice "${v.id}"? This cannot be undone.`)) return;
               try {

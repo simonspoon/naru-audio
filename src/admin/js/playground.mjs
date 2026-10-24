@@ -90,12 +90,12 @@ export function mount(view, params) {
   const formatPickerWrap = el('div', {});
   const speedWrap = el('div', {});
   const knobsWrap = el('div', {});
-  const speakBtn = el('button', { class: 'big', style: 'margin:0 0 0 auto;max-width:140px' }, ['▶ Speak']);
+  const speakBtn = el('button', { class: 'btn primary', style: 'margin-left:auto' }, ['▶ Speak']);
   const waveWrap = el('div', { style: 'margin-top:10px' });
   const statRow = el('div', { class: 'stat' });
-  const downloadLink = el('a', { class: 'btn', style: 'display:none' }, ['⇩ download']);
+  const downloadLink = el('a', { class: 'btn', style: 'display:none' }, ['⇩ Download']);
   const curlBox = el('div', { class: 'code' });
-  const copyCurlBtn = el('span', { class: 'btn', style: 'margin-left:auto' }, ['⧉ copy']);
+  const copyCurlBtn = el('span', { class: 'btn', style: 'margin-left:auto' }, ['⧉ Copy']);
 
   const speakCard = el('div', { class: 'card' }, [
     el('h3', {}, ['Speak · text → audio']),
@@ -122,11 +122,11 @@ export function mount(view, params) {
   // --- Listen panel --------------------------------------------------------
 
   const sttModelBar = el('div', { class: 'filt' });
-  const recordBtn = el('button', { class: 'rec' }, ['● Record']);
+  const recordBtn = el('button', { class: 'btn danger rec' }, ['● Record']);
   const dropZone = el('div', { class: 'drop' });
   const liveBox = el('div', { class: 'live' }, [el('span', {}, ['record or drop a file to transcribe']) ]);
   const listenStat = el('div', { class: 'stat' });
-  const copyTranscriptBtn = el('span', { class: 'btn', style: 'margin-left:auto' }, ['⧉ copy text']);
+  const copyTranscriptBtn = el('span', { class: 'btn', style: 'margin-left:auto' }, ['⧉ Copy text']);
 
   const listenCard = el('div', { class: 'card' }, [
     el('h3', {}, ['Listen · audio → text']),
