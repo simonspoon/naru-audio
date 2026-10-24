@@ -412,6 +412,16 @@ h1, h2, h3 {
 .row b { color: var(--text-h); font-weight: 500; flex: 1; }
 .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .star { color: var(--amber); }
+.row .mem { color: var(--muted); font: 12px var(--font-mono); font-variant-numeric: tabular-nums; }
+.fold { border-top: 1px solid var(--hairline); }
+.fold > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.8rem;
+  padding: 7px 0;
+}
+.fold > summary:hover { color: var(--text-h); }
+.fold > .row:first-of-type { border-top: none; }
 
 /* Naru's button: rounded cyan tint. One .primary (solid cyan) per panel,
    .danger the red tint, .wide a full-width stacked side-panel action. */

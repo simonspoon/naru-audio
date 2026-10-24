@@ -1,7 +1,7 @@
-// Overview tab (mockup: na-admin-v2): a models card (running/on-disk/not-
-// pulled dots with load/unload/pull) and a voice grid for the default TTS
-// model, with real waveforms and playback pulled from `GET
-// /api/voices/{model}/{voice}/sample` (added alongside this by the voice
+// Overview tab (mockup: na-admin-v2): a models card (running models on top
+// with memory, the rest folded; dots with load/unload/pull) and a voice grid
+// for the default TTS model, with real waveforms and playback pulled from
+// `GET /api/voices/{model}/{voice}/sample` (added alongside this by the voice
 // API subtask). Built-in voices with no cached preview show a dashed
 // placeholder and a "generate preview" action; we never auto-generate one.
 
@@ -30,11 +30,29 @@ export function mount(view) {
     await renderVoices(ttsDefault);
   }
 
+  // Running models first, with their memory; everything else folds under
+  // "N more on disk". The fold's open state survives the re-render.
+  let foldOpen = false;
   function renderModels(list) {
-    modelsCard.replaceChildren(el('h3', {}, ['Models']));
-    for (const m of list) {
+    const running = list.filter((m) => m.x_loaded);
+    const rest = list.filter((m) => !m.x_loaded);
+    const onDisk = rest.filter((m) => m.x_pulled).length;
+    modelsCard.replaceChildren(el('h3', {}, [`Models · ${running.length} running`]));
+    if (running.length === 0) {
+      modelsCard.append(el('div', { class: 'placeholder' }, ['Nothing running. Load a model below.']));
+    }
+    for (const m of running) {
       modelsCard.append(modelRow(m));
     }
+    if (rest.length === 0) return;
+    let summary = `${onDisk} more on disk`;
+    if (rest.length > onDisk) summary += ` · ${rest.length - onDisk} not pulled`;
+    const fold = el('details', { class: 'fold', open: foldOpen }, [el('summary', {}, [summary])]);
+    fold.addEventListener('toggle', () => (foldOpen = fold.open));
+    for (const m of rest) {
+      fold.append(modelRow(m));
+    }
+    modelsCard.append(fold);
   }
 
   function modelRow(m) {
@@ -61,6 +79,7 @@ export function mount(view) {
     return el('div', { class: 'row' }, [
       el('span', { class: 'dot', style: dotStyle }),
       el('b', {}, label),
+      m.x_loaded ? el('small', { class: 'mem' }, [fmtBytes(m.x_size_bytes)]) : null,
       action,
     ]);
   }
