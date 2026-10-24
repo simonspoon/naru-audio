@@ -124,6 +124,98 @@
   /* One-off text tints. */
   --magenta-soft: #ff9be9;
   --stderr-text: #ff9b7a;
+  color-scheme: dark;
+}
+
+/* Colour themes, copied from naru/frontend/src/themes.css (minus Naru's
+   workflow-node --wf-* colours, which this UI does not use). :root above is
+   `dark`; each block overrides the same variables for
+   `<html data-theme="<id>">`, set by app.mjs from the header picker. Adding a
+   variable to :root means adding it to every block below (or deciding it is
+   theme-independent). */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+/* Light: pale cool-grey surfaces, near-black text, darkened accents. */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-rgb: 244, 247, 250;
+  --edge-rgb: 96, 130, 156;
+  --text-rgb: 22, 38, 52;
+  --muted-rgb: 84, 106, 122;
+  --cyan-rgb: 0, 102, 138;
+  --magenta-rgb: 168, 16, 132;
+  --violet-rgb: 98, 52, 200;
+  --violet-deep-rgb: 80, 40, 170;
+  --amber-rgb: 150, 86, 0;
+  --green-rgb: 14, 116, 64;
+  --red-rgb: 190, 28, 56;
+  --shadow-rgb: 30, 50, 70;
+  --white-rgb: 20, 30, 50;
+  --panel: #ffffff;
+  --panel-raised: #eaf0f5;
+  --text-h: #0a1a26;
+  --surface-field: rgba(255, 255, 255, 0.92);
+  --on-accent: #ffffff;
+  --on-accent-alt: #ffffff;
+  --magenta-soft: #9c1a7e;
+  --stderr-text: #b0401a;
+  /* Neon glows read as smudges on white. */
+  --text-glow: none;
+  --text-glow-wide: none;
+  --text-glow-dim: none;
+  --text-glow-red: none;
+  --text-glow-magenta: none;
+}
+
+/* Contrast: true-black, white text, brighter accents, firmer edges. */
+:root[data-theme='contrast'] {
+  color-scheme: dark;
+  --bg-rgb: 0, 0, 0;
+  --edge-rgb: 140, 190, 215;
+  --text-rgb: 255, 255, 255;
+  --muted-rgb: 190, 205, 215;
+  --cyan-rgb: 64, 240, 255;
+  --magenta-rgb: 255, 110, 230;
+  --violet-rgb: 200, 150, 255;
+  --violet-deep-rgb: 150, 100, 240;
+  --amber-rgb: 255, 200, 90;
+  --green-rgb: 80, 255, 170;
+  --red-rgb: 255, 100, 120;
+  --panel: #000000;
+  --panel-raised: #101820;
+  --text-h: #ffffff;
+  --border: rgba(var(--edge-rgb), 0.7);
+  --border-bright: rgba(var(--edge-rgb), 0.95);
+  --hairline: rgba(var(--edge-rgb), 0.4);
+  --ring: 0 0 0 1px rgba(var(--edge-rgb), 0.8);
+  --surface-field: rgba(0, 0, 0, 0.9);
+}
+
+/* Crimson: near-black wine base, crimson in the --cyan accent slot, rose for
+   violet, salmon --red kept distinct from the accent. */
+:root[data-theme='crimson'] {
+  color-scheme: dark;
+  --bg-rgb: 15, 6, 8;
+  --edge-rgb: 150, 52, 64;
+  --text-rgb: 242, 214, 216;
+  --muted-rgb: 184, 132, 138;
+  --cyan-rgb: 255, 84, 102;
+  --magenta-rgb: 255, 120, 190;
+  --violet-rgb: 232, 140, 170;
+  --violet-deep-rgb: 190, 80, 120;
+  --amber-rgb: 255, 184, 92;
+  --green-rgb: 96, 232, 150;
+  --red-rgb: 255, 150, 110;
+  --panel: #190c0f;
+  --panel-raised: #231115;
+  --text-h: #fff0f1;
+  --surface-field: rgba(var(--bg-rgb), 0.85);
+  --on-accent: #1a0407;
+  --on-accent-alt: #1a0407;
+  --magenta-soft: #ffb0dc;
+  --stderr-text: #ffa88a;
 }
 
 * {
@@ -231,6 +323,7 @@ h1, h2, h3 {
 }
 .pill.ok { color: var(--green); background: rgba(var(--green-rgb), 0.1); }
 .pill.bad { color: var(--red); background: rgba(var(--red-rgb), 0.1); }
+.inp.theme-select { width: auto; padding: 2px 8px; font: 12.5px var(--font-mono); color: var(--text); }
 
 /* Sidebar: Naru's docked nav — tinted cards with a straight left accent bar;
    the active one is brighter with a 3px bar (padding-left 1px less so the
@@ -749,7 +842,7 @@ textarea.inp { resize: vertical; }
 .studio-knob { text-align: center; width: 62px; }
 .studio-knob-svg { width: 48px; height: 48px; cursor: ns-resize; touch-action: none; }
 .studio-knob-svg path { fill: none; stroke-width: 3.5; stroke-linecap: round; }
-.studio-knob-svg .trk { stroke: #16384a; }
+.studio-knob-svg .trk { stroke: rgba(var(--edge-rgb), 0.35); }
 .studio-knob-svg .val { stroke: var(--cyan); filter: drop-shadow(0 0 3px var(--cyan)); }
 .studio-knob .v { color: var(--text-h); font: 13px var(--font-mono); }
 .studio-knob .l { color: var(--muted); font-size: 11px; }

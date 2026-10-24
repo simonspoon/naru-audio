@@ -90,6 +90,45 @@ function initSidebar() {
   toggle.addEventListener('click', () => setCollapsed(!sidebar.classList.contains('collapsed')));
 }
 
+// Colour theme, as Naru's (naru/frontend/src/theme.ts): `system` follows
+// prefers-color-scheme (dark -> dark, else light), any other id is applied
+// as-is. Naru's own setting is not readable from here (its API is another
+// origin with no CORS), so the choice is this page's, kept in localStorage.
+const THEME_KEY = 'naru-audio-theme';
+const THEME_IDS = ['system', 'dark', 'light', 'contrast', 'crimson'];
+const darkQuery = matchMedia('(prefers-color-scheme: dark)');
+
+function storedTheme() {
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    return THEME_IDS.includes(v) ? v : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+let themeSetting = storedTheme();
+
+function applyTheme() {
+  document.documentElement.dataset.theme =
+    themeSetting === 'system' ? (darkQuery.matches ? 'dark' : 'light') : themeSetting;
+}
+
+function initTheme() {
+  const select = document.getElementById('theme-select');
+  select.value = themeSetting;
+  select.addEventListener('change', () => {
+    themeSetting = select.value;
+    applyTheme();
+    try {
+      localStorage.setItem(THEME_KEY, themeSetting);
+    } catch {
+      // storage blocked: the choice lasts until reload
+    }
+  });
+  darkQuery.addEventListener('change', applyTheme);
+}
+
 function startPolling() {
   pollTopbar();
   pollTimer = setInterval(pollTopbar, POLL_MS);
@@ -98,7 +137,9 @@ function startPolling() {
 // Module scripts execute after the document is parsed, i.e. after
 // `DOMContentLoaded` has already fired — waiting for that event here would
 // never run. Start directly.
+applyTheme();
 window.addEventListener('hashchange', route);
+initTheme();
 initSidebar();
 startPolling();
 route();
