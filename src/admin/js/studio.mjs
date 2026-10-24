@@ -74,6 +74,11 @@ function stepTitle(type) {
   return type.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
 }
 
+/** The one action of the studio's empty states. */
+function samplesButton(label) {
+  return el('button', { class: 'btn', onclick: () => (location.hash = '#samples') }, [label]);
+}
+
 export function mount(view, params) {
   let disposed = false;
   const sampleId = params.sample ?? null;
@@ -962,7 +967,7 @@ export function mount(view, params) {
       await editor.ready;
     } catch {
       if (!disposed) {
-        view.replaceChildren(el('div', { class: 'placeholder' }, ['could not open that clip — ', el('a', { href: '#samples' }, ['back to samples'])]));
+        view.replaceChildren(el('div', { class: 'placeholder' }, [el('span', {}, ['Could not open that clip.']), samplesButton('Back to samples')]));
       }
       return;
     }
@@ -989,7 +994,7 @@ export function mount(view, params) {
   async function boot() {
     if (clipMode) return bootClip();
     if (!sampleId) {
-      view.replaceChildren(el('div', { class: 'placeholder' }, ['open a sample from the ', el('a', { href: '#samples' }, ['samples tab'])]));
+      view.replaceChildren(el('div', { class: 'placeholder' }, [el('span', {}, ['Open a sample from the samples tab.']), samplesButton('Go to samples')]));
       return;
     }
     try {

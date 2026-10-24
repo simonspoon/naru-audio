@@ -535,7 +535,7 @@ h1, h2, h3 {
 .kv { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--hairline); }
 .kv span:first-child { color: var(--muted); }
 /* Semantic alert: keeps a coloured border. */
-.warn { border: 1px solid var(--amber); border-radius: var(--r-sm); color: var(--amber); padding: 8px 10px; font-size: 13px; margin-top: 10px; max-width: 80ch; }
+.warn { border: 1px solid var(--amber); border-radius: var(--r-sm); color: var(--amber); padding: 0.5rem; font-size: 0.75rem; margin-top: 10px; max-width: 80ch; }
 
 .filt { display: flex; gap: 6px; margin-bottom: 10px; align-items: center; flex-wrap: wrap; }
 .filt span {
@@ -562,7 +562,19 @@ h1, h2, h3 {
 }
 .filt input:focus { box-shadow: var(--ring-focus); }
 
-.placeholder { color: var(--muted); padding: 28px; text-align: center; }
+/* Empty state (Naru's .dock-empty): quiet, centred, muted 0.8rem; one
+   sentence, then at most one button saying what to do. Never red. */
+.placeholder {
+  color: var(--muted);
+  font-size: 0.8rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  text-align: center;
+}
 
 /* Toasts */
 #toasts {
@@ -574,18 +586,23 @@ h1, h2, h3 {
   gap: 6px;
   z-index: 100;
 }
-/* Semantic alert: keeps a coloured border. */
+/* Semantic alert: keeps a coloured border. Green as Naru's .done-toast,
+   red for an error. */
 .toast {
-  border: 1px solid var(--cyan);
+  border: 1px solid var(--green);
   border-radius: var(--r-md);
-  background: var(--panel);
-  color: var(--text-h);
-  padding: 10px 14px;
+  background: var(--panel-raised);
+  color: var(--text);
+  padding: 0.6rem 0.85rem;
   font-size: 14px;
   max-width: 360px;
-  box-shadow: 0 0 8px rgba(var(--cyan-rgb), 0.25);
+  box-shadow: 0 0 14px rgba(var(--green-rgb), 0.28);
+  animation: toast-in 0.25s ease-out;
 }
-.toast.err { border-color: var(--red); color: var(--red); }
+.toast.err { border-color: var(--red); color: var(--red); box-shadow: 0 0 14px rgba(var(--red-rgb), 0.28); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(1rem); }
+}
 
 /* Confirm modal (ui.mjs confirmModal): opaque --panel with a faint --border,
    as Naru's command palette. Sits above the toasts. */

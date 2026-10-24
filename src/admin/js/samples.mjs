@@ -153,7 +153,7 @@ export function mount(view, params) {
     setChildren(projectsCard, [
       el('h3', {}, ['Sample projects']),
       ...projects.map(projectRow),
-      projects.length ? null : el('div', { class: 'placeholder' }, ['no saved projects yet']),
+      projects.length ? null : el('div', { class: 'placeholder' }, ['No saved projects yet.']),
     ]);
   }
 
@@ -183,7 +183,7 @@ export function mount(view, params) {
     setChildren(listCard, [
       el('h3', {}, ['Samples']),
       ...samples.map(libraryRow),
-      samples.length ? null : el('div', { class: 'placeholder' }, ['no samples yet']),
+      samples.length ? null : el('div', { class: 'placeholder' }, ['No samples yet. Drop a voice file above to start one.']),
     ]);
   }
 
@@ -203,7 +203,7 @@ export function mount(view, params) {
   function renderSide() {
     const s = samples.find((x) => x.id === selectedId);
     if (!s) {
-      sidePanel.replaceChildren(el('div', { class: 'placeholder' }, ['select a sample']));
+      sidePanel.replaceChildren(el('div', { class: 'placeholder' }, ['Select a sample from the list.']));
       return;
     }
     renameValue = renameValue || s.name;
