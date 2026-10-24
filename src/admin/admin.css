@@ -587,6 +587,29 @@ h1, h2, h3 {
 }
 .toast.err { border-color: var(--red); color: var(--red); }
 
+/* Confirm modal (ui.mjs confirmModal): opaque --panel with a faint --border,
+   as Naru's command palette. Sits above the toasts. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(var(--bg-rgb), 0.75);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 18vh;
+}
+.modal {
+  width: min(26rem, 90vw);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: 0 0 32px rgba(var(--cyan-rgb), 0.2);
+  padding: 1.1rem 1.2rem 1rem;
+}
+.modal p { margin: 0 0 1rem; color: var(--text-h); line-height: 1.45; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+
 /* Voices/Clone/Design steps (mockups: na-admin-voices/clone/design) */
 .step { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid var(--hairline); }
 .step:first-child { border-top: none; padding-top: 0; }

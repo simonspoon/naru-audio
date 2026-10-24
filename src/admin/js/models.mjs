@@ -4,7 +4,7 @@
 // from `GET /v1/models`' `x_*` fields, never hardcoded.
 
 import { getJson, postJson, putJson, del, streamNdjson } from './api.mjs';
-import { el, toast, fmtBytes, fmtUptime } from './ui.mjs';
+import { el, toast, fmtBytes, fmtUptime, confirmModal } from './ui.mjs';
 
 const FILTERS = ['All', 'TTS', 'STT', 'On disk', 'Running'];
 
@@ -276,7 +276,7 @@ export function mount(view, params) {
   }
 
   async function removeModel(m) {
-    if (!confirm(`Delete "${m.id}" from disk? This cannot be undone.`)) return;
+    if (!(await confirmModal(`Delete "${m.id}" from disk? This cannot be undone.`))) return;
     try {
       await del(`/api/models/${encodeURIComponent(m.id)}`);
       toast(`${m.id} deleted`);

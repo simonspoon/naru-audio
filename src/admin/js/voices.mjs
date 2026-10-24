@@ -8,7 +8,7 @@
 // test without a file picker can drive the import path directly.
 
 import { getJson, postJson, putJson, request, del } from './api.mjs';
-import { el, toast, playButton, waveformSvg, peaks, decodeWav } from './ui.mjs';
+import { el, toast, playButton, waveformSvg, peaks, decodeWav, confirmModal } from './ui.mjs';
 
 const FILTERS = ['All', 'Built-in', 'Cloned', 'Designed'];
 const TRY_IT_DEFAULT = 'Warm coffee, a quiet morning, and nothing on fire yet.';
@@ -306,7 +306,7 @@ export function mount(view, params) {
           {
             class: 'btn danger wide',
             onclick: async () => {
-              if (!confirm(`Delete voice "${v.id}"? This cannot be undone.`)) return;
+              if (!(await confirmModal(`Delete voice "${v.id}"? This cannot be undone.`))) return;
               try {
                 await del(`/v1/audio/voices/${encodeURIComponent(v.id)}`);
                 toast(`${v.id} deleted`);

@@ -250,3 +250,41 @@ export function onThemeChange(fn) {
   mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   return () => mo.disconnect();
 }
+
+/** Naru-style confirm modal, the replacement for `window.confirm()`: an
+ * opaque `--panel` card over a scrim with Cancel and a red action button.
+ * Enter confirms (unless Cancel has focus), Esc or a click on the scrim cancels. Resolves to a boolean. */
+export function confirmModal(message, action = 'Delete') {
+  return new Promise((resolve) => {
+    const prevFocus = document.activeElement;
+    const close = (ok) => {
+      document.removeEventListener('keydown', onKey, true);
+      backdrop.remove();
+      prevFocus?.focus?.();
+      resolve(ok);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') close(false);
+      // A held Enter (key-repeat from the button that opened us) never confirms.
+      else if (e.key === 'Enter') { if (!e.repeat) close(document.activeElement !== cancel); }
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const ok = el('button', { class: 'btn danger', type: 'button', onclick: () => close(true) }, [action]);
+    const cancel = el('button', { class: 'btn', type: 'button', onclick: () => close(false) }, ['Cancel']);
+    const backdrop = el(
+      'div',
+      { class: 'modal-backdrop', onclick: (e) => e.target === backdrop && close(false) },
+      [
+        el('div', { class: 'modal', role: 'alertdialog', 'aria-modal': 'true' }, [
+          el('p', {}, [message]),
+          el('div', { class: 'modal-actions' }, [cancel, ok]),
+        ]),
+      ],
+    );
+    document.addEventListener('keydown', onKey, true);
+    document.body.append(backdrop);
+    ok.focus();
+  });
+}

@@ -13,7 +13,7 @@
 // it now forwards to the studio.
 
 import { getJson, request, del, uploadClip } from './api.mjs';
-import { el, toast, playButton } from './ui.mjs';
+import { el, toast, playButton, confirmModal } from './ui.mjs';
 
 /** A sample's audio length: its kept segments when it has them (its `range` then only brackets them). */
 function sampleSecs(s) {
@@ -126,7 +126,7 @@ export function mount(view, params) {
   // ---- projects -------------------------------------------------------------
 
   async function deleteProjectFor(p) {
-    if (!confirm(`Delete the project "${p.name}"? The uploaded clip stays; its edits are lost.`)) return;
+    if (!(await confirmModal(`Delete the project "${p.name}"? The uploaded clip stays; its edits are lost.`))) return;
     try {
       await del(`/v1/audio/prep/clips/${encodeURIComponent(p.clip_id)}/project`);
       toast(`${p.name} deleted`);
@@ -253,7 +253,7 @@ export function mount(view, params) {
   }
 
   async function deleteSample(s) {
-    if (!confirm(`Delete sample "${s.name}"? This cannot be undone.`)) return;
+    if (!(await confirmModal(`Delete sample "${s.name}"? This cannot be undone.`))) return;
     try {
       await del(`/v1/audio/samples/${encodeURIComponent(s.id)}`);
       toast(`${s.name} deleted`);
