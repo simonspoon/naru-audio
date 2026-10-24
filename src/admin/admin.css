@@ -1175,3 +1175,15 @@ input[type='checkbox']:disabled, input[type='radio']:disabled { opacity: 0.5; cu
   word-break: break-word;
 }
 .design-warn { color: var(--amber); font-size: 13px; margin-top: 6px; }
+/* Design quick picks: each chip field folds to one line showing its pick. */
+.design-fold > summary { display: flex; align-items: baseline; gap: 10px; list-style: none; }
+.design-fold > summary::-webkit-details-marker { display: none; }
+.design-fold > summary::before { content: '▸'; color: var(--muted); }
+.design-fold[open] > summary::before { content: '▾'; }
+.design-fold > summary .lab { margin: 0; min-width: 80px; }
+.design-fold > .chip-row { padding: 2px 0 8px; }
+.design-fold > .design-hint { padding-bottom: 8px; }
+.design-pick { color: var(--muted); font-size: 13px; }
+.design-pick.on { color: var(--cyan); }
+/* Description + preview stay in view; scroll inside if taller than the screen. */
+.design-sticky { max-height: calc(100vh - var(--header-h) - 24px); overflow: auto; }

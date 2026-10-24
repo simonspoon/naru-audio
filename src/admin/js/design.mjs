@@ -33,6 +33,8 @@ export function mount(view, params) {
   let models = [];
   let selectedModel = params.model ?? null;
   let values = {};
+  const openFields = new Set(); // chip fields the user has unfolded
+  let notesOpen = false;
   let takes = []; // {blob, buffer}
   let pickedIndex = null;
 
@@ -63,19 +65,20 @@ export function mount(view, params) {
         el('div', { class: 'lab' }, ['Model']),
         modelBar,
         el('span', { style: 'color:var(--muted);font-size:13px' }, [' only models that can design']),
+        notesWrap,
       ]),
     ]),
     el('div', { class: 'step' }, [
       el('span', { class: 'num' }, ['2']),
-      el('div', { style: 'flex:1;display:grid;grid-template-columns:1fr 1.2fr;gap:14px' }, [
+      el('div', { style: 'flex:1;display:grid;grid-template-columns:1fr 1.2fr;gap:14px;align-items:start' }, [
         el('div', {}, [
           el('div', { class: 'lab' }, ['Starter themes · fill the whole form']),
           presetsWrap,
           el('div', { class: 'lab', style: 'margin-top:10px' }, ['Quick picks']),
           fieldsWrap,
         ]),
-        el('div', {}, [
-          notesWrap,
+        // Sticky so the description and preview stay in view while picking.
+        el('div', { class: 'side-sticky design-sticky' }, [
           el('div', { class: 'lab' }, ['Describe it · edit freely, form picks rewrite this']),
           descBox,
           el('div', { class: 'lab', style: 'margin-top:8px' }, ['Preview · exactly what is sent']),
@@ -171,17 +174,23 @@ export function mount(view, params) {
     warnBox.replaceChildren(...warnings.map((w) => el('div', {}, [`⚠ ${w}`])));
   }
 
+  // Tips and pitfalls fold away; the summary line and licence stay visible.
   function renderNotes() {
     const dm = currentModel();
     const list = (items) => el('ul', { class: 'design-list' }, items.map((t) => el('li', {}, [t])));
+    const tips = el('details', { class: 'fold', open: notesOpen }, [
+      el('summary', {}, ['Tips and pitfalls']),
+      list(dm.tips),
+      dm.pitfalls?.length ? el('div', { class: 'lab', style: 'margin-top:6px' }, ['Pitfalls']) : null,
+      dm.pitfalls?.length ? list(dm.pitfalls) : null,
+    ]);
+    tips.addEventListener('toggle', () => (notesOpen = tips.open));
     notesWrap.replaceChildren(
       el('div', { class: 'design-note' }, [
         el('b', {}, [dm.label]),
         ` ${dm.summary}`,
-        list(dm.tips),
-        dm.pitfalls?.length ? el('div', { class: 'lab', style: 'margin-top:6px' }, ['Pitfalls']) : null,
-        dm.pitfalls?.length ? list(dm.pitfalls) : null,
         dm.license ? el('div', { class: 'design-license' }, [`Licence: ${dm.license}`]) : null,
+        tips,
       ]),
     );
   }
@@ -236,20 +245,33 @@ export function mount(view, params) {
             },
           });
         } else {
-          control = el(
-            'div',
-            { class: 'chip-row wrap', style: 'margin:0;flex:1' },
-            f.options.map((opt) =>
-              el(
-                'span',
-                {
-                  class: `chip${values[f.key] === opt ? ' on' : ''}`,
-                  onclick: () => setValue(f.key, values[f.key] === opt ? null : opt),
-                },
-                [opt],
+          // Chip fields fold into one line showing the pick; open to change it.
+          const fold = el('details', { class: 'fold design-fold', open: openFields.has(f.key) }, [
+            el('summary', {}, [
+              el('span', { class: 'lab' }, [f.label]),
+              el('span', { class: `design-pick${values[f.key] ? ' on' : ''}` }, [values[f.key] || '—']),
+            ]),
+            el(
+              'div',
+              { class: 'chip-row wrap', style: 'margin:0' },
+              f.options.map((opt) =>
+                el(
+                  'span',
+                  {
+                    class: `chip${values[f.key] === opt ? ' on' : ''}`,
+                    onclick: () => setValue(f.key, values[f.key] === opt ? null : opt),
+                  },
+                  [opt],
+                ),
               ),
             ),
-          );
+            f.hint ? el('div', { class: 'design-hint' }, [f.hint]) : null,
+          ]);
+          fold.addEventListener('toggle', () => {
+            if (fold.open) openFields.add(f.key);
+            else openFields.delete(f.key);
+          });
+          return fold;
         }
         return el('div', { class: 'chip-row design-field' }, [
           el('span', { class: 'lab' }, [f.label]),
