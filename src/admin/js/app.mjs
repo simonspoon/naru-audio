@@ -10,6 +10,7 @@
 // next tab replaces it, so a module can clear its own timers/listeners.
 
 import { getJson } from './api.mjs';
+import { fmtBytes } from './ui.mjs';
 import * as overview from './overview.mjs';
 import * as models from './models.mjs';
 import * as voices from './voices.mjs';
@@ -71,7 +72,7 @@ async function pollTopbar() {
     const used = ps.reduce((sum, m) => sum + (m.resident_bytes ?? 0), 0);
     const budget = health.profile.budget_bytes;
     document.getElementById('mem-pill').textContent =
-      `Mem ${(used / 1e9).toFixed(1)} / ${(budget / 1e9).toFixed(0)} GB`;
+      `Mem ${fmtBytes(used)} / ${fmtBytes(budget)}`;
   } catch {
     const online = document.getElementById('online-pill');
     online.textContent = '● Offline';
