@@ -64,6 +64,7 @@ async function pollTopbar() {
     online.textContent = `● Online :${location.port || 80}`;
     online.classList.add('ok');
     online.classList.remove('bad');
+    document.getElementById('offline-banner').hidden = true;
     document.getElementById('brand-version').textContent = `v${health.version}`;
     document.getElementById('tts-pill').textContent = `TTS: ${health.tts.default}`;
     document.getElementById('stt-pill').textContent = `STT: ${health.stt.default}`;
@@ -76,7 +77,21 @@ async function pollTopbar() {
     online.textContent = '● Offline';
     online.classList.add('bad');
     online.classList.remove('ok');
+    document.getElementById('offline-banner').hidden = false;
   }
+}
+
+function initOfflineBanner() {
+  const retry = document.getElementById('offline-retry');
+  // Not `disabled` while busy: that would drop keyboard focus.
+  retry.addEventListener('click', async () => {
+    if (retry.dataset.busy) return;
+    retry.dataset.busy = '1';
+    retry.textContent = 'Retrying…';
+    await pollTopbar();
+    delete retry.dataset.busy;
+    retry.textContent = 'Retry now';
+  });
 }
 
 // The sidebar starts collapsed on narrow screens, as Naru's does on a phone.
@@ -144,5 +159,6 @@ applyTheme();
 window.addEventListener('hashchange', route);
 initTheme();
 initSidebar();
+initOfflineBanner();
 startPolling();
 route();

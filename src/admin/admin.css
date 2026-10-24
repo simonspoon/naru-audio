@@ -325,6 +325,25 @@ h1, h2, h3 {
 .pill.bad { color: var(--red); background: rgba(var(--red-rgb), 0.1); }
 .inp.theme-select { width: auto; padding: 2px 24px 2px 8px; font: 12.5px var(--font-mono); color: var(--text); }
 
+/* Shown under the header while /health fails; a semantic alert, so it keeps
+   a red border (style guide, Exceptions). */
+.offline-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 12px 24px 0;
+  border: 1px solid var(--red);
+  border-radius: var(--r-md);
+  padding: 10px 14px;
+  background: rgba(var(--red-rgb), 0.1);
+  box-shadow: 0 0 14px rgba(var(--red-rgb), 0.2);
+  color: var(--text);
+}
+.offline-banner[hidden] { display: none; }
+.offline-banner strong { color: var(--red); }
+.offline-banner .btn { flex: none; }
+
 /* Sidebar: Naru's docked nav — tinted cards with a straight left accent bar;
    the active one is brighter with a 3px bar (padding-left 1px less so the
    text stays put). Collapses to just the re-expand handle. */
