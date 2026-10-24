@@ -53,6 +53,9 @@ export function mount(view, params) {
   // tell it lost the race and skip applying its (now stale) result.
   let pickGen = 0;
   let pickedSampleId = null;
+  // True while POST /v1/audio/voices is in flight, so a double click
+  // can't create the voice twice.
+  let creating = false;
 
   const modelBar = el('div', { class: 'filt' });
   const sampleSelect = el('select', {
@@ -153,7 +156,7 @@ export function mount(view, params) {
 
   function updateCreate() {
     const reason = createBlocker();
-    createBtn.disabled = !!reason;
+    createBtn.disabled = creating || !!reason;
     createReason.textContent = reason;
   }
 
@@ -412,17 +415,23 @@ export function mount(view, params) {
   });
 
   createBtn.addEventListener('click', async () => {
-    if (createBlocker()) return;
+    if (creating || createBlocker()) return;
     const name = nameInput.value.trim();
     const form = new FormData();
     form.append('name', name);
     form.append('model', selectedModel);
     form.append('text', transcriptBox.value);
     form.append('file', trimmedWavBlob(), `${name}.wav`);
+    creating = true;
+    createBtn.textContent = 'Creating…';
+    updateCreate();
     try {
       await request('/v1/audio/voices', { method: 'POST', body: form });
       toast(`${name} created`);
     } catch {
+      creating = false;
+      createBtn.textContent = 'Create voice';
+      updateCreate();
       return;
     }
     location.hash = `#voices?model=${selectedModel}`;
