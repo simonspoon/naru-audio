@@ -459,7 +459,7 @@ export function mount(view, params) {
     const url = URL.createObjectURL(blob);
     waveWrap.replaceChildren(playButton(() => url), waveformSvg(peaks(decoded.samples)));
     downloadLink.href = url;
-    downloadLink.download = `speech.${format === 'pcm' ? 'wav' : format}`;
+    downloadLink.download = 'speech.wav'; // blob is always encodeWav output
     downloadLink.style.display = '';
     new Audio(url).play().catch(() => {});
     addTake(url, body, model.id, voice);
@@ -472,7 +472,7 @@ export function mount(view, params) {
     const text = (body.input ?? '').replace(/\s+/g, ' ').trim();
     takes.unshift({
       url,
-      ext: body.response_format === 'pcm' ? 'wav' : body.response_format,
+      ext: 'wav',
       snippet: text.length > 48 ? `${text.slice(0, 48)}…` : text,
       model: modelId,
       voice,
