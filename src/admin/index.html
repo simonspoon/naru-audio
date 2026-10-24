@@ -8,23 +8,28 @@
 </head>
 <body>
 <div id="app">
-  <div class="top" id="topbar">
-    <span class="logo">NARU·AUDIO</span>
-    <span class="pill" id="online-pill">connecting…</span>
-    <span class="pill" id="tts-pill"></span>
-    <span class="pill" id="stt-pill"></span>
-    <span class="pill" id="mem-pill"></span>
+  <header class="app-header" id="topbar">
+    <span class="brand">NARU·AUDIO</span>
+    <div class="header-right">
+      <span class="pill" id="online-pill">connecting…</span>
+      <span class="pill" id="tts-pill"></span>
+      <span class="pill" id="stt-pill"></span>
+      <span class="pill" id="mem-pill"></span>
+    </div>
+  </header>
+  <div class="shell-body">
+    <nav class="sidebar" id="sidebar">
+      <button type="button" class="sidebar-toggle" id="sidebar-toggle" aria-label="Collapse navigation" title="Collapse navigation">«</button>
+      <a class="nav-item" href="#overview" data-tab="overview">Overview</a>
+      <a class="nav-item" href="#models" data-tab="models">Models</a>
+      <a class="nav-item" href="#voices" data-tab="voices">Voices</a>
+      <a class="nav-item" href="#clone" data-tab="clone">Clone</a>
+      <a class="nav-item" href="#design" data-tab="design">Design</a>
+      <a class="nav-item" href="#playground" data-tab="playground">Playground</a>
+      <a class="nav-item" href="#samples" data-tab="samples">Samples</a>
+    </nav>
+    <main id="view"></main>
   </div>
-  <nav class="tabs" id="tabs">
-    <a href="#overview" data-tab="overview">Overview</a>
-    <a href="#models" data-tab="models">Models</a>
-    <a href="#voices" data-tab="voices">Voices</a>
-    <a href="#clone" data-tab="clone">Clone</a>
-    <a href="#design" data-tab="design">Design</a>
-    <a href="#playground" data-tab="playground">Playground</a>
-    <a href="#samples" data-tab="samples">Samples</a>
-  </nav>
-  <main id="view"></main>
 </div>
 <div id="toasts"></div>
 <script type="module" src="/admin/js/app.mjs"></script>

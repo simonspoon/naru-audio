@@ -1,6 +1,6 @@
-// Admin shell: top bar (status/defaults/memory, polled), tab nav, and hash
-// routing (`#tab` or `#tab?key=value&...`). Each tab is a module exported
-// from `./<tab>.mjs` with the shape:
+// Admin shell: header (status/defaults/memory, polled), collapsible sidebar
+// nav, and hash routing (`#tab` or `#tab?key=value&...`). Each tab is a
+// module exported from `./<tab>.mjs` with the shape:
 //
 //   export function mount(view, params) { ...; return () => {/* cleanup */}; }
 //
@@ -37,7 +37,7 @@ function parseHash() {
 }
 
 function renderTabs(active) {
-  for (const a of document.querySelectorAll('#tabs a')) {
+  for (const a of document.querySelectorAll('#sidebar a')) {
     a.classList.toggle('on', a.dataset.tab === active);
   }
 }
@@ -75,6 +75,20 @@ async function pollTopbar() {
   }
 }
 
+// The sidebar starts collapsed on narrow screens, as Naru's does on a phone.
+function initSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  const toggle = document.getElementById('sidebar-toggle');
+  const setCollapsed = (collapsed) => {
+    sidebar.classList.toggle('collapsed', collapsed);
+    toggle.textContent = collapsed ? '»' : '«';
+    toggle.title = collapsed ? 'Expand navigation' : 'Collapse navigation';
+    toggle.setAttribute('aria-label', toggle.title);
+  };
+  setCollapsed(matchMedia('(max-width: 820px)').matches);
+  toggle.addEventListener('click', () => setCollapsed(!sidebar.classList.contains('collapsed')));
+}
+
 function startPolling() {
   pollTopbar();
   pollTimer = setInterval(pollTopbar, POLL_MS);
@@ -84,5 +98,6 @@ function startPolling() {
 // `DOMContentLoaded` has already fired — waiting for that event here would
 // never run. Start directly.
 window.addEventListener('hashchange', route);
+initSidebar();
 startPolling();
 route();
