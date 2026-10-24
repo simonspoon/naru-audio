@@ -13,7 +13,7 @@
 // it now forwards to the studio.
 
 import { getJson, request, del, uploadClip } from './api.mjs';
-import { el, toast, playButton, confirmModal } from './ui.mjs';
+import { el, toast, picker, playButton, confirmModal } from './ui.mjs';
 
 /** A sample's audio length: its kept segments when it has them (its `range` then only brackets them). */
 function sampleSecs(s) {
@@ -43,6 +43,8 @@ export function mount(view, params) {
   let selectedId = params.sample ?? null;
   let renameValue = '';
   let uploading = false;
+  let query = '';
+  let sortKey = 'newest';
   // The clone tab's model, handed on to the studio.
   const cloneModel = params.model ?? null;
 
@@ -163,27 +165,89 @@ export function mount(view, params) {
     return s.engines?.length ? '✓ cleaned' : 'raw, not cleaned yet';
   }
 
+  /** "Oct 23, 12:37 PM", or '' when the timestamp is missing or unparsable. */
+  function fmtCreated(iso) {
+    const d = iso ? new Date(iso) : null;
+    if (!d || Number.isNaN(d.getTime())) return '';
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
+  function metaOf(s) {
+    const source = s.original_filename || (s.speaker != null ? `speaker ${s.speaker}` : '');
+    return [fmtMmSs(sampleSecs(s)), fmtCreated(s.created_at), source].filter(Boolean).join(' · ');
+  }
+
   function libraryRow(s) {
     return el(
       'div',
       { class: `row${s.id === selectedId ? ' sel' : ''}`, style: 'cursor:pointer', onclick: () => selectSample(s.id) },
       [
-        el('b', {}, [s.name]),
-        el('span', { style: 'color:var(--muted);width:50px;text-align:right' }, [
-          fmtMmSs(sampleSecs(s)),
+        // Name with the meta line stacked beneath; `.row b`'s flex:1 is inert
+        // inside this plain block column.
+        el('div', { style: 'flex:1;min-width:0' }, [
+          el('b', {}, [s.name]),
+          el('span', { title: metaOf(s), style: 'display:block;color:var(--muted);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, [
+            metaOf(s),
+          ]),
         ]),
-        el('span', { style: `color:${s.engines?.length ? 'var(--green)' : 'var(--amber)'};font-size:13px` }, [
+        el('span', { style: `color:${s.engines?.length ? 'var(--green)' : 'var(--amber)'};font-size:13px;flex:none;white-space:nowrap` }, [
           statusOf(s),
         ]),
       ],
     );
   }
 
+  const SORTS = {
+    newest: (a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''),
+    oldest: (a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''),
+    name: (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }),
+    length: (a, b) => (sampleSecs(b) ?? -1) - (sampleSecs(a) ?? -1),
+  };
+
+  // The search box and sort dropdown live outside the rebuilt rows, so typing
+  // never replaces the focused input.
+  const search = el('input', {
+    class: 'inp',
+    type: 'search',
+    placeholder: 'Search samples',
+    oninput: (e) => {
+      query = e.target.value.trim().toLowerCase();
+      renderList();
+    },
+  });
+  const sortSelect = picker(
+    [
+      { id: 'newest', label: 'Newest first' },
+      { id: 'oldest', label: 'Oldest first' },
+      { id: 'name', label: 'Name A–Z' },
+      { id: 'length', label: 'Length' },
+    ],
+    sortKey,
+    (v) => {
+      sortKey = v;
+      renderList();
+    },
+    'inp',
+  );
+  sortSelect.style.width = 'auto';
+  const listRows = el('div');
+  setChildren(listCard, [
+    el('h3', {}, ['Samples']),
+    el('div', { class: 'row' }, [search, sortSelect]),
+    listRows,
+  ]);
+
   function renderList() {
-    setChildren(listCard, [
-      el('h3', {}, ['Samples']),
-      ...samples.map(libraryRow),
-      samples.length ? null : el('div', { class: 'placeholder' }, ['No samples yet. Drop a voice file above to start one.']),
+    const shown = samples
+      .filter((s) => !query || s.name.toLowerCase().includes(query) || (s.original_filename ?? '').toLowerCase().includes(query))
+      .sort(SORTS[sortKey]);
+    setChildren(listRows, [
+      ...shown.map(libraryRow),
+      samples.length
+        ? shown.length
+          ? null
+          : el('div', { class: 'placeholder' }, ['No samples match'])
+        : el('div', { class: 'placeholder' }, ['No samples yet. Drop a voice file above to start one.']),
     ]);
   }
 
