@@ -5,7 +5,7 @@
 // API subtask). Built-in voices with no cached preview show a dashed
 // placeholder and a "generate preview" action; we never auto-generate one.
 
-import { getJson, postJson, streamNdjson } from './api.mjs';
+import { getJson, postJson, putJson, streamNdjson } from './api.mjs';
 import { el, toast, playButton, waveformSvg, peaks, decodeWav, fmtBytes } from './ui.mjs';
 
 export function mount(view) {
@@ -120,7 +120,11 @@ export function mount(view) {
     refresh();
   }
 
+  // Bumped per render so an overlapping refresh (e.g. set-default while the
+  // grid is still fetching samples) drops the stale run instead of appending.
+  let voicesGen = 0;
   async function renderVoices(ttsDefault) {
+    const gen = ++voicesGen;
     voicesGrid.replaceChildren();
     if (!ttsDefault) {
       voicesTitle.textContent = 'Voices';
@@ -136,18 +140,49 @@ export function mount(view) {
     } catch {
       voices = [];
     }
+    if (gen !== voicesGen) return;
     for (const v of voices) {
-      voicesGrid.append(await voiceCard(ttsDefault.id, v));
+      const card = await voiceCard(ttsDefault.id, v);
+      if (gen !== voicesGen) return;
+      voicesGrid.append(card);
     }
     voicesGrid.append(addCard(ttsDefault.id));
   }
 
   async function voiceCard(model, voice) {
     const kindLabel = voice.origin ?? (voice.cloned ? 'clone' : 'built-in');
-    const card = el('div', { class: 'vc' }, [
+    const card = el('div', { class: voice.default ? 'vc default' : 'vc' }, [
       voice.id,
+      voice.default ? el('span', { class: 'star', title: 'Default voice' }, [' ★']) : null,
       el('small', {}, [kindLabel]),
     ]);
+    // Non-default cards get a set-default action, shown on hover/focus.
+    if (!voice.default) {
+      card.append(
+        el(
+          'button',
+          {
+            class: 'btn set-default',
+            type: 'button',
+            title: 'Set as default voice',
+            onclick: async (e) => {
+              e.stopPropagation();
+              const btn = e.currentTarget;
+              btn.disabled = true;
+              try {
+                await putJson('/api/defaults', { voices: { [model]: voice.id } });
+                toast(`${voice.id} is now default for ${model}`);
+              } catch {
+                btn.disabled = false;
+                return;
+              }
+              refresh();
+            },
+          },
+          ['★ Set default'],
+        ),
+      );
+    }
     const sampleUrl = `/api/voices/${encodeURIComponent(model)}/${encodeURIComponent(voice.id)}/sample`;
     let objectUrl = null;
     const play = playButton(async () => {

@@ -503,6 +503,28 @@ h1, h2, h3 {
   justify-content: center;
   font-size: 11px;
 }
+/* Default voice card: amber edge + star; others reveal set-default on hover. */
+.vc.default { border-color: rgba(var(--amber-rgb), 0.45); }
+.btn.set-default {
+  position: absolute;
+  top: 8px;
+  right: 40px;
+  padding: 0 0.5rem;
+  height: 26px;
+  font-size: 0.75rem;
+  color: var(--amber);
+  background: rgba(var(--amber-rgb), 0.1);
+  transition: opacity 0.15s, box-shadow 0.15s, background 0.15s;
+}
+/* Hidden until hover only where hover exists; touch always shows it. */
+@media (hover: hover) {
+  .btn.set-default { opacity: 0; }
+  .vc:hover .btn.set-default, .btn.set-default:focus-visible { opacity: 1; }
+}
+.btn.set-default:hover:not(:disabled) {
+  background: rgba(var(--amber-rgb), 0.18);
+  box-shadow: 0 0 12px rgba(var(--amber-rgb), 0.25);
+}
 .wave-placeholder {
   height: 14px;
   background: repeating-linear-gradient(90deg, var(--violet) 0 2px, transparent 2px 5px);
