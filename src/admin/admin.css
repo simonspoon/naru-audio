@@ -899,6 +899,8 @@ input[type='checkbox']:disabled, input[type='radio']:disabled { opacity: 0.5; cu
   color: var(--text-h);
 }
 .live span { color: var(--muted); }
+/* Shortcut hint beside a primary button (Playground Speak). */
+.kbd-hint { font: 12px var(--font-mono); color: var(--muted); }
 
 /* Sample Studio (naru task 1571; mockup: sample-studio) */
 .studio-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }

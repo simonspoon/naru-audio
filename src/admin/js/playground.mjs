@@ -18,6 +18,8 @@ import { getJson, request } from './api.mjs';
 import { el, toast, picker, decodeWav, encodeWav, waveformSvg, peaks, playButton } from './ui.mjs';
 
 const TEST_LINE = 'Listen. The build finished at fourteen thirty and nothing broke.';
+const MAX_TAKES = 10;
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform ?? '');
 const DEFAULT_SPEED = { name: 'speed', default: 1, min: 0.5, max: 2, step: 0.1 };
 
 function concatBytes(chunks) {
@@ -69,6 +71,8 @@ export function mount(view, params) {
   let speakFormat = 'wav';
   let knobValues = {}; // name -> current value, only for touched/rendered knobs
   let lastBlob = null;
+  let takes = []; // newest first; in-memory only, blob URLs revoked on eviction
+  let takeAudio = null;
 
   let sttModel = null;
   let ws = null;
@@ -82,6 +86,8 @@ export function mount(view, params) {
   // --- Speak panel -------------------------------------------------------
 
   const speakModelBar = el('div', { class: 'filt' });
+  let speakModelSelect = null;
+  let speakModelKey = '';
   const instructWrap = el('div', {});
   const prefixWrap = el('div', {});
   const textBox = el('textarea', { class: 'inp', rows: 3, value: TEST_LINE });
@@ -90,11 +96,16 @@ export function mount(view, params) {
   const formatPickerWrap = el('div', {});
   const speedWrap = el('div', {});
   const knobsWrap = el('div', {});
-  const speakBtn = el('button', { class: 'btn primary', style: 'margin-left:auto' }, ['▶ Speak']);
+  const speakBtn = el('button', { class: 'btn primary' }, ['▶ Speak']);
+  const speakHint = el('span', { class: 'kbd-hint', title: 'Shortcut: press in the text box' }, [
+    IS_MAC ? '⌘↵' : 'Ctrl+↵',
+  ]);
   const waveWrap = el('div', { style: 'margin-top:10px' });
   const statRow = el('div', { class: 'stat' });
   const downloadLink = el('a', { class: 'btn', style: 'display:none' }, ['⇩ Download']);
-  const curlBox = el('div', { class: 'code' });
+  // Hidden until the first Speak fills it: empty, it rendered as a blank box.
+  const curlBox = el('div', { class: 'code', style: 'display:none' });
+  const takesWrap = el('div', {});
   const copyCurlBtn = el('span', { class: 'btn', style: 'margin-left:auto' }, ['⧉ Copy']);
 
   const speakCard = el('div', { class: 'card' }, [
@@ -110,13 +121,14 @@ export function mount(view, params) {
       voicePickerWrap,
       speedWrap,
       formatPickerWrap,
-      speakBtn,
+      el('div', { style: 'margin-left:auto;display:flex;gap:8px;align-items:center' }, [speakHint, speakBtn]),
     ]),
     knobsWrap,
     waveWrap,
     statRow,
     el('div', { style: 'display:flex;gap:8px;align-items:center' }, [downloadLink]),
     el('div', { style: 'display:flex' }, [curlBox]),
+    takesWrap,
   ]);
 
   // --- Listen panel --------------------------------------------------------
@@ -159,23 +171,32 @@ export function mount(view, params) {
     return declaredKnobs(model).find((k) => k.name === 'speed') ?? null;
   }
 
+  // The select is built once per model list (rebuilding would close an open
+  // dropdown); a selection change only moves its value.
   function renderSpeakModelBar() {
-    speakModelBar.replaceChildren(
-      ...ttsModels.map((m) =>
-        el(
-          'span',
-          {
-            class: `chip${m.id === speakModel ? ' on' : ''}`,
-            onclick: () => {
-              speakModel = m.id;
-              speakVoice = null;
-              onSpeakModelChanged();
-            },
-          },
-          [m.id],
-        ),
-      ),
-    );
+    const key = ttsModels.map((m) => m.id).join('\n');
+    if (!speakModelSelect || key !== speakModelKey) {
+      speakModelKey = key;
+      speakModelSelect = picker(
+        ttsModels.map((m) => ({ id: m.id })),
+        speakModel,
+        (id) => {
+          speakModel = id;
+          speakVoice = null;
+          onSpeakModelChanged();
+        },
+        'inp',
+      );
+      speakModelSelect.style.width = 'auto';
+      speakModelBar.replaceChildren(speakModelSelect);
+    }
+    // Runs first in onSpeakModelChanged, so the instructions/knobs/voices that
+    // follow all read the corrected model.
+    if (!ttsModels.some((m) => m.id === speakModel)) {
+      speakModel = ttsModels[0]?.id ?? null;
+      speakVoice = null;
+    }
+    if (speakModel) speakModelSelect.value = speakModel;
   }
 
   function renderInstructions() {
@@ -401,6 +422,7 @@ export function mount(view, params) {
     const knobs = overrides.knobs ?? currentKnobs(model);
     if (Object.keys(knobs).length) body.knobs = knobs;
 
+    curlBox.style.display = '';
     curlBox.replaceChildren(el('i', {}, ['curl']), ` ${buildCurl(body).replace(/^curl /, '')}`, copyCurlBtn);
 
     const started = performance.now();
@@ -424,6 +446,7 @@ export function mount(view, params) {
       chunks.push(value);
     }
     const totalMs = performance.now() - started;
+    if (disposed) return null;
     const bytes = concatBytes(chunks);
     const decoded =
       format === 'pcm'
@@ -439,10 +462,64 @@ export function mount(view, params) {
     downloadLink.download = `speech.${format === 'pcm' ? 'wav' : format}`;
     downloadLink.style.display = '';
     new Audio(url).play().catch(() => {});
+    addTake(url, body, model.id, voice);
     return { firstAudioMs, totalMs, durationSec, blob };
   }
 
+  // --- Speak: recent takes (this page session only, never persisted) ------
+
+  function addTake(url, body, modelId, voice) {
+    const text = (body.input ?? '').replace(/\s+/g, ' ').trim();
+    takes.unshift({
+      url,
+      ext: body.response_format === 'pcm' ? 'wav' : body.response_format,
+      snippet: text.length > 48 ? `${text.slice(0, 48)}…` : text,
+      model: modelId,
+      voice,
+    });
+    for (const old of takes.splice(MAX_TAKES)) URL.revokeObjectURL(old.url);
+    renderTakes();
+  }
+
+  function renderTakes() {
+    if (!takes.length) {
+      takesWrap.replaceChildren();
+      return;
+    }
+    takesWrap.replaceChildren(
+      el('div', { class: 'lab', style: 'margin-top:12px' }, ['Recent takes · this page only']),
+      ...takes.map((t) =>
+        el('div', { class: 'row' }, [
+          el('b', { title: t.snippet }, [t.snippet || '(empty)']),
+          el('span', { style: 'color:var(--muted);font-size:13px' }, [
+            t.voice ? `${t.model} · ${t.voice}` : t.model,
+          ]),
+          el(
+            'button',
+            {
+              class: 'btn',
+              title: 'Replay',
+              onclick: () => {
+                takeAudio?.pause();
+                takeAudio = new Audio(t.url);
+                takeAudio.play().catch(() => {});
+              },
+            },
+            ['▶'],
+          ),
+          el('a', { class: 'btn', href: t.url, download: `speech.${t.ext}`, title: 'Download' }, ['⇩']),
+        ]),
+      ),
+    );
+  }
+
   speakBtn.addEventListener('click', () => doSpeak());
+  textBox.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.repeat) {
+      e.preventDefault();
+      doSpeak();
+    }
+  });
   copyCurlBtn.addEventListener('click', () => {
     navigator.clipboard?.writeText(curlBox.textContent.replace(/⧉ copy$/, '').trim());
     toast('curl command copied');
@@ -673,6 +750,9 @@ export function mount(view, params) {
   refresh();
   return () => {
     disposed = true;
+    takeAudio?.pause();
+    for (const t of takes) URL.revokeObjectURL(t.url);
+    takes = [];
     stopRecording();
     if (window.naruAdmin) delete window.naruAdmin.playground;
   };
