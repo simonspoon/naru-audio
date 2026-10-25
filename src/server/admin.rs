@@ -76,6 +76,11 @@ const ASSETS: &[Asset] = &[
         bytes: include_bytes!("../admin/js/ui.mjs"),
     },
     Asset {
+        path: "js/theme-init.js",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../admin/js/theme-init.js"),
+    },
+    Asset {
         path: "js/app.mjs",
         content_type: "text/javascript; charset=utf-8",
         bytes: include_bytes!("../admin/js/app.mjs"),
