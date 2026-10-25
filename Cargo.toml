@@ -36,6 +36,14 @@ ureq = "3"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Smart Turn end-of-turn model (src/turn.rs). ort-sys links nothing itself
+# (`disable-linking`): the ONNX Runtime that sherpa-onnx-sys already links
+# statically serves both, so no ORT_LIB_LOCATION and no second copy.
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-24"] }
+ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["disable-linking"] }
+realfft = "3"
+
 # Replaces macOS `afconvert` where it does not exist (src/transcode.rs).
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "alac", "flac", "aiff", "caf", "wav", "pcm"] }

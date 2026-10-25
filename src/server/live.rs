@@ -48,6 +48,7 @@ use crate::live_mode::{LiveState, Mode, SegmentFate};
 use crate::registry::manifest::Kind;
 use crate::speaker::{self, DEFAULT_MODEL, DEFAULT_THRESHOLD, Identity, Library, SpeakerVerifier};
 use crate::stt::vad::Vad;
+use crate::turn;
 
 /// Typed binary frames: the first byte.
 const FRAME_MIC: u8 = 0x00;
@@ -1053,7 +1054,13 @@ async fn drive(
     {
         let (events, backlog, busy) = (event_tx.clone(), backlog.clone(), busy.clone());
         let segments = Segments::new(&cfg, job_tx, events, backlog, busy);
-        tokio::task::spawn_blocking(move || segment(vad, segments, input_rx));
+        let (log, dir) = (st.log.clone(), st.registry.model_dir(turn::DEFAULT_MODEL));
+        // Loaded on this thread, once per process, so a first session's
+        // audio waits in the channel rather than blocking the socket.
+        tokio::task::spawn_blocking(move || {
+            let segments = segments.with_turn(turn::shared(&dir), log);
+            segment(vad, segments, input_rx)
+        });
     }
     {
         let (vad, backlog) = (cfg.vad.clone(), backlog.clone());

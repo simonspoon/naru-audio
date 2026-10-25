@@ -1,0 +1,21 @@
+# Pipecat Smart Turn v3.2 (BSD-2-Clause, Daily; huggingface.co/pipecat-ai/
+# smart-turn-v3), a Whisper-Tiny encoder that reads the last 8 s of a
+# person's audio and says whether the turn is finished. The live-mode
+# segmenter holds a segment it calls unfinished (naru task 2355). The fp32
+# "gpu" file, which runs on CPU: the int8 "cpu" file is numerically unstable.
+# Optional: without it the segmenter queues every closed span at once.
+
+[model]
+name        = "smart-turn-v3.2"
+kind        = "turn"
+backend     = "onnxruntime"
+platforms   = ["macos-arm64", "macos-x86_64"]
+languages   = ["en"]
+license     = "BSD-2-Clause"
+license_url = "https://opensource.org/license/bsd-2-clause"
+
+[[file]]
+path   = "model.onnx"
+url    = "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-gpu.onnx"
+sha256 = "ab8dc64b88713f90b571c15b714bd1330e6c883cad8763dacf65c9376dc539be"
+size   = 32_411_198

@@ -183,6 +183,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
             "parakeet-tdt-0.6b-v2-int8",
             "pocket-tts-int8",
             "silero-vad",
+            "smart-turn-v3.2",
             "source-separation-spleeter-2stems-int8",
             "speaker-diarization-en",
             "speaker-diarization-reverb-titanet",
@@ -263,6 +264,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
             "speaker-diarization-en" | "speaker-diarization-reverb-titanet" => "diarization",
             "speech-denoiser-gtcrn" => "denoise",
             "campplus-sv-en" | "wespeaker-sv-en" => "speaker",
+            "smart-turn-v3.2" => "turn",
             _ => "stt",
         };
         assert_eq!(m["x_kind"], kind);
@@ -451,6 +453,7 @@ async fn unreadable_manifest_json_is_skipped() {
             "parakeet-tdt-0.6b-v2-int8",
             "pocket-tts-int8",
             "silero-vad",
+            "smart-turn-v3.2",
             "source-separation-spleeter-2stems-int8",
             "speaker-diarization-en",
             "speaker-diarization-reverb-titanet",

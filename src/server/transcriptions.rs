@@ -384,6 +384,7 @@ pub(super) fn not_kind(name: &str, kind: Kind) -> ApiError {
         Kind::Denoise => "speech denoising",
         Kind::Separation => "source separation",
         Kind::Speaker => "speaker verification",
+        Kind::Turn => "end-of-turn detection",
     };
     bad_request(
         "model",

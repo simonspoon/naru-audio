@@ -91,6 +91,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/silero-vad.toml"),
     ),
     (
+        "smart-turn-v3.2.toml",
+        include_str!("../../catalog/smart-turn-v3.2.toml"),
+    ),
+    (
         "speaker-diarization-en.toml",
         include_str!("../../catalog/speaker-diarization-en.toml"),
     ),
@@ -140,6 +144,9 @@ pub enum Kind {
     /// Speaker verification (naru task 2028): an embedding model whose
     /// vectors are compared against an enrolled voice.
     Speaker,
+    /// End-of-turn detection (naru task 2355): says whether a closed span
+    /// of speech is a finished turn.
+    Turn,
 }
 
 impl Kind {
@@ -152,6 +159,7 @@ impl Kind {
             Kind::Denoise => "denoise",
             Kind::Separation => "separation",
             Kind::Speaker => "speaker",
+            Kind::Turn => "turn",
         }
     }
 }
@@ -710,6 +718,7 @@ mod tests {
                 "qwen3-tts-1.7b-base-mlx",
                 "qwen3-tts-1.7b-voicedesign-mlx",
                 "silero-vad",
+                "smart-turn-v3.2",
                 "source-separation-spleeter-2stems-int8",
                 "speaker-diarization-en",
                 "speaker-diarization-reverb-titanet",

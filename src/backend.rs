@@ -25,6 +25,9 @@ fn available_on(backend: &str, apple_silicon: bool) -> Result<(), String> {
     match backend {
         // Compiled in on every platform.
         "sherpa-onnx" => Ok(()),
+        // The Smart Turn model (src/turn.rs): compiled in on macOS only.
+        "onnxruntime" if cfg!(target_os = "macos") => Ok(()),
+        "onnxruntime" => Err("requires macOS".to_string()),
         // Compiled in on aarch64-apple-darwin only.
         "mlx" if apple_silicon => Ok(()),
         "mlx" => Err("requires Apple Silicon".to_string()),

@@ -30,11 +30,13 @@ use tokio_tungstenite::tungstenite;
 use super::transcriptions::{decode_error, internal, join, stt_manifest};
 use super::{AppState, RequestId, manager_error};
 use crate::error::ApiError;
+use crate::log::Logger;
 use crate::manager::{Guard, KeepAlive};
 use crate::stt::audio::TARGET_SAMPLE_RATE;
 use crate::stt::hallucination;
 use crate::stt::vad::{MAX_SPEECH_SECONDS, Segmenter, Span, Vad};
 use crate::stt::{SttError, SttModel, VadConfig, Vocabulary};
+use crate::turn::{self, EndOfTurn};
 
 pub(super) const RATE: usize = TARGET_SAMPLE_RATE as usize;
 
@@ -74,6 +76,9 @@ const PARTIAL_EVERY: usize = 7 * RATE / 10;
 
 /// ...until its window is longer than this.
 const PARTIAL_MAX: usize = 8 * RATE;
+/// How long after a held span closed new speech may still join it; past
+/// this the span is queued as it was.
+const HOLD_CAP: usize = 2 * RATE;
 
 /// The first message: §2.4 "Handshake". Unknown fields are ignored.
 #[derive(Deserialize)]
@@ -697,6 +702,20 @@ pub(super) struct Segments {
     jobs: UnboundedSender<Job>,
     events: UnboundedSender<Event>,
     backlog: Arc<AtomicUsize>,
+    /// Smart Turn, with the log its decisions go to. `None`: every closed
+    /// span is queued at once (the `/stream` path, and a missing model).
+    turn: Option<(Arc<dyn EndOfTurn>, Arc<Logger>)>,
+    /// A closed span the detector called unfinished: not queued, waiting for
+    /// the speech that finishes it or for [`HOLD_CAP`].
+    pending: Option<Pending>,
+}
+
+/// A held span `start..end`, queued by `deadline` if no speech has joined it.
+#[derive(Clone, Copy)]
+struct Pending {
+    start: usize,
+    end: usize,
+    deadline: usize,
 }
 
 impl Segments {
@@ -723,7 +742,26 @@ impl Segments {
             jobs,
             events,
             backlog,
+            turn: None,
+            pending: None,
         }
+    }
+
+    /// Gates each natural close on `detector` (naru task 2355), logging its
+    /// decisions to `log`. `None` leaves the segmenter as it was.
+    pub(super) fn with_turn(
+        mut self,
+        detector: Option<Arc<dyn EndOfTurn>>,
+        log: Arc<Logger>,
+    ) -> Self {
+        self.turn = detector.map(|d| (d, log));
+        self
+    }
+
+    /// Where the segment the open span belongs to starts: a held span's
+    /// start, else the span's own.
+    fn turn_start(&self, open: usize) -> usize {
+        self.pending.map_or(open.max(self.floor), |p| p.start)
     }
 
     fn push(&mut self, segmenter: &mut Segmenter<'_>, samples: &[f32]) {
@@ -739,25 +777,39 @@ impl Segments {
                 self.open = Some(start);
                 self.speech(true, start);
             }
-            if let Some(open) = self.open {
-                let start = open.max(self.floor);
-                // Searched up to `max_segment` exactly, so no segment is longer.
-                let limit = start + self.max_segment;
-                if self.received >= limit {
-                    let from = limit - CUT_SEARCH;
-                    let cut = from + quietest(self.slice(from, limit));
-                    self.cut(cut);
-                }
-            }
+            self.enforce_limits();
             self.tick();
         }
         // Keep `pad` before the earliest start a span can still report:
         // the open one's, or one detected from the next window on.
         let anchor = self.open.map_or(self.received, |o| o.max(self.floor));
+        let anchor = self.pending.map_or(anchor, |p| anchor.min(p.start));
         let keep = anchor.saturating_sub(self.pad + self.min_speech + DETECT_LAG + VAD_WINDOW);
         if keep > self.ring_start {
             self.ring.drain(..keep - self.ring_start);
             self.ring_start = keep;
+        }
+    }
+
+    /// Cuts an open segment that has reached `max_segment`, and queues a
+    /// held span no speech joined in time (or whose turn is as long as a
+    /// segment may be).
+    fn enforce_limits(&mut self) {
+        if let Some(open) = self.open {
+            let start = self.turn_start(open);
+            // Searched up to `max_segment` exactly, so no segment is longer.
+            let limit = start + self.max_segment;
+            if self.received >= limit {
+                let from = limit - CUT_SEARCH;
+                let cut = from + quietest(self.slice(from, limit));
+                self.cut(cut);
+            }
+        }
+        if self.open.is_none()
+            && let Some(p) = self.pending
+            && (self.received >= p.deadline || self.received >= p.start + self.max_segment)
+        {
+            self.release("cap-release");
         }
     }
 
@@ -776,15 +828,68 @@ impl Segments {
             self.floor = self.floor.max(end);
             return;
         }
-        self.queue(start, end, end + self.pad);
+        // Speech that follows a held span finishes the same turn.
+        let start = self.pending.take().map_or(start, |p| p.start);
+        if self.finished(start, end) {
+            self.queue(start, end, end + self.pad);
+        }
     }
 
-    /// Ends the open segment at `at`; Silero's span goes on, and whatever
-    /// of it follows `at` is the next segment.
+    /// Whether the turn `start..end`, closed at `received`, is finished. When
+    /// not, it is held. The detector is asked about the last 8 s of audio up
+    /// to `received`, its trailing silence included; no answer is a yes.
+    fn finished(&mut self, start: usize, end: usize) -> bool {
+        let Some((detector, log)) = self.turn.clone() else {
+            return true;
+        };
+        let from = self
+            .received
+            .saturating_sub(turn::WINDOW)
+            .max(self.ring_start)
+            .max(self.floor);
+        let began = Instant::now();
+        let p = detector.complete(self.slice(from, self.received));
+        let ms = began.elapsed().as_millis();
+        let (decision, finished) = match p {
+            Some(p) if p < turn::THRESHOLD => ("hold", false),
+            Some(_) => ("final", true),
+            None => ("error", true),
+        };
+        let p = p.map_or("-".to_string(), |p| format!("{p:.3}"));
+        log.info(
+            None,
+            &format!("live_turn p={p} decision={decision} ms={ms}"),
+        );
+        if !finished {
+            self.pending = Some(Pending {
+                start,
+                end,
+                deadline: self.received + HOLD_CAP,
+            });
+        }
+        finished
+    }
+
+    /// Queues the held span as it was, for `decision`.
+    fn release(&mut self, decision: &str) {
+        let Some(p) = self.pending.take() else { return };
+        if let Some((_, log)) = &self.turn {
+            log.info(None, &format!("live_turn decision={decision}"));
+        }
+        self.queue(p.start, p.end, p.end + self.pad);
+    }
+
+    /// Ends the open segment at `at`, held span included; Silero's span goes
+    /// on, and whatever of it follows `at` is the next segment. With no open
+    /// segment, a held span is queued.
     fn cut(&mut self, at: usize) {
-        let Some(open) = self.open else { return };
-        let start = open.max(self.floor);
+        let Some(open) = self.open else {
+            self.release("flush-release");
+            return;
+        };
+        let start = self.turn_start(open);
         if at > start {
+            self.pending = None;
             self.queue(start, at, at);
             // The next segment's partials count from its own start.
             self.partial_at = 0;
@@ -820,7 +925,7 @@ impl Segments {
         let Some(open) = self.open.filter(|_| self.partials) else {
             return;
         };
-        let start = open.max(self.floor);
+        let start = self.turn_start(open);
         let from = start
             .saturating_sub(self.pad)
             .max(self.floor)
@@ -1257,5 +1362,161 @@ mod tests {
         jobs.send(Job::Stop).unwrap();
         assert_eq!(next(&mut events), ("final".into(), 0, "word".into()));
         assert_eq!(next(&mut events).0, "done");
+    }
+
+    /// A detector that answers from `answers`, then "finished".
+    struct FakeTurn(std::sync::Mutex<VecDeque<Option<f32>>>);
+
+    impl EndOfTurn for FakeTurn {
+        fn complete(&self, _pcm: &[f32]) -> Option<f32> {
+            self.0.lock().unwrap().pop_front().unwrap_or(Some(1.0))
+        }
+    }
+
+    /// Segments over silence with no segment open, gated by a detector
+    /// that answers `answers`; `None` for no detector.
+    fn gated(answers: Option<&[Option<f32>]>) -> (Segments, UnboundedReceiver<Job>) {
+        let start: Start = serde_json::from_value(json!({"sample_rate": 16000})).unwrap();
+        let Ok(cfg) = validate(start, "m") else {
+            panic!("a valid start")
+        };
+        let (jobs, rx) = unbounded_channel();
+        let segments = Segments::new(
+            &cfg,
+            jobs,
+            unbounded_channel().0,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let detector = answers.map(|a| {
+            Arc::new(FakeTurn(std::sync::Mutex::new(a.iter().copied().collect())))
+                as Arc<dyn EndOfTurn>
+        });
+        (segments.with_turn(detector, Arc::new(Logger::stderr())), rx)
+    }
+
+    /// Silence up to sample `to`, then the checks `push` makes.
+    fn advance(segments: &mut Segments, to: usize) {
+        segments
+            .ring
+            .extend(std::iter::repeat_n(0.0, to - segments.received));
+        segments.received = to;
+        segments.enforce_limits();
+    }
+
+    /// The queued decode's `(start, end)` in seconds; panics on anything else.
+    fn decoded(jobs: &mut UnboundedReceiver<Job>) -> Option<(f64, f64)> {
+        match jobs.try_recv() {
+            Ok(Job::Decode { start, end, .. }) => Some((start, end)),
+            Ok(_) => panic!("only decodes are queued"),
+            Err(_) => None,
+        }
+    }
+
+    /// Speech 1.0..2.0 s that closed 0.5 s later.
+    fn close_first(segments: &mut Segments) {
+        advance(segments, 40_000);
+        segments.close(Span {
+            start: RATE,
+            len: RATE,
+        });
+    }
+
+    #[test]
+    fn a_finished_turn_is_queued_when_it_closes() {
+        let (mut s, mut jobs) = gated(Some(&[Some(0.9)]));
+        close_first(&mut s);
+        assert_eq!(decoded(&mut jobs), Some((1.0, 2.0)));
+        assert!(s.pending.is_none());
+    }
+
+    #[test]
+    fn an_unfinished_turn_is_held_then_merged_with_the_speech_that_follows() {
+        let (mut s, mut jobs) = gated(Some(&[Some(0.2), Some(0.9)]));
+        close_first(&mut s);
+        assert_eq!(decoded(&mut jobs), None);
+        // New speech opens inside the cap and outlives it.
+        advance(&mut s, 50_000);
+        s.open = Some(48_000);
+        advance(&mut s, 75_000);
+        assert_eq!(decoded(&mut jobs), None);
+        s.close(Span {
+            start: 48_000,
+            len: 24_000,
+        });
+        // One job, from the held start to the new end.
+        assert_eq!(decoded(&mut jobs), Some((1.0, 4.5)));
+        assert_eq!(decoded(&mut jobs), None);
+        assert!(s.pending.is_none());
+    }
+
+    #[test]
+    fn a_merged_turn_that_is_unfinished_again_is_held_from_the_first_start() {
+        let (mut s, mut jobs) = gated(Some(&[Some(0.2), Some(0.3), Some(0.9)]));
+        close_first(&mut s);
+        advance(&mut s, 50_000);
+        s.open = Some(48_000);
+        advance(&mut s, 60_000);
+        s.close(Span {
+            start: 48_000,
+            len: 8_000,
+        });
+        assert_eq!(decoded(&mut jobs), None);
+        let held = s.pending.expect("held again");
+        assert_eq!((held.start, held.end), (RATE, 56_000));
+        assert_eq!(held.deadline, 60_000 + HOLD_CAP);
+    }
+
+    #[test]
+    fn an_unfinished_turn_is_queued_when_the_cap_runs_out() {
+        let (mut s, mut jobs) = gated(Some(&[Some(0.2)]));
+        close_first(&mut s);
+        advance(&mut s, 40_000 + HOLD_CAP - 1);
+        assert_eq!(decoded(&mut jobs), None);
+        advance(&mut s, 40_000 + HOLD_CAP);
+        assert_eq!(decoded(&mut jobs), Some((1.0, 2.0)));
+        assert!(s.pending.is_none());
+    }
+
+    #[test]
+    fn flush_and_stop_queue_a_held_turn_at_once() {
+        let (mut s, mut jobs) = gated(Some(&[Some(0.2)]));
+        close_first(&mut s);
+        s.cut(s.received);
+        assert_eq!(decoded(&mut jobs), Some((1.0, 2.0)));
+        // Speech joined it and is still open: the cut takes both.
+        let (mut s, mut jobs) = gated(Some(&[Some(0.2)]));
+        close_first(&mut s);
+        advance(&mut s, 60_000);
+        s.open = Some(48_000);
+        s.cut(s.received);
+        assert_eq!(decoded(&mut jobs), Some((1.0, 3.75)));
+        assert!(s.pending.is_none());
+    }
+
+    #[test]
+    fn no_answer_or_no_detector_queues_at_once() {
+        let (mut s, mut jobs) = gated(Some(&[None]));
+        close_first(&mut s);
+        assert_eq!(decoded(&mut jobs), Some((1.0, 2.0)));
+        let (mut s, mut jobs) = gated(None);
+        close_first(&mut s);
+        assert_eq!(decoded(&mut jobs), Some((1.0, 2.0)));
+        assert!(s.pending.is_none());
+    }
+
+    #[test]
+    fn a_merged_turn_is_still_cut_at_max_segment() {
+        let (mut s, mut jobs) = gated(Some(&[Some(0.2)]));
+        close_first(&mut s);
+        s.open = Some(48_000);
+        let limit = RATE + s.max_segment;
+        advance(&mut s, limit - 1);
+        assert_eq!(decoded(&mut jobs), None);
+        advance(&mut s, limit);
+        let (start, end) = decoded(&mut jobs).expect("cut");
+        assert_eq!(start, 1.0);
+        assert!(end > 3.0 && end <= limit as f64 / RATE as f64, "{end}");
+        assert!(s.pending.is_none());
     }
 }
