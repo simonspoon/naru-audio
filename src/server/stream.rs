@@ -957,7 +957,11 @@ fn decode_with(
                 return;
             }
         };
-        let text = match hallucination::is_hallucination(&text, &pcm[speech_range.clone()]) {
+        let text = match hallucination::is_hallucination(
+            &text,
+            &pcm[speech_range.clone()],
+            vad.min_silence,
+        ) {
             Some(reason) => {
                 crate::log::Logger::stderr().info(
                     None,

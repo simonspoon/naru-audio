@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 
 use super::audio::TARGET_SAMPLE_RATE;
+use super::vad::MIN_SILENCE_SECONDS;
 
 /// Real short replies ("yes", "okay", "seven", "thank you") measured 0.6-0.7 s
 /// at about -18 dBFS; stock phrases came from room tone (2.4 s, -36 dBFS) and
@@ -21,6 +22,13 @@ const STOCK_MAX_DBFS: f32 = -40.0;
 /// segments held 1-4 word stock phrases over ~20 s.
 const SPARSE_MAX_WORDS: usize = 4;
 const SPARSE_MIN_SECS: f32 = 6.0;
+/// Past `SPARSE_MIN_SECS`, fewer words a second than this is sparse too
+/// (naru task 2345): "Oh, yeah. Oh, yeah. Oh, yeah." held a ~20 s noise
+/// segment, 0.3 a second. Real speech runs about 2.5 a second and slow
+/// dictation over 1; a VAD span has no pause of `min_silence` (0.5 s) or more.
+/// A client that widens `min_silence` lets thinking pauses into a span, so
+/// the floor holds only at the default or tighter.
+const SPARSE_MIN_WPS: f32 = 0.5;
 /// Loops ("Wow. Wow. Wow.") compress far past whisper's own 2.4 zlib
 /// threshold. No compression crate here, so it is the same idea on words:
 /// at least this many, of which at most `LOOP_MAX_UNIQUE` (a share) differ.
@@ -51,8 +59,9 @@ const STOCK: &[&str] = &[
     "ご視聴ありがとうございました",
 ];
 
-/// Why `text` over `samples` (the unpadded speech, 16 kHz mono) should be dropped, if it should.
-pub fn is_hallucination(text: &str, samples: &[f32]) -> Option<&'static str> {
+/// Why `text` over `samples` (the unpadded speech, 16 kHz mono, split at
+/// `min_silence` seconds of quiet) should be dropped, if it should.
+pub fn is_hallucination(text: &str, samples: &[f32], min_silence: f32) -> Option<&'static str> {
     let secs = samples.len() as f32 / TARGET_SAMPLE_RATE as f32;
     let words: Vec<&str> = text.split_whitespace().collect();
 
@@ -65,7 +74,8 @@ pub fn is_hallucination(text: &str, samples: &[f32]) -> Option<&'static str> {
     }
     // Unspaced scripts have no word count to speak of.
     if !words.is_empty()
-        && words.len() <= SPARSE_MAX_WORDS
+        && (words.len() <= SPARSE_MAX_WORDS
+            || (min_silence <= MIN_SILENCE_SECONDS && (words.len() as f32) < SPARSE_MIN_WPS * secs))
         && secs >= SPARSE_MIN_SECS
         && !text.chars().any(unspaced)
     {
@@ -108,6 +118,11 @@ fn dbfs(samples: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At the default `min_silence`.
+    fn is_hallucination(text: &str, samples: &[f32]) -> Option<&'static str> {
+        super::is_hallucination(text, samples, MIN_SILENCE_SECONDS)
+    }
 
     /// A square-ish tone `secs` long at `db` dBFS RMS.
     fn clip(secs: f32, db: f32) -> Vec<f32> {
@@ -152,6 +167,46 @@ mod tests {
             is_hallucination("Have a great day.", &clip(20.0, -30.0)),
             Some("sparse text")
         );
+    }
+
+    #[test]
+    fn short_loops_in_long_noise_drop() {
+        let pcm = clip(19.5, -28.0);
+        for t in [
+            "Oh, yeah. Oh, yeah. Oh, yeah.",
+            "Oh, God. Oh, God. Oh, God.",
+        ] {
+            assert_eq!(is_hallucination(t, &pcm), Some("sparse text"), "{t}");
+        }
+    }
+
+    #[test]
+    fn slow_real_speech_passes() {
+        // Slow dictation, about 1 word a second, and a slow sentence.
+        assert_eq!(
+            is_hallucination(
+                "Remind me to call the dentist tomorrow morning at nine.",
+                &clip(10.0, -20.0)
+            ),
+            None
+        );
+        assert_eq!(
+            is_hallucination("Turn off the lights.", &clip(5.5, -20.0)),
+            None
+        );
+        assert_eq!(
+            is_hallucination("Please turn off all the lights.", &clip(9.0, -20.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn wide_min_silence_keeps_slow_speech() {
+        // Thinking pauses let in by a 2 s `min_silence`: 10 words over 22 s.
+        let text = "I think we should, maybe, move the meeting to Friday.";
+        let pcm = clip(22.0, -20.0);
+        assert_eq!(super::is_hallucination(text, &pcm, 2.0), None);
+        assert_eq!(is_hallucination(text, &pcm), Some("sparse text"));
     }
 
     #[test]
