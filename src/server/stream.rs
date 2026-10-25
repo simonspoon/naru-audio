@@ -33,7 +33,7 @@ use crate::error::ApiError;
 use crate::manager::{Guard, KeepAlive};
 use crate::stt::audio::TARGET_SAMPLE_RATE;
 use crate::stt::hallucination;
-use crate::stt::vad::{Segmenter, Span, Vad};
+use crate::stt::vad::{MAX_SPEECH_SECONDS, Segmenter, Span, Vad};
 use crate::stt::{SttError, SttModel, VadConfig, Vocabulary};
 
 pub(super) const RATE: usize = TARGET_SAMPLE_RATE as usize;
@@ -593,7 +593,7 @@ pub(super) fn validate(start: Start, default_model: &str) -> Result<Config, Fail
         vad.min_silence = v;
     }
     // At least the cut's search window.
-    let max_segment = fields.max_segment.unwrap_or(20.0);
+    let max_segment = fields.max_segment.unwrap_or(MAX_SPEECH_SECONDS);
     if !(1.0..=(MAX_BACKLOG_SAMPLES / RATE) as f32).contains(&max_segment) {
         return Err(bad("max_segment", "between 1 and 30 seconds", max_segment));
     }

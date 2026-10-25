@@ -21,6 +21,7 @@ use naru_audio::profile::Profile;
 use naru_audio::registry::manifest::Manifest;
 use naru_audio::registry::{self, Registry};
 use naru_audio::server::{AppState, router};
+use naru_audio::stt::vad::MAX_SPEECH_SECONDS;
 use naru_audio::stt::{Segment, SttError, SttModel, VadConfig, Vocabulary, audio};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -503,10 +504,11 @@ async fn max_segment_cuts_long_speech() {
     }
 }
 
-/// The real model, counting its decodes.
+/// The real model, counting its decodes and keeping the longest buffer.
 struct CountingModel {
     inner: Arc<dyn SttModel>,
     decodes: Arc<AtomicUsize>,
+    longest: Arc<AtomicUsize>,
 }
 
 impl SttModel for CountingModel {
@@ -518,6 +520,7 @@ impl SttModel for CountingModel {
         on_segment: &mut dyn FnMut(Segment),
     ) -> Result<(), SttError> {
         self.decodes.fetch_add(1, Ordering::SeqCst);
+        self.longest.fetch_max(pcm16k.len(), Ordering::SeqCst);
         self.inner.decode_each(pcm16k, hotwords, vad, on_segment)
     }
 
@@ -528,6 +531,7 @@ impl SttModel for CountingModel {
 
 struct CountingLoader {
     decodes: Arc<AtomicUsize>,
+    longest: Arc<AtomicUsize>,
 }
 
 impl Loader for CountingLoader {
@@ -540,27 +544,62 @@ impl Loader for CountingLoader {
             model: Resident::Stt(Arc::new(CountingModel {
                 inner,
                 decodes: self.decodes.clone(),
+                longest: self.longest.clone(),
             })),
             measured_bytes: loaded.measured_bytes,
         })
     }
 }
 
-/// The daemon with a [`CountingModel`]; its address and decode count.
-async fn serve_counting(home: &Path) -> (String, Arc<AtomicUsize>) {
+/// The daemon with a [`CountingModel`]; its address, decode count and
+/// longest decoded buffer in samples.
+async fn serve_counting(home: &Path) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     let decodes = Arc::new(AtomicUsize::new(0));
+    let longest = Arc::new(AtomicUsize::new(0));
     let loader = Arc::new(CountingLoader {
         decodes: decodes.clone(),
+        longest: longest.clone(),
     });
     let addr = serve_with(home, Profile::detect().unwrap(), loader).await;
-    (addr, decodes)
+    (addr, decodes, longest)
+}
+
+/// Continuous noise that Silero takes for speech (task 2347): by default
+/// no segment the model decodes is longer than the 8 s decode budget plus
+/// its `pad` on each side.
+#[tokio::test(flavor = "multi_thread")]
+async fn continuous_noise_segments_stay_within_8_s() {
+    let Some(home) = model_home() else { return };
+    let (addr, decodes, longest) = serve_counting(home.path()).await;
+    let mut ws = ready(&addr, json!({})).await;
+    let noise = samples("nonspeech-transient.wav");
+    let pcm: Vec<f32> = noise.iter().cycle().take(30 * 16_000).copied().collect();
+    send_audio(&mut ws, &pcm).await;
+    ws.send(Message::text(r#"{"type":"stop"}"#)).await.unwrap();
+    let (events, close) = until_close(&mut ws).await;
+    assert_eq!(close, Some(1000), "{events:?}");
+    let longest = longest.load(Ordering::SeqCst);
+    eprintln!("decodes {decodes:?}, longest {longest}: {events:?}");
+    // The noise held one Silero span open past the cap, so it was cut.
+    let mut open = None;
+    let mut span = 0.0f64;
+    for e in events.iter().filter(|e| e["type"] == "speech") {
+        let at = e["at"].as_f64().unwrap();
+        match e["active"].as_bool().unwrap() {
+            true => open = Some(at),
+            false => span = span.max(at - open.take().unwrap()),
+        }
+    }
+    let cap = MAX_SPEECH_SECONDS + 2.0 * 0.3;
+    assert!(span > cap as f64, "{span}: {events:?}");
+    assert!(longest <= (cap * 16_000.0) as usize, "{longest}");
 }
 
 /// Without `partials` the model decodes each segment once, and no more.
 #[tokio::test(flavor = "multi_thread")]
 async fn partials_off_run_no_extra_decode() {
     let Some(home) = model_home() else { return };
-    let (addr, decodes) = serve_counting(home.path()).await;
+    let (addr, decodes, _) = serve_counting(home.path()).await;
     let mut ws = ready(&addr, json!({})).await;
     send_audio(&mut ws, &four_plains()).await;
     ws.send(Message::text(r#"{"type":"stop"}"#)).await.unwrap();
@@ -577,7 +616,7 @@ async fn partials_off_run_no_extra_decode() {
 #[tokio::test(flavor = "multi_thread")]
 async fn partials_come_before_their_final() {
     let Some(home) = model_home() else { return };
-    let (addr, decodes) = serve_counting(home.path()).await;
+    let (addr, decodes, _) = serve_counting(home.path()).await;
     let ws = ready(&addr, json!({"partials": true})).await;
     let (mut sink, mut stream) = ws.split();
     // A reader task feeds every event (or the close code) into a channel, so

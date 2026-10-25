@@ -272,7 +272,7 @@ structure, not from the model:
 2. The first client frame must be text:
 ```json
 {"type":"start","model":"default","format":"s16le","sample_rate":16000,
- "vad":{"threshold":0.2,"min_speech":0.25,"min_silence":0.5,"max_segment":20.0,"pad":0.3},
+ "vad":{"threshold":0.2,"min_speech":0.25,"min_silence":0.5,"max_segment":8.0,"pad":0.3},
  "partials":false,"hotwords":"naru :4.0\nkhora","keep_alive":"5m"}
 ```
    - `format` is `s16le` (preferred, half the bytes) or `f32le`.
@@ -308,7 +308,7 @@ flushes, delivers every final, sends `done` and closes.
 **VAD placement.** VAD runs **in the daemon** and is authoritative. Clients
 send continuously while the microphone is open. A client RMS gate
 (liveVad.ts) remains allowed, but only to decide what to send, never to
-decide segment boundaries. `max_segment` (20 s, the same as liveVad) forces a
+decide segment boundaries. `max_segment` (8 s, the decode budget `MAX_SPEECH_SECONDS`) forces a
 cut at the lowest-energy point in the last 1 s. The energy gate and the Silero
 gate from auris run on every segment before it is decoded.
 

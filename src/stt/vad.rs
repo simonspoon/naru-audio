@@ -28,9 +28,10 @@ const PRIME: usize = WINDOW_SIZE as usize;
 /// [`MAX_SPEECH_SECONDS`] segment queued while more audio arrives.
 const BUFFER_SECONDS: f32 = 30.0;
 
-/// Longest span before the detector force-closes it. From auris
-/// docs/latency.md's decode budget; it does not change accept/reject.
-const MAX_SPEECH_SECONDS: f32 = 8.0;
+/// Longest span before the detector force-closes it, and the stream's
+/// default `max_segment` (task 2347). From auris docs/latency.md's decode
+/// budget; it does not change accept/reject.
+pub const MAX_SPEECH_SECONDS: f32 = 8.0;
 
 /// Silero's stock trailing silence; where one utterance ends and the next
 /// begins.
