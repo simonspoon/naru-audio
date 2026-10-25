@@ -17,6 +17,13 @@ use super::audio::TARGET_SAMPLE_RATE;
 /// Silero's frame size.
 const WINDOW_SIZE: i32 = 512;
 
+/// Zeros fed to a freshly reset detector before the stream (task 2346).
+/// From a cold state Silero keeps a short word near the start (`say no`,
+/// speech at 0.12 s) over `threshold` for ~8 windows, under `min_speech`,
+/// so it never opens; after any lead-in of 256+ samples it is ~12. Spans
+/// are reported without it.
+const PRIME: usize = WINDOW_SIZE as usize;
+
 /// The detector's ring buffer, in seconds: headroom over one whole
 /// [`MAX_SPEECH_SECONDS`] segment queued while more audio arrives.
 const BUFFER_SECONDS: f32 = 30.0;
@@ -121,9 +128,10 @@ impl Vad {
     }
 
     /// Starts a fresh pass over one stream; resets the detector so nothing
-    /// carries over from the last one.
+    /// carries over from the last one, then feeds it [`PRIME`].
     pub fn segmenter(&self) -> Segmenter<'_> {
         self.inner.reset();
+        self.inner.accept_waveform(&[0.0; PRIME]);
         Segmenter {
             vad: self,
             pending: Vec::new(),
@@ -174,9 +182,11 @@ impl Segmenter<'_> {
     /// The next closed utterance, if any. Drain it: the queue is finite.
     pub fn next_span(&mut self) -> Option<Span> {
         let segment = self.vad.inner.front()?;
+        let start = segment.start().max(0) as usize;
+        let end = start + segment.n().max(0) as usize;
         let found = Span {
-            start: segment.start().max(0) as usize,
-            len: segment.n().max(0) as usize,
+            start: start.saturating_sub(PRIME),
+            len: end.saturating_sub(PRIME) - start.saturating_sub(PRIME),
         };
         drop(segment);
         self.vad.inner.pop();

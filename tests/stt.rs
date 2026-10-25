@@ -117,6 +117,18 @@ fn vad_off_decodes_the_same_single_utterance() {
     assert_eq!(texts(&segments), [PLAIN]);
 }
 
+/// A short word at the very start of the buffer (`say -v Samantha no`,
+/// speech from 0.12 s) passes the VAD gate: a cold Silero never held
+/// `min_speech` on it (task 2346).
+#[test]
+fn short_word_at_the_start_transcribes() {
+    let Some(model) = model() else { return };
+    let segments = transcribe(model, &samples("no.wav"), None);
+    eprintln!("no.wav: {segments:?}");
+    assert_eq!(segments.len(), 1, "{segments:?}");
+    assert_eq!(normalise(&segments[0].text), "no");
+}
+
 /// Silence is an empty result, not an error: `silence.wav`, all-zero PCM,
 /// and noise below −60 dBFS, with and without VAD and hotwords.
 #[test]
@@ -211,7 +223,9 @@ fn manufactured_vocabulary_transcript_yields_no_segments() {
 /// utterance, in order (auris's multi-utterance stream test). The spans and
 /// texts are what `auris --no-daemon --format json` prints for the same
 /// audio at d8644d6; each slice keeps its neighbours' context, hence the
-/// lowercase and the third one's comma.
+/// lowercase and the third one's comma. The first starts at 0.006, not
+/// auris's 0.166: the primed detector (task 2346) finds it as early as the
+/// later three, each within 0.014 s of its copy's start.
 #[test]
 fn multi_utterance_buffer_yields_a_segment_per_utterance() {
     let Some(model) = model() else { return };
@@ -228,7 +242,7 @@ fn multi_utterance_buffer_yields_a_segment_per_utterance() {
     eprintln!("4 x plain.wav: {segments:?}");
     let expected = [
         (
-            0.166,
+            0.006,
             2.764,
             "open the daily notes and add a line about the meeting.",
         ),
