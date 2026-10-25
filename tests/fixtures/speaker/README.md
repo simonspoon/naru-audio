@@ -13,4 +13,5 @@
 | `b1.wav`, `b2.wav`, `b3.wav` | Samantha (en_US, female) | the same three sentences as a1, a2, a3 |
 
 Voice A is the enrolled speaker (`a1`, `a2`; `a3` is held out), B the other. These are clean synthetic voices, so
-scores are cleaner than real speech: re-measure the threshold against a real enrollment.
+scores are cleaner than real speech: the threshold was set on real read speech (`src/speaker.rs`,
+`DEFAULT_THRESHOLD`); re-measure it against a real enrollment.

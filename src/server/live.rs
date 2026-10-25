@@ -445,6 +445,8 @@ struct Live {
     library_stamp: Option<(std::time::SystemTime, u64)>,
     verifier: Option<Arc<SpeakerVerifier>>,
     verifier_tried: bool,
+    /// Re-embedding a library of another model failed; not retried per segment.
+    migrate_failed: bool,
     /// Raw microphone audio of a running enrollment recording.
     enrolling: Option<Vec<f32>>,
     /// Who the running recording is for; the owner when `None`.
@@ -476,6 +478,7 @@ impl Live {
             library_stamp: None,
             verifier: None,
             verifier_tried: false,
+            migrate_failed: false,
             enrolling: None,
             enroll_person: None,
             ring: VecDeque::new(),
@@ -1443,6 +1446,7 @@ async fn enroll(
                         Some(id) => l.person(id)?.id,
                         None => l.ensure_owner(),
                     };
+                    l.reembed(home, |pcm| verifier.embed(pcm))?;
                     l.add_clip(home, id, &clip, embedding).map(|_| ())
                 })
                 .map_err(|e| match e {
@@ -1597,16 +1601,21 @@ async fn finish_segment(
         Mode::Ambient => !live.agent_speaking() && !live.in_hold(),
         Mode::Idle | Mode::Muted => false,
     };
+    // The score and the bar it is held to, so the threshold can be
+    // calibrated from the log; `-` when the segment was not scored.
+    let scored = format!(
+        "mode={} start={start:.2} end={end:.2} score={} threshold={DEFAULT_THRESHOLD}",
+        mode_name(mode),
+        verdict
+            .and_then(|d| d.score)
+            .map_or("-".to_string(), |s| format!("{s:.3}")),
+    );
     if !admitted {
-        st.log.info(
-            None,
-            &format!(
-                "live_segment_dropped mode={} start={start:.2} end={end:.2}",
-                mode_name(mode)
-            ),
-        );
+        st.log.info(None, &format!("live_segment_dropped {scored}"));
         return vec![json!({"type": "partial", "segment": v["segment"], "text": ""})];
     }
+    st.log
+        .line("debug", None, &format!("live_segment_admitted {scored}"));
     let id = live.utterance;
     live.utterance += 1;
     let mut event = json!({
@@ -1733,15 +1742,37 @@ async fn score(st: &Arc<AppState>, live: &mut Live, start: f64, end: f64) -> Opt
             .map(Arc::new);
     }
     let verifier = live.verifier.clone();
-    tokio::task::spawn_blocking(move || {
-        speaker::identify(
+    let home = st.registry.home().to_path_buf();
+    let migrate = !live.migrate_failed;
+    let (identity, failed) = tokio::task::spawn_blocking(move || {
+        // A library made with another model is re-embedded once this one is
+        // here; until then it fails open.
+        let (library, failed) = match &verifier {
+            Some(v) if migrate && library.model != DEFAULT_MODEL => {
+                match speaker::migrate(&home, v) {
+                    Ok(l) => (Arc::new(l), None),
+                    Err(e) => (library, Some(e)),
+                }
+            }
+            _ => (library, None),
+        };
+        let identity = speaker::identify(
             verifier.as_deref(),
             Some(&library),
             false,
             &pcm,
             DEFAULT_THRESHOLD,
-        )
+        );
+        (Some(identity), failed)
     })
     .await
-    .ok()
+    .unwrap_or((None, None));
+    if let Some(e) = failed {
+        live.migrate_failed = true;
+        st.log
+            .line("error", None, &format!("speaker_migrate_failed {e}"));
+    }
+    // Picks up a migration, so the guard below judges the new library.
+    live.refresh_library(st.registry.home());
+    identity
 }

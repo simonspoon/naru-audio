@@ -1,13 +1,14 @@
-//! Speaker verification and the voice library (naru tasks 2028, 2260), the
-//! `wespeaker-sv-en` catalog model: a WeSpeaker ResNet34 embedding (via
+//! Speaker verification and the voice library (naru tasks 2028, 2260, 2354),
+//! the `campplus-sv-en` catalog model: a 3D-Speaker CAM++ embedding (via
 //! sherpa-onnx) turns a clip into a vector, and cosine similarity against a
 //! named person's clips says who spoke. The owner is "him", the voice the live
 //! guard admits (`docs/live-mode-spec.md`). Loaded fresh per request like
 //! `prep::diarize::Diarizer`.
 //!
 //! **Fails open** everywhere (memory: he often answers with just "yes"): no
-//! library, no pulled model, a library made with another model, or a clip
-//! shorter than [`MIN_SAMPLES`] all say `is_him = true`, so a guard built on
+//! library, no pulled model, a library made with another model (until
+//! [`migrate`] re-embeds it), or a clip shorter than [`MIN_SAMPLES`] all say
+//! `is_him = true`, so a guard built on
 //! this never drops a short reply or goes silent on a missing model.
 
 use std::path::{Path, PathBuf};
@@ -16,8 +17,9 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use sherpa_onnx::{SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig};
 
-/// The catalog model name; also tagged into the library.
-pub const DEFAULT_MODEL: &str = "wespeaker-sv-en";
+/// The catalog model name; also tagged into the library. Was
+/// `wespeaker-sv-en` before naru task 2354; such a library is re-embedded.
+pub const DEFAULT_MODEL: &str = "campplus-sv-en";
 /// The embedding model's file in the pulled model directory.
 pub const EMBEDDING_FILENAME: &str = "embedding.onnx";
 /// Sample rate the embedding is computed at.
@@ -25,11 +27,22 @@ pub const SAMPLE_RATE: i32 = 16_000;
 /// Clips shorter than this (1 s) are not scored: a "yes" or a number is too
 /// short for a stable embedding and must never be dropped.
 pub const MIN_SAMPLES: usize = 16_000;
-/// Cosine score at or above which a clip is "him". Calibrated from the
-/// fixtures in `tests/speaker.rs`: same voice scored 0.94-0.99, a different
-/// voice 0.59-0.62. Chosen nearer the low end, since wrongly dropping him is
-/// worse than admitting someone else; re-measure against a real enrollment.
-pub const DEFAULT_THRESHOLD: f32 = 0.7;
+/// Cosine score at or above which a clip is "him", for `campplus-sv-en`
+/// (naru task 2354). Calibrated on real read speech (mini LibriSpeech
+/// dev-clean-2, 26 speakers, each enrolled from two clips, scored on six
+/// clips cut to 1.5-8 s against all 26 enrollments): at 0.35 no same-voice
+/// clip of 2.5 s or more fell below the bar (2.6% at 1.5 s), while 3-7% of
+/// other voices cleared it. Kept that low because wrongly dropping him is
+/// worse than admitting someone else. WeSpeaker's 0.7 on the same set dropped
+/// 3.5% of his 2.5 s clips and 9.6% at 1.5 s. Every drop logs its score
+/// (`live_segment_dropped`), so the bar can be re-measured on his own voice.
+pub const DEFAULT_THRESHOLD: f32 = 0.35;
+/// CAM++ pools in segments of 200 feature frames (2 s), and its ONNX export,
+/// as sherpa-onnx runs it, mis-scores a short last segment: a clip just past
+/// a multiple of 2 s embeds so wrongly that two different voices score 0.9.
+/// A clip is therefore tiled (repeated from its start) to a whole number of
+/// segments before embedding.
+const SEGMENT_SAMPLES: usize = 32_000;
 
 #[derive(Debug)]
 pub enum SpeakerError {
@@ -65,7 +78,7 @@ pub struct SpeakerVerifier {
 }
 
 impl SpeakerVerifier {
-    /// `dir` is the pulled `wespeaker-sv-en` model directory.
+    /// `dir` is the pulled [`DEFAULT_MODEL`] directory.
     pub fn load(dir: &Path) -> Result<Self, SpeakerError> {
         let model = dir.join(EMBEDDING_FILENAME);
         if !model.is_file() {
@@ -85,7 +98,9 @@ impl SpeakerVerifier {
             .inner
             .create_stream()
             .ok_or(SpeakerError::EmbedFailed)?;
-        stream.accept_waveform(SAMPLE_RATE, pcm);
+        let whole = pcm.len().div_ceil(SEGMENT_SAMPLES) * SEGMENT_SAMPLES;
+        let tiled: Vec<f32> = pcm.iter().cycle().take(whole).copied().collect();
+        stream.accept_waveform(SAMPLE_RATE, &tiled);
         stream.input_finished();
         if !self.inner.is_ready(&stream) {
             return Err(SpeakerError::EmbedFailed);
@@ -428,6 +443,38 @@ impl Library {
         Ok(())
     }
 
+    /// Re-embeds a library made with another model from each clip's kept
+    /// audio with `embed`, and tags it with [`DEFAULT_MODEL`]. A clip with no
+    /// audio (a migrated enrollment) or whose WAV is gone is dropped, since
+    /// embeddings are never compared across models. When no clip has its WAV
+    /// the library is left as it is (failing open until someone re-enrolls)
+    /// rather than emptied. `true` if it re-embedded.
+    pub fn reembed(
+        &mut self,
+        home: &Path,
+        embed: impl Fn(&[f32]) -> Result<Vec<f32>, SpeakerError>,
+    ) -> Result<bool, SpeakerError> {
+        let has_wav = |c: &Clip| c.has_audio && Self::clip_path(home, c.id).is_file();
+        if self.model == DEFAULT_MODEL || !self.people.iter().flat_map(|p| &p.clips).any(has_wav) {
+            return Ok(false);
+        }
+        for person in &mut self.people {
+            let mut kept = Vec::new();
+            for mut clip in std::mem::take(&mut person.clips) {
+                let path = Self::clip_path(home, clip.id);
+                if !has_wav(&clip) {
+                    self.pending_delete.push(path);
+                    continue;
+                }
+                clip.embedding = embed(&read_wav(&path)?)?;
+                kept.push(clip);
+            }
+            person.clips = kept;
+        }
+        self.model = DEFAULT_MODEL.to_string();
+        Ok(true)
+    }
+
     /// Removes every clip of `person` (their audio too); `true` if there were any.
     pub fn clear_clips(&mut self, home: &Path, person: u64) -> Result<bool, SpeakerError> {
         let clips = std::mem::take(&mut self.person_mut(person)?.clips);
@@ -436,6 +483,22 @@ impl Library {
             .extend(clips.iter().map(|c| Self::clip_path(home, c.id)));
         Ok(had)
     }
+}
+
+/// [`Library::reembed`] on the stored library; the library as it now stands.
+pub fn migrate(home: &Path, verifier: &SpeakerVerifier) -> Result<Library, SpeakerError> {
+    Library::update(home, |l| l.reembed(home, |pcm| verifier.embed(pcm)))?;
+    Library::load(home)
+}
+
+/// A clip WAV as [`write_wav`] wrote it.
+fn read_wav(path: &Path) -> Result<Vec<f32>, SpeakerError> {
+    let mut reader = hound::WavReader::open(path).map_err(store_err)?;
+    reader
+        .samples::<i16>()
+        .map(|s| s.map(|v| v as f32 / i16::MAX as f32))
+        .collect::<Result<_, _>>()
+        .map_err(store_err)
 }
 
 fn write_wav(path: &Path, pcm: &[f32]) -> Result<(), SpeakerError> {
@@ -939,6 +1002,47 @@ mod tests {
         assert!(lib.unwrap().owner().is_some());
         assert_eq!(stamp, None);
         assert_ne!(Library::stamp(home.path()), stamp);
+    }
+
+    #[test]
+    fn a_library_of_another_model_is_reembedded_from_its_audio() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let pcm = vec![0.1; 16_000];
+        let (kept, gone) = Library::update(h, |l| {
+            let me = l.ensure_owner();
+            let kept = l.add_clip(h, me, &pcm, vec![1.0, 0.0])?.id;
+            let gone = l.add_clip(h, me, &pcm, vec![1.0, 0.0])?.id;
+            // a migrated enrollment, which has no audio
+            l.people[0].clips.push(Clip {
+                id: 99,
+                created_at: 0,
+                seconds: 0.0,
+                embedding: vec![1.0, 0.0],
+                has_audio: false,
+            });
+            l.model = "wespeaker-sv-en".into();
+            Ok((kept, gone))
+        })
+        .unwrap();
+        std::fs::remove_file(Library::clip_path(h, gone)).unwrap();
+        let embed = |p: &[f32]| Ok(vec![p.len() as f32, 0.5]);
+        assert!(Library::update(h, |l| l.reembed(h, embed)).unwrap());
+        let lib = Library::load(h).unwrap();
+        assert_eq!(lib.model, DEFAULT_MODEL);
+        let clips = &lib.owner().unwrap().clips;
+        assert_eq!(clips.iter().map(|c| c.id).collect::<Vec<_>>(), [kept]);
+        // the WAV round-trips to the same length
+        assert_eq!(clips[0].embedding, vec![16_000.0, 0.5]);
+        assert!(lib.owner_ready(DEFAULT_MODEL));
+        // a library already on the model is left alone
+        let mut again = lib.clone();
+        assert!(!again.reembed(h, |_| Err(SpeakerError::EmbedFailed)).unwrap());
+        // one with no audio at all is kept, not emptied
+        again.model = "wespeaker-sv-en".into();
+        again.people[0].clips[0].has_audio = false;
+        assert!(!again.reembed(h, embed).unwrap());
+        assert_eq!((again.model.as_str(), again.people[0].clips.len()), ("wespeaker-sv-en", 1));
     }
 
     #[test]

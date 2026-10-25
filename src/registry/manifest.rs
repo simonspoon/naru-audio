@@ -27,6 +27,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/breeze-tts-2-8bit-mlx.toml"),
     ),
     (
+        "campplus-sv-en.toml",
+        include_str!("../../catalog/campplus-sv-en.toml"),
+    ),
+    (
         "chatterbox-tts-8bit-mlx.toml",
         include_str!("../../catalog/chatterbox-tts-8bit-mlx.toml"),
     ),
@@ -690,6 +694,7 @@ mod tests {
                 "breeze-tts-2-4bit-mlx",
                 "breeze-tts-2-8bit-mlx",
                 "breeze-tts-2-mlx",
+                "campplus-sv-en",
                 "chatterbox-tts-8bit-mlx",
                 "chatterbox-turbo-8bit-mlx",
                 "indextts-1.5-mlx",

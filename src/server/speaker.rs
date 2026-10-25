@@ -2,7 +2,7 @@
 //! guard"): the voice library under `/v1/audio/speaker/people` and
 //! `/v1/audio/speaker/guard`, and the legacy single-voice `enroll`, `verify`
 //! and `enrollment` routes, now over the library's owner. Opt-in: nothing calls
-//! them until the clients switch. The model is `wespeaker-sv-en` and is never
+//! them until the clients switch. The model is `campplus-sv-en` and is never
 //! auto-pulled (409 `model_not_pulled`, §2.6); a verify with no enrollment
 //! answers `is_him: true` without needing the model, failing open.
 
@@ -240,11 +240,15 @@ pub(super) async fn add_clip(
         if pcm.len() < speaker::MIN_SAMPLES {
             return Err(bad_request("file", "invalid_request", NO_CLIPS));
         }
-        let embedding = load_verifier(st)?
+        let verifier = load_verifier(st)?;
+        let embedding = verifier
             .embed(&pcm)
             .map_err(|e| speaker_error(st, req_id, e))?;
-        let clip = Library::update(home, |l| l.add_clip(home, id, &pcm, embedding))
-            .map_err(|e| speaker_error(st, req_id, e))?;
+        let clip = Library::update(home, |l| {
+            l.reembed(home, |pcm| verifier.embed(pcm))?;
+            l.add_clip(home, id, &pcm, embedding)
+        })
+        .map_err(|e| speaker_error(st, req_id, e))?;
         Ok(json!({
             "id": clip.id, "created_at": clip.created_at, "seconds": clip.seconds,
             "has_audio": clip.has_audio,
@@ -362,6 +366,7 @@ pub(super) async fn enroll(
         let dim = embedded[0].1.len();
         let count = embedded.len();
         Library::update(home, |l| {
+            l.reembed(home, |pcm| verifier.embed(pcm))?;
             let owner = l.ensure_owner();
             l.clear_clips(home, owner)?;
             for (pcm, embedding) in embedded {
@@ -392,16 +397,24 @@ pub(super) async fn verify(
     let threshold = threshold(form.threshold.as_deref())?;
     blocking(&st, &req_id, move |st, req_id| {
         let pcm = decode(&wav)?;
-        let library =
-            Library::load(st.registry.home()).map_err(|e| speaker_error(st, req_id, e))?;
+        let home = st.registry.home();
+        let mut library = Library::load(home).map_err(|e| speaker_error(st, req_id, e))?;
         // No enrolled owner, or a clip too short to score: answered without
-        // the model, so neither needs it pulled.
-        let needs_model = library.owner_ready(DEFAULT_MODEL) && pcm.len() >= speaker::MIN_SAMPLES;
-        let verifier = if needs_model {
+        // the model, so neither needs it pulled. A library of another model
+        // uses the model only to re-embed, failing open without it.
+        let long = pcm.len() >= speaker::MIN_SAMPLES;
+        let verifier = if library.owner_ready(DEFAULT_MODEL) && long {
             Some(load_verifier(st)?)
+        } else if library.owner().is_some_and(|o| !o.clips.is_empty()) && long {
+            load_verifier(st).ok()
         } else {
             None
         };
+        if let Some(v) = &verifier
+            && library.model != DEFAULT_MODEL
+        {
+            library = speaker::migrate(home, v).map_err(|e| speaker_error(st, req_id, e))?;
+        }
         let v = speaker::identify(verifier.as_ref(), Some(&library), true, &pcm, threshold).verdict;
         Ok(json!({
             "score": v.score,

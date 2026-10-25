@@ -76,7 +76,7 @@ Text frames:
 | `{"type":"agent_speaking","value":true}` | the client is playing a reply. While true the microphone is shut; on `false` it stays shut for 400 ms more (the reply's tail is in the room), and any speak still being made is cancelled. Emits `state` on a change |
 | `{"type":"speak","id":"t1","text":"…","voice":"af_heart","model":"kokoro-v1.0"}` | synthesise `text`; `voice` and `model` are optional and mean what they do for `POST /v1/audio/speech`. `id` is 1 to 128 characters and unique among running speaks. A newer `speak` cancels the older ones |
 | `{"type":"enroll","action":"begin","person":<id>}` | record the microphone (up to 120 s) as a clip for `person` (optional; the owner, created as "Me" if there is none); the VAD hears silence meanwhile |
-| `{"type":"enroll","action":"finish"}` | embed the recording (at least 1 s) with `wespeaker-sv-en` and ADD it, with its audio, to that person's clips |
+| `{"type":"enroll","action":"finish"}` | embed the recording (at least 1 s) with `campplus-sv-en` and ADD it, with its audio, to that person's clips |
 | `{"type":"enroll","action":"cancel"}` / `"clear"` | drop the recording / delete the owner's clips |
 | `{"type":"flush"}` | close the open segment now |
 | `{"type":"stop"}` | finish: every pending `utterance`, then `done`, then close 1000 |

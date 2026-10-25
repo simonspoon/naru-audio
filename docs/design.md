@@ -378,7 +378,7 @@ Every non-2xx HTTP response uses OpenAI's envelope:
 
 Speaker verification (naru task 2028, `docs/live-mode-spec.md` "Speaker guard") adds three opt-in routes,
 `POST /v1/audio/speaker/enroll`, `POST /v1/audio/speaker/verify` and `DELETE /v1/audio/speaker/enrollment`, on the
-`wespeaker-sv-en` model (`kind = "speaker"`). They use the codes above (`model_not_pulled`, `invalid_request`);
+`campplus-sv-en` model (`kind = "speaker"`; `wespeaker-sv-en` before naru task 2354). They use the codes above (`model_not_pulled`, `invalid_request`);
 a verify that has no enrollment or a too-short clip fails open with `is_him: true` instead of erroring.
 
 The live conversation socket, `GET /v1/audio/live` (naru task 2029), is specified in `docs/live-protocol.md`; it is

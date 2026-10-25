@@ -1,0 +1,23 @@
+# 3D-Speaker CAM++ speaker embedding trained on VoxCeleb (Apache-2.0,
+# github.com/modelscope/3D-Speaker; VoxCeleb1-O EER 0.65% against 1.05% for
+# wespeaker-sv-en's ResNet34), sherpa-onnx's ONNX export. The live-mode
+# speaker guard's model since naru task 2354. Size and hash computed
+# 2026-10-25 from the upstream release (the Hugging Face copy at
+# csukuangfj/speaker-embedding-models is byte-identical). Embeddings are not
+# comparable across models, so a library made with another model is
+# re-embedded from its kept clip audio (`src/speaker.rs`).
+
+[model]
+name        = "campplus-sv-en"
+kind        = "speaker"
+backend     = "sherpa-onnx"
+platforms   = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64", "windows-x86_64"]
+languages   = ["en"]
+license     = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0"
+
+[[file]]
+path   = "embedding.onnx"
+url    = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+sha256 = "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b"
+size   = 29_596_978

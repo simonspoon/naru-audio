@@ -1,6 +1,6 @@
 //! naru task 2028: speaker verification against recorded fixtures
 //! (`tests/fixtures/speaker/README.md`). Model-dependent tests skip (eprintln
-//! and return) when `wespeaker-sv-en` is not pulled under
+//! and return) when `campplus-sv-en` is not pulled under
 //! `$NARU_AUDIO_TEST_HOME`, else `$NARU_AUDIO_HOME` or `~/.naru-audio`;
 //! `NARU_AUDIO_REQUIRE_MODELS=1` turns the skip into a failure.
 
@@ -152,6 +152,26 @@ fn clips_combine_by_mean_embedding() {
     }
     eprintln!("margin max {:.3} vs mean {:.3}", margins[0], margins[1]);
     assert!(margins[1] >= margins[0]);
+}
+
+/// Task 2354: a clip just past a multiple of 2 s once embedded far from the
+/// same clip cut a little shorter (untiled, `a1` scored 0.55 at 2.006 s
+/// against 1.994 s, and `a1` against `b1` 0.67); `SpeakerVerifier::embed` tiles.
+#[test]
+fn a_clip_just_past_two_seconds_embeds_like_one_just_under() {
+    let Some(v) = verifier() else { return };
+    let (a, b) = (samples("a1.wav"), samples("b1.wav"));
+    for (short, long) in [(31_900, 32_100), (63_900, 64_400)] {
+        let same = speaker::cosine(
+            &v.embed(&a[..short]).expect("embed"),
+            &v.embed(&a[..long]).expect("embed"),
+        );
+        let other = speaker::cosine(
+            &v.embed(&a[..long]).expect("embed"),
+            &v.embed(&b[..long]).expect("embed"),
+        );
+        assert!(same > 0.9 && other < DEFAULT_THRESHOLD, "{long}: {same} {other}");
+    }
 }
 
 #[test]

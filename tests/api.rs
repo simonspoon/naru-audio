@@ -177,6 +177,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
         ids,
         [
             "audio-tagging-ced-tiny",
+            "campplus-sv-en",
             "kokoro-v1.0",
             "odd",
             "parakeet-tdt-0.6b-v2-int8",
@@ -261,7 +262,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
             "source-separation-spleeter-2stems-int8" => "separation",
             "speaker-diarization-en" | "speaker-diarization-reverb-titanet" => "diarization",
             "speech-denoiser-gtcrn" => "denoise",
-            "wespeaker-sv-en" => "speaker",
+            "campplus-sv-en" | "wespeaker-sv-en" => "speaker",
             _ => "stt",
         };
         assert_eq!(m["x_kind"], kind);
@@ -445,6 +446,7 @@ async fn unreadable_manifest_json_is_skipped() {
         ids,
         [
             "audio-tagging-ced-tiny",
+            "campplus-sv-en",
             "kokoro-v1.0",
             "parakeet-tdt-0.6b-v2-int8",
             "pocket-tts-int8",

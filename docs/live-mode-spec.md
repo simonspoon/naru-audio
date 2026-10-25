@@ -107,19 +107,26 @@ returned by this machine are valid only for the state that produced them.
 
 ## Speaker guard
 
-Scoring lives in `src/speaker.rs` (naru tasks 2028, 2260), not in the state machine. The `wespeaker-sv-en` catalog
-model (WeSpeaker ResNet34 via sherpa-onnx, `kind = "speaker"`) embeds 16 kHz mono audio. The voice library is
+Scoring lives in `src/speaker.rs` (naru tasks 2028, 2260, 2354), not in the state machine. The `campplus-sv-en`
+catalog model (3D-Speaker CAM++ via sherpa-onnx, `kind = "speaker"`; `wespeaker-sv-en` until task 2354) embeds 16 kHz
+mono audio. CAM++ pools in 2 s segments and mis-scores a short last one, so each clip is tiled (repeated from its
+start) to a whole number of 2 s segments before it is embedded. The voice library is
 `$NARU_AUDIO_HOME/speaker/people.json`: `{model, live_guard, people: [{id, name, owner, clips: [{id, created_at,
-seconds, embedding, has_audio}]}]}`, tagged with the model name (embeddings of different models are not comparable,
-so a mismatched library is ignored). Ids are integers. Each clip's audio is kept as a 16 kHz mono WAV in
+seconds, embedding, has_audio}]}]}`, tagged with the model name (embeddings of different models are never compared).
+A library made with another model fails open until the current model is loaded (a live segment to score, a `verify`,
+or a new clip), which re-embeds every clip from its kept WAV and drops a clip that has no audio. Ids are integers. Each clip's audio is kept as a 16 kHz mono WAV in
 `speaker/clips/<clip id>.wav` (`has_audio`). At most one person is the owner: "him". When `people.json` is absent, an
 old `speaker/enrollment.json` (else `enrollment.json.off-20261022`) is migrated into an owner named "Me" with one clip
 (`has_audio: false`, `seconds: 0`); the old file is left in place.
 
 A person's score is the cosine of the clip to the L2-normalised mean of their clips' embeddings (max-over-clips scored
-a 0.333 leave-one-out margin on the fixtures, the mean 0.336). A clip matches the owner when their score is at or above the threshold (even if someone else scores higher), else the best-scoring person at or above it (`DEFAULT_THRESHOLD` = 0.7, overridable per `verify` request). On the TTS fixtures in
-`tests/fixtures/speaker/` the same voice scored 0.94-0.99 and a different voice 0.59-0.62; re-measure against real
-enrollments.
+a 0.333 leave-one-out margin on the fixtures, the mean 0.336). A clip matches the owner when their score is at or above the threshold (even if someone else scores higher), else the best-scoring person at or above it (`DEFAULT_THRESHOLD` = 0.35, overridable per `verify` request). On real
+read speech (mini LibriSpeech dev-clean-2, 26 speakers, two enrollment clips each, test clips cut to 1.5-8 s) no
+same-voice clip of 2.5 s or more scored under 0.35 (2.6% at 1.5 s) while 3-7% of other voices cleared it; WeSpeaker at
+0.7 dropped 3.5% of same-voice 2.5 s clips. On the TTS fixtures in `tests/fixtures/speaker/` the same voice scores
+0.90 or more and a different voice under 0.19. Every `live_segment_dropped` log line carries `score` (`-` when not
+scored) and `threshold`, and every admitted segment logs the same as `live_segment_admitted` at `debug`, so the bar
+can be re-measured on a real enrollment.
 
 **Fails open** (short replies such as "yes" or a number must never be dropped): no people with clips, a model that is not
 pulled, a mismatched library, or a clip under 1 s (`MIN_SAMPLES`) all answer `is_him: true`, with `reason`
