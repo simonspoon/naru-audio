@@ -44,6 +44,12 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "
 ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["disable-linking"] }
 realfft = "3"
 
+# Native MLX (src/mlx/native.rs), Apple Silicon only: MLX does not build for
+# x86_64 macOS. Builds MLX from source with CMake and the Xcode Metal toolchain;
+# mlx.metallib must sit next to the binary (build.rs, .cargo/config.toml).
+[target.'cfg(all(target_arch = "aarch64", target_os = "macos"))'.dependencies]
+mlx-rs = "=0.32.0"
+
 # Replaces macOS `afconvert` where it does not exist (src/transcode.rs).
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "alac", "flac", "aiff", "caf", "wav", "pcm"] }
@@ -54,3 +60,9 @@ symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+# mlx-sys builds MLX as CMake Debug when its build script has debug
+# assertions, which compiles mlx.metallib with Metal logging into the same
+# target/mlx/ the release binary ships from. Keep it Release in every profile.
+[profile.dev.package.mlx-sys]
+debug-assertions = false

@@ -174,6 +174,9 @@ enum MlxAction {
     Setup,
     /// Show the recorded interpreter and whether it imports the sidecar.
     Status,
+    /// Check the in-process (native) MLX: mlx.metallib next to this binary
+    /// and a matmul on the GPU.
+    Check,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -326,11 +329,24 @@ fn open_registry() -> Result<Registry, ExitCode> {
     })
 }
 
-/// §3.7 `mlx setup|status`, on $NARU_AUDIO_HOME; both exit 1 on failure.
+/// §3.7 `mlx setup|status`, on $NARU_AUDIO_HOME, and `mlx check`; all exit 1
+/// on failure.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn mlx_command(action: MlxAction) -> ExitCode {
     use naru_audio::mlx;
 
+    if let MlxAction::Check = action {
+        return match mlx::native::self_check() {
+            Ok(report) => {
+                println!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("naru-audio: mlx check: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let Some(home) = registry::default_home() else {
         eprintln!("naru-audio: set NARU_AUDIO_HOME or HOME");
         return ExitCode::FAILURE;

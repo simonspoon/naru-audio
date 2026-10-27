@@ -8,7 +8,9 @@ alive; the `com.naru.audio` user agent can. Nothing loads it automatically.
   (ignored if absent), `bootstrap gui/<uid>` and `kickstart`. Re-running is idempotent.
 - It runs `naru-audio serve --allow-remote --listen 0.0.0.0:7870` (the manual run's flags),
   `RunAtLoad` + `KeepAlive`, `ProcessType` Interactive. Binary: `$PREFIX/bin/naru-audio`, else
-  the first of `~/.cargo/bin`, `~/.local/bin`, `/opt/homebrew/bin`.
+  the first of `~/.cargo/bin`, `~/.local/bin`, `/opt/homebrew/bin`. On Apple Silicon,
+  `mlx.metallib` must sit in that same directory (copy `target/release/mlx.metallib` with the
+  binary; `cargo install` does not); check with `naru-audio mlx check`.
 - Logs: `~/.naru-audio/serve.log` and `serve.err.log`.
 - Env: launchd starts bare, so the plist sets `HOME`, `RUST_LOG=naru_audio=info` and a `PATH`
   with `~/.naru-audio/mlx/.venv/bin` first (the MLX sidecar), then cargo, local, Homebrew and system dirs.

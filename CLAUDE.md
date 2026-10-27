@@ -10,6 +10,9 @@ These answer "where does X live". Check here first instead of running a filesyst
   - `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/sherpa-onnx-sys-1.13.6` (glob: `index.crates.io-*`; a stray `-sys-1.13.8` also exists, unused)
   - prebuilt static libs: `target/sherpa-onnx-prebuilt/` in the repo
   - Rust usage: `src/tts/sherpa.rs`, `src/stt/sherpa.rs`
+- Native MLX (mlx-rs 0.32, naru task 2378; Apple Silicon only): `src/mlx/native.rs`, check with `naru-audio mlx check`
+  - mlx-rs/mlx-sys source: `~/.cargo/registry/src/index.crates.io-*/mlx-rs-0.32.0`, `mlx-sys-0.6.0` (docs.rs build is broken; read source)
+  - build needs CMake + Xcode Metal toolchain (`xcrun -f metal`); `mlx.metallib` (~184 MB) builds into `target/mlx/` (`MLX_RS_METAL_PATH` in `.cargo/config.toml`); build.rs symlinks it to `target/<profile>/mlx.metallib`. Installs must copy it next to the binary.
 - Cargo crate docs: `cargo doc --no-deps --open`, or read source under `~/.cargo/registry/src/index.crates.io-*/<crate>-<ver>/` (`target/doc` does not exist until `cargo doc` runs)
 - Build docs: `README.md` at the repo root
 - launchd (opt-in, macOS): `scripts/launchd.sh install|uninstall`, gate `scripts/launchd-check.sh`; see `docs/launchd.md` (never alongside the brew service)

@@ -2,3 +2,8 @@
 # with /MT, so link the static CRT (Rust's msvc default is /MD).
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# mlx-sys builds mlx.metallib here instead of ~/.mlx/lib/<hash>, so build.rs
+# can link it next to the binary, where MLX looks first.
+[env]
+MLX_RS_METAL_PATH = { value = "target/mlx", relative = true }

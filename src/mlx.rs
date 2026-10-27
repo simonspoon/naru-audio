@@ -1,7 +1,9 @@
 //! §5.3 the MLX sidecar on Apple Silicon: `naru-audio mlx setup|status`
 //! (§3.7), the `[mlx] python` key of `config.toml` (§3.1), and the
-//! supervised process itself ([`sidecar`]).
+//! supervised process itself ([`sidecar`]); plus the in-process [`native`]
+//! MLX that will replace it.
 
+pub mod native;
 pub mod sidecar;
 
 use std::path::{Path, PathBuf};

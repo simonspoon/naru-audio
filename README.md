@@ -108,7 +108,8 @@ restarts it if it crashes (a `brew services stop` is respected), and logs to
 ### From source
 
 See [Building from source](#building-from-source), then put
-`target/release/naru-audio` on your `PATH` and run `naru-audio serve`
+`target/release/naru-audio` on your `PATH` (on Apple Silicon, with
+`target/release/mlx.metallib` beside it) and run `naru-audio serve`
 yourself (it logs to stderr when it is not installed by Homebrew).
 
 ## Models
@@ -526,8 +527,20 @@ cargo build --release
 ./target/release/naru-audio --help
 ```
 
-The MLX backend is compiled in only for `aarch64-apple-darwin`. No Python
-is needed to build; the sidecar's files and the admin UI are embedded in the
+The MLX backend is compiled in only for `aarch64-apple-darwin`. There the
+build also compiles MLX from source for the native (in-process) MLX path
+(`mlx-rs`), so it needs **CMake** (`brew install cmake`) and the **Xcode
+Metal toolchain** (`xcrun -f metal` must succeed; on Xcode 26 and later
+install it with `xcodebuild -downloadComponent MetalToolchain`). That makes
+the first build some minutes longer; later builds reuse it. MLX's GPU
+kernels come in a separate ~184 MB `mlx.metallib`, built into
+`target/mlx/` and linked next to the binary as
+`target/release/mlx.metallib`. **Whoever installs the binary copies
+`mlx.metallib` into the same directory** (`cp` follows the link; for a
+symlinked binary, the directory of the file it points to). Without it,
+MLX exits the process at its first GPU op;
+`naru-audio mlx check` confirms it is there and runs a matmul on the GPU.
+No Python is needed to build; the sidecar's files and the admin UI are embedded in the
 binary. `./start.sh` builds a release binary and runs `serve` with any
 arguments you pass.
 
