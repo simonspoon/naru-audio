@@ -8,6 +8,12 @@ class NaruAudio < Formula
     if Hardware::CPU.arm?
       url "https://github.com/simonspoon/naru-audio/releases/download/v0.1.0/naru-audio-darwin-arm64"
       sha256 "1111111111111111111111111111111111111111111111111111111111111111"
+
+      # MLX's GPU kernels: must sit next to the (symlink-resolved) binary.
+      resource "metallib" do
+        url "https://github.com/simonspoon/naru-audio/releases/download/v0.1.0/naru-audio-darwin-arm64.metallib"
+        sha256 "5555555555555555555555555555555555555555555555555555555555555555"
+      end
     else
       url "https://github.com/simonspoon/naru-audio/releases/download/v0.1.0/naru-audio-darwin-amd64"
       sha256 "2222222222222222222222222222222222222222222222222222222222222222"
@@ -26,7 +32,14 @@ class NaruAudio < Formula
 
   def install
     binary = Dir["naru-audio-*"].first || "naru-audio"
-    bin.install binary => "naru-audio"
+    if OS.mac? && Hardware::CPU.arm?
+      # libexec keeps the 184 MB metallib out of the prefix's bin.
+      libexec.install binary => "naru-audio"
+      resource("metallib").stage { libexec.install Dir["*.metallib"].first => "mlx.metallib" }
+      bin.install_symlink libexec/"naru-audio"
+    else
+      bin.install binary => "naru-audio"
+    end
   end
 
   def caveats
@@ -44,5 +57,6 @@ class NaruAudio < Formula
 
   test do
     assert_match "Local STT/TTS daemon for Naru", shell_output("#{bin}/naru-audio --help")
+    system bin/"naru-audio", "mlx", "check" if OS.mac? && Hardware::CPU.arm?
   end
 end

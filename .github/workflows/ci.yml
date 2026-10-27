@@ -20,6 +20,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # MLX (aarch64 macOS only) compiles its Metal kernels from source: it
+      # needs CMake and the Metal toolchain, a separate download since Xcode 26.
+      - name: Install Metal toolchain
+        if: runner.os == 'macOS'
+        run: |
+          cmake --version
+          xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
+          xcrun metal --version
+
       - name: Check
         run: cargo check --all-targets
 
