@@ -2,7 +2,8 @@
 //! Silero gates in the daemon, and a decode per utterance in the sidecar
 //! (`crate::mlx::sidecar`): parakeet-mlx or mlx-whisper, by model name.
 //! Neither has hotword biasing, so `hotwords` are ignored; only Whisper
-//! takes a language and reports word timestamps.
+//! takes a language and reports word timestamps. With `[mlx] native_stt`,
+//! Parakeet decodes in-process instead (`crate::mlx::parakeet`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,18 +14,26 @@ use super::sherpa::{load_gate, utterances, vad_model};
 use super::vad::VadConfig;
 use super::vocabulary::Vocabulary;
 use super::{Segment, SttError, SttModel, Word};
+use crate::mlx::parakeet::Parakeet;
 use crate::mlx::sidecar::{self, Sidecar};
 use crate::registry::manifest::{Kind, Manifest};
 
 pub struct MlxStt {
-    sidecar: Arc<Sidecar>,
+    engine: Engine,
     name: String,
-    /// Which load of `name` this is, for [`Sidecar::unload`].
-    instance: u64,
     vad_model: PathBuf,
     gate: Option<SpeechGate>,
-    /// What the load added to the sidecar's MLX active memory.
-    resident_bytes: u64,
+}
+
+enum Engine {
+    Sidecar {
+        sidecar: Arc<Sidecar>,
+        /// Which load of `name` this is, for [`Sidecar::unload`].
+        instance: u64,
+        /// What the load added to the sidecar's MLX active memory.
+        resident_bytes: u64,
+    },
+    Native(Parakeet),
 }
 
 impl MlxStt {
@@ -32,16 +41,27 @@ impl MlxStt {
     pub fn load(manifest: &Manifest, dir: &Path) -> Result<Self, SttError> {
         let vad_model = vad_model(manifest, dir)?;
         let home = dir.parent().and_then(Path::parent).unwrap_or(dir);
-        let sidecar = sidecar::for_home(home);
         let name = manifest.model.name.clone();
-        let (instance, resident_bytes, _) = sidecar.load(&name, Kind::Stt, dir)?;
+        let unavailable = |reason: String| SttError::BackendUnavailable {
+            backend: manifest.model.backend.clone(),
+            reason,
+        };
+        let engine = if crate::mlx::native_stt(home, &name).map_err(unavailable)? {
+            Engine::Native(Parakeet::load(dir).map_err(unavailable)?)
+        } else {
+            let sidecar = sidecar::for_home(home);
+            let (instance, resident_bytes, _) = sidecar.load(&name, Kind::Stt, dir)?;
+            Engine::Sidecar {
+                sidecar,
+                instance,
+                resident_bytes,
+            }
+        };
         Ok(MlxStt {
-            sidecar,
+            engine,
             name,
-            instance,
             vad_model,
             gate: load_gate(dir),
-            resident_bytes,
         })
     }
 }
@@ -72,20 +92,26 @@ impl SttModel for MlxStt {
         let rate = TARGET_SAMPLE_RATE as f64;
         let mut language = language.map(str::to_string);
         for (span, from, to) in utterances(pcm16k, &self.vad_model, self.gate.as_ref(), vad)? {
-            let done = self.sidecar.transcribe(
-                &self.name,
-                &pcm16k[from..to],
-                language.as_deref(),
-                false,
-                false,
-            )?;
-            language = language.or(done.language);
-            let text = done
-                .segments
-                .into_iter()
-                .map(|s| s.text)
-                .collect::<Vec<_>>()
-                .join(" ");
+            let text = match &self.engine {
+                Engine::Native(model) => model
+                    .transcribe(&pcm16k[from..to])
+                    .map_err(SttError::Native)?,
+                Engine::Sidecar { sidecar, .. } => {
+                    let done = sidecar.transcribe(
+                        &self.name,
+                        &pcm16k[from..to],
+                        language.as_deref(),
+                        false,
+                        false,
+                    )?;
+                    language = language.or(done.language);
+                    done.segments
+                        .into_iter()
+                        .map(|s| s.text)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }
+            };
             if !text.is_empty() {
                 on_segment(Segment {
                     start: span.start as f64 / rate,
@@ -124,7 +150,11 @@ impl SttModel for MlxStt {
         let mut language = language.map(str::to_string);
         let mut words = Vec::new();
         for (_, from, to) in utterances(pcm16k, &self.vad_model, self.gate.as_ref(), vad)? {
-            let done = self.sidecar.transcribe(
+            // Native Parakeet reports no word times, as the sidecar's does not.
+            let Engine::Sidecar { sidecar, .. } = &self.engine else {
+                return Err(SttError::WordTimestampsUnsupported);
+            };
+            let done = sidecar.transcribe(
                 &self.name,
                 &pcm16k[from..to],
                 language.as_deref(),
@@ -159,7 +189,10 @@ impl SttModel for MlxStt {
     }
 
     fn resident_bytes(&self) -> Option<u64> {
-        Some(self.resident_bytes)
+        Some(match &self.engine {
+            Engine::Sidecar { resident_bytes, .. } => *resident_bytes,
+            Engine::Native(model) => model.resident_bytes(),
+        })
     }
 }
 
@@ -167,6 +200,11 @@ impl SttModel for MlxStt {
 /// out stops the sidecar.
 impl Drop for MlxStt {
     fn drop(&mut self) {
-        self.sidecar.unload(&self.name, self.instance);
+        if let Engine::Sidecar {
+            sidecar, instance, ..
+        } = &self.engine
+        {
+            sidecar.unload(&self.name, *instance);
+        }
     }
 }

@@ -153,6 +153,8 @@ pub enum SttError {
     Vad(vad::VadError),
     /// The MLX sidecar answered a request with an error (§5.3).
     Sidecar(String),
+    /// The in-process MLX model failed a decode (naru task 2379).
+    Native(String),
     /// [`SttModel::decode_words`]'s default: this backend reports no
     /// per-token timestamps.
     WordTimestampsUnsupported,
@@ -175,6 +177,7 @@ impl std::fmt::Display for SttError {
             SttError::Engine(e) => e.fmt(f),
             SttError::Vad(e) => e.fmt(f),
             SttError::Sidecar(message) => write!(f, "the MLX sidecar failed: {message}"),
+            SttError::Native(message) => write!(f, "native MLX failed: {message}"),
             SttError::WordTimestampsUnsupported => {
                 write!(f, "this model does not report word timestamps")
             }
