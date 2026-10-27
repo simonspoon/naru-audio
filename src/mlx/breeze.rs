@@ -17,7 +17,9 @@
 //!   `mlx_sys` directly.
 //!
 //! The depth decoder recomputes its whole sequence for each codebook, as
-//! Python does (a cache there changes the sampled codes: naru task 2383).
+//! Python does. [`Params::depth_cache`] (naru task 2383, off by default)
+//! caches its keys and values within a frame instead: ~30 % faster, but the
+//! float order differs, so it samples different codes than the sidecar.
 //! Voice cloning (naru task 2382, from the 2369 prototype) adds the codec
 //! *encoder* (Mimi SEANet, 8-layer transformer, stride-2 downsample,
 //! split-RVQ encode, as `Qwen3TTSSpeechTokenizerEncoder` wires them), the
@@ -123,6 +125,9 @@ pub struct Params {
     /// A voice to clone: the reference WAV and its transcript (`ref_audio`,
     /// `ref_text`).
     pub reference: Option<(PathBuf, String)>,
+    /// Cache the depth decoder's keys and values within each frame (not in
+    /// Python): faster, but no longer bit-identical to the sidecar.
+    pub depth_cache: bool,
 }
 
 impl Default for Params {
@@ -138,6 +143,7 @@ impl Default for Params {
             repetition_penalty: 1.0,
             seed: None,
             reference: None,
+            depth_cache: false,
         }
     }
 }
@@ -648,6 +654,10 @@ impl KvCache {
     }
 }
 
+/// One depth decoder layer's keys and values for the frame being sampled
+/// ([`Params::depth_cache`]).
+type DepthKv = Option<(Array, Array)>;
+
 fn heads(x: &Array, b: i32, l: i32, h: i32, d: i32) -> R<Array> {
     Ok(x.reshape(&[b, l, h, d])?)
 }
@@ -896,18 +906,37 @@ impl Model {
 
     // ---------------- depth decoder (Llama) ----------------
 
-    /// `_DepthDecoder.next_logits`: the whole sequence is run again for each
-    /// codebook, as in Python (no cache).
-    fn depth_logits(&self, tokens: &Array, bb_hidden: &Array) -> R<Array> {
+    /// `_DepthDecoder.next_logits`: without `cache` the whole sequence is run
+    /// again for each codebook, as in Python. With it (one frame's, started
+    /// empty) only the tokens not yet cached are run.
+    fn depth_logits(
+        &self,
+        tokens: &Array,
+        bb_hidden: &Array,
+        mut cache: Option<&mut [DepthKv]>,
+    ) -> R<Array> {
         let w = &self.w;
         let t = tokens.shape()[1];
+        let start = cache
+            .as_ref()
+            .and_then(|c| c[0].as_ref())
+            .map_or(0, |(k, _)| k.shape()[2]);
+        let n = t - start;
         // `token_ids + positions[None, :] * vocab_size`.
-        let offsets: Vec<i32> = (0..t).map(|i| (i - 1).max(0) * VOCAB).collect();
-        let ids = ops::add(tokens, Array::from_slice(&offsets, &[1, t]))?;
+        let offsets: Vec<i32> = (start..t).map(|i| (i - 1).max(0) * VOCAB).collect();
+        let tokens = if start == 0 {
+            tokens.clone()
+        } else {
+            tokens.index((.., start..))
+        };
+        let ids = ops::add(&tokens, Array::from_slice(&offsets, &[1, n]))?;
         let emb = w.qemb(&ids, "depth_decoder.model.embed_tokens", None)?;
-        let emb = ops::concatenate(&[bb_hidden.expand_dims(1)?, emb.index((.., 1.., ..))], 1)?;
+        let emb = if start == 0 {
+            ops::concatenate(&[bb_hidden.expand_dims(1)?, emb.index((.., 1.., ..))], 1)?
+        } else {
+            emb
+        };
         let mut h = w.qlin(&emb, "depth_decoder.model.inputs_embeds_projector")?;
-        let n = t;
         for i in 0..DD_LAYERS {
             let p = format!("depth_decoder.model.layers.{i}");
             let xn = w.rms(&h, &format!("{p}.input_layernorm"), DD_EPS)?;
@@ -935,8 +964,23 @@ impl Model {
                 DD_HD,
             )?
             .transpose_axes(&[0, 2, 1, 3])?;
-            let q = fast::rope(&q, DD_HD, false, None, 1.0, 0, &self.dd_freqs)?;
-            let k = fast::rope(&k, DD_HD, false, None, 1.0, 0, &self.dd_freqs)?;
+            let q = fast::rope(&q, DD_HD, false, None, 1.0, start, &self.dd_freqs)?;
+            let k = fast::rope(&k, DD_HD, false, None, 1.0, start, &self.dd_freqs)?;
+            let (k, v) = match cache.as_deref_mut() {
+                Some(c) => {
+                    // At most 16 steps, so growing by concatenation is cheap.
+                    let (k, v) = match c[i].take() {
+                        Some((ck, cv)) => (
+                            ops::concatenate(&[ck, k], 2)?,
+                            ops::concatenate(&[cv, v], 2)?,
+                        ),
+                        None => (k, v),
+                    };
+                    c[i] = Some((k.clone(), v.clone()));
+                    (k, v)
+                }
+                None => (k, v),
+            };
             let scale = (DD_HD as f32).powf(-0.5);
             let o = if n > 1 {
                 fast::scaled_dot_product_attention(
@@ -1578,12 +1622,19 @@ impl Model {
                 }
                 // The codebooks stay on the device between steps: each step's
                 // graph is built while the GPU runs the one before, and the
-                // frame is read back once. The same ops, so the same tokens.
+                // frame is read back once. The same ops, so the same tokens
+                // (with `depth_cache` off).
                 let mut toks = Array::from_slice(&[0i32, first], &[1, 2]);
+                let mut dc: Vec<DepthKv> = vec![None; DD_LAYERS];
+                let mut udc: Vec<DepthKv> = vec![None; DD_LAYERS];
                 for _ in 0..NCB - 1 {
-                    let l = self.depth_logits(&toks, &ch)?;
+                    let l = self.depth_logits(&toks, &ch, p.depth_cache.then_some(&mut dc[..]))?;
                     let ul = match &uh {
-                        Some(u) => Some(self.depth_logits(&toks, u)?),
+                        Some(u) => Some(self.depth_logits(
+                            &toks,
+                            u,
+                            p.depth_cache.then_some(&mut udc[..]),
+                        )?),
                         None => None,
                     };
                     let l = Self::mask_reserved(&Self::cfg(l, ul, scale)?)?;

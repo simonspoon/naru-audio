@@ -195,6 +195,21 @@ pub fn native_tts(home: &Path, name: &str) -> Result<bool, String> {
     Ok(on)
 }
 
+/// Whether the native Breeze engine caches its depth decoder
+/// ([`breeze::Params::depth_cache`]): `[mlx] breeze_depth_cache = true`
+/// (naru task 2383; off by default, as it samples differently from the
+/// sidecar).
+pub fn breeze_depth_cache(home: &Path) -> Result<bool, String> {
+    let config = read_config(home)?;
+    let on = match config.get("mlx").and_then(|t| t.get("breeze_depth_cache")) {
+        None => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or("config.toml: `[mlx] breeze_depth_cache` is not true or false")?,
+    };
+    Ok(on)
+}
+
 /// Sets `[mlx] python`, keeping every other key and table, and their
 /// comments and layout. A symlinked `config.toml` stays a symlink: its
 /// target is what is replaced.
@@ -270,6 +285,22 @@ mod tests {
         // The STT switch is separate.
         std::fs::write(config_path(home.path()), "[mlx]\nnative_stt = false\n").unwrap();
         assert_eq!(native_tts(home.path(), breeze), Ok(false));
+    }
+
+    #[test]
+    fn breeze_depth_cache_is_off_by_default() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(breeze_depth_cache(home.path()), Ok(false));
+        std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = true\n").unwrap();
+        assert_eq!(breeze_depth_cache(home.path()), Ok(false));
+        std::fs::write(
+            config_path(home.path()),
+            "[mlx]\nbreeze_depth_cache = true\n",
+        )
+        .unwrap();
+        assert_eq!(breeze_depth_cache(home.path()), Ok(true));
+        std::fs::write(config_path(home.path()), "[mlx]\nbreeze_depth_cache = 1\n").unwrap();
+        assert!(breeze_depth_cache(home.path()).is_err());
     }
 
     #[test]

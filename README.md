@@ -373,6 +373,7 @@ max_resident = "8GiB"               # budget for loaded models; idle ones are ev
 python = "…"                        # written by `naru-audio mlx setup`; do not edit
 native_stt = true                   # parakeet-*-mlx runs in-process (8-bit, no Python); false runs it in the sidecar
 native_tts = false                  # true runs breeze-tts-2-8bit-mlx in-process (no Python, cloned voices too); false uses the sidecar
+breeze_depth_cache = false          # native Breeze only: true caches its depth decoder, ~30 % faster but different samples than the sidecar
 ```
 
 Environment variables:

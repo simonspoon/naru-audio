@@ -74,6 +74,8 @@ pub struct MlxTts {
     sample_rate: u32,
     /// Why the native engine did not load, when the sidecar stands in.
     native_error: Option<String>,
+    /// `[mlx] breeze_depth_cache`, for the native engine.
+    depth_cache: bool,
 }
 
 enum Engine {
@@ -102,6 +104,15 @@ impl MlxTts {
             Some(Breeze::load(dir))
         } else {
             None
+        };
+        let depth_cache = match native {
+            Some(Ok(_)) => crate::mlx::breeze_depth_cache(home).map_err(|reason| {
+                TtsError::BackendUnavailable {
+                    backend: manifest.model.backend.clone(),
+                    reason,
+                }
+            })?,
+            _ => false,
         };
         let (engine, sample_rate, native_error) = match native {
             Some(Ok(model)) => (Engine::Native(model), breeze::SAMPLE_RATE, None),
@@ -151,6 +162,7 @@ impl MlxTts {
                 .unwrap_or_default(),
             sample_rate,
             native_error,
+            depth_cache,
         })
     }
 }
@@ -315,6 +327,7 @@ impl MlxTts {
             params.instruct = options.instructions.clone();
         }
         params.seed = Some(options.seed);
+        params.depth_cache = self.depth_cache;
         for (name, &value) in &options.knobs {
             match name.as_str() {
                 "cfg_scale" => params.cfg_scale = Some(value),
