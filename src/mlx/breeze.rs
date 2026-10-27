@@ -18,21 +18,30 @@
 //!
 //! The depth decoder recomputes its whole sequence for each codebook, as
 //! Python does (a cache there changes the sampled codes: naru task 2383).
-//! Voice cloning (the codec encoder) is not ported (task 2382).
+//! Voice cloning (naru task 2382, from the 2369 prototype) adds the codec
+//! *encoder* (Mimi SEANet, 8-layer transformer, stride-2 downsample,
+//! split-RVQ encode, as `Qwen3TTSSpeechTokenizerEncoder` wires them), the
+//! reference WAV load with mlx-audio's polyphase resampler ([`resample`]),
+//! and the ref-text prompt segment. A reference's codes are a deterministic
+//! function of its file, so they are cached per file content.
 //!
 //! MLX runs on one thread that owns the model: [`Breeze`] sends it work.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use mlx_rs::fast::{self, ScaledDotProductAttentionMask};
-use mlx_rs::ops::indexing::{IndexOp, TryIndexMutOp, argmax_axis};
+use mlx_rs::ops::indexing::{IndexOp, TryIndexMutOp, argmax_axis, argmin_axis};
 use mlx_rs::ops::{self, argpartition_axis};
 use mlx_rs::{Array, Dtype, nn, random};
+use sha2::{Digest, Sha256};
+
+mod resample;
 
 type R<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -47,6 +56,8 @@ const KV_STEP: i32 = 256;
 const NCB: i32 = 16;
 const VOCAB: i32 = 2051;
 const CODEC_VOCAB: i32 = 2048;
+/// `codebook_eos_token_id`: the frame that ends a reference's codes.
+const EOS_CODE: i32 = 0;
 // Backbone (backbone_config): Qwen3, 28 layers.
 const BB_LAYERS: usize = 28;
 const BB_H: i32 = 16;
@@ -77,6 +88,15 @@ const CD_HD: i32 = 64;
 const CD_EPS: f32 = 1e-5;
 const CD_THETA: f32 = 10000.0;
 const CD_RATES: [i32; 4] = [8, 5, 4, 3];
+// Codec encoder (audio_tokenizer/config.json encoder_config).
+const CE_LAYERS: usize = 8;
+const CE_H: i32 = 8;
+const CE_HD: i32 = 64;
+const CE_RATIOS: [i32; 4] = [4, 5, 6, 8]; // reversed(upsampling_ratios)
+const CE_NQ: usize = 16; // encoder_valid_num_quantizers
+/// How many references' codes are kept (each is ~12 KB for a 15 s clip).
+const REF_CACHE: usize = 32;
+
 /// Of every sample produced.
 pub const SAMPLE_RATE: u32 = 24000;
 /// The sidecar's `STREAMING_INTERVAL` (0.32 s) in codec frames:
@@ -100,6 +120,9 @@ pub struct Params {
     pub repetition_penalty: f64,
     /// Seeds MLX's global random state before the first segment.
     pub seed: Option<u64>,
+    /// A voice to clone: the reference WAV and its transcript (`ref_audio`,
+    /// `ref_text`).
+    pub reference: Option<(PathBuf, String)>,
 }
 
 impl Default for Params {
@@ -114,6 +137,7 @@ impl Default for Params {
             top_k: 50,
             repetition_penalty: 1.0,
             seed: None,
+            reference: None,
         }
     }
 }
@@ -135,6 +159,9 @@ impl Params {
         }
         if self.cfg_scale.is_some_and(|c| !c.is_finite()) {
             return Err("cfg_scale must be finite.".to_string());
+        }
+        if self.reference.as_ref().is_some_and(|(_, t)| t.is_empty()) {
+            return Err("Breeze voice cloning requires ref_text with ref_audio.".to_string());
         }
         Ok(())
     }
@@ -427,6 +454,25 @@ fn arange_f32(from: i32, to: i32, div: f32) -> Result<Array, mlx_rs::error::Exce
     ops::divide(Array::from_slice(&v, &[to - from]), Array::from_f32(div))
 }
 
+/// mlx.nn.elu (alpha 1.0): `mx.where(x > 0, x, alpha * (mx.exp(x) - 1))`,
+/// compiled shapeless.
+fn elu(x: &Array) -> R<Array> {
+    let f = |x: &Array| -> Result<Array, mlx_rs::error::Exception> {
+        let c = |v: f32| Array::from_f32(v).as_dtype(x.dtype());
+        let neg = ops::multiply(c(1.0)?, ops::subtract(ops::exp(x)?, c(1.0)?)?)?;
+        ops::select(&ops::gt(x, c(0.0)?)?, x, &neg)
+    };
+    let mut cf = mlx_rs::transforms::compile::compile(f, true);
+    Ok(cf(x)?)
+}
+
+/// mimi `get_extra_padding_for_conv1d` (float division, as Python).
+fn extra_padding(len: i32, k: i32, stride: i32, total: i32) -> i32 {
+    let nframes = ((len + total - k).max(0)) as f64 / stride as f64 + 1.0;
+    let ideal = (nframes.ceil() as i32 - 1) * stride + k - total;
+    (ideal - len).max(0)
+}
+
 struct Weights {
     map: HashMap<String, Array>,
     /// One GPU stream for every quantized op, freed with the weights.
@@ -615,6 +661,13 @@ struct Model {
     // like Python's `1.0 + self.weight`.
     te_norms: HashMap<String, Array>,
     cd_inv_freq: Array,
+    /// Codec encoder weights, under the short names [`load_encoder`] gives.
+    ew: Weights,
+    /// Encoder RVQ codebooks (rvq_first's 1, then rvq_rest's first 15):
+    /// `embedding_sum / max(usage, eps)` and `|e|^2 / 2`.
+    ce_books: Vec<Codebook>,
+    /// Reference codes by the SHA-256 of the reference file.
+    ref_codes: RefCell<HashMap<[u8; 32], Array>>,
 }
 
 /// The conv buffers, overlap-add tails and transformer KV cache a stream of
@@ -1048,9 +1101,26 @@ impl Model {
         })
     }
 
-    /// The encoded text segment `_prompt_embeddings` builds for a request
-    /// with no reference clip.
-    fn prompt(&self, speaker: &str, text: &str, instruct: Option<&str>) -> R<Array> {
+    /// `_prompt_embeddings`: with a reference (its codes and transcript),
+    /// `{speaker}{ref_text}` encoded, then the reference codes and one EOS
+    /// frame through the backbone's audio embedding; then the target text.
+    fn prompt(
+        &self,
+        speaker: &str,
+        text: &str,
+        instruct: Option<&str>,
+        reference: Option<(&Array, &str)>,
+    ) -> R<Array> {
+        let mut parts = Vec::new();
+        if let Some((codes, ref_text)) = reference {
+            let enc = self
+                .tok
+                .encode(format!("{speaker}{ref_text}"), true)
+                .map_err(|e| format!("tokenize: {e}"))?;
+            parts.push(self.text_encode(enc.get_ids())?);
+            parts.push(self.audio_embed_codes(codes)?);
+            parts.push(self.audio_embed(&[EOS_CODE; NCB as usize])?);
+        }
         let target = match instruct {
             Some(i) if !i.is_empty() => format!("{speaker}<ins_bos>{i}<ins_eos>{text}"),
             _ => format!("{speaker}{text}"),
@@ -1059,7 +1129,156 @@ impl Model {
             .tok
             .encode(target, true)
             .map_err(|e| format!("tokenize: {e}"))?;
-        self.text_encode(enc.get_ids())
+        parts.push(self.text_encode(enc.get_ids())?);
+        if parts.len() == 1 {
+            return Ok(parts.pop().expect("one part"));
+        }
+        Ok(ops::concatenate(&parts, 1)?)
+    }
+
+    /// `backbone_model.embed_tokens(codes)` for codes [1, T, 16].
+    fn audio_embed_codes(&self, codes: &Array) -> R<Array> {
+        let offs: Vec<i32> = (0..NCB).map(|i| i * VOCAB).collect();
+        let offs = Array::from_slice(&offs, &[1, 1, NCB]).as_dtype(codes.dtype())?;
+        let ids = ops::add(codes, &offs)?;
+        let e = self.w.qemb(
+            &ids,
+            "backbone_model.embed_tokens.embed_audio_tokens",
+            Some("depth_decoder.model.embed_tokens.weight"),
+        )?;
+        Ok(e.sum_axis(-2, None)?)
+    }
+
+    // ---------------- codec encoder (Mimi, as Qwen3TTSSpeechTokenizerEncoder) ----------------
+
+    /// mimi `StreamableConv1d.__call__` (causal) on NLC input.
+    fn sconv(&self, x: &Array, p: &str, k: i32, stride: i32, edge: bool) -> R<Array> {
+        let total = k - stride;
+        let extra = extra_padding(x.shape()[1], k, stride, total);
+        let mode = if edge {
+            ops::PadMode::Edge
+        } else {
+            ops::PadMode::Constant
+        };
+        let x = ops::pad(x, &[(0, 0), (total, extra), (0, 0)][..], None, mode)?;
+        let y = ops::conv1d(&x, self.ew.g(&format!("{p}.weight"))?, stride, 0, 1, 1)?;
+        Ok(match self.ew.opt(&format!("{p}.bias")) {
+            Some(b) => ops::add(&y, b)?,
+            None => y,
+        })
+    }
+
+    /// `Qwen3TTSSpeechTokenizerEncoder.encode`: 24 kHz audio (not empty) ->
+    /// codes [1, T, 16] (uint32).
+    fn encode_ref(&self, audio: &[f32]) -> R<Array> {
+        let ew = &self.ew;
+        let mut x = Array::from_slice(audio, &[1, audio.len() as i32, 1]);
+        // SeanetEncoder
+        x = self.sconv(&x, "seanet.init", 7, 1, false)?;
+        for (li, &ratio) in CE_RATIOS.iter().enumerate() {
+            let r = x.clone();
+            let mut t = self.sconv(&elu(&x)?, &format!("seanet.{li}.res0"), 3, 1, false)?;
+            t = self.sconv(&elu(&t)?, &format!("seanet.{li}.res1"), 1, 1, false)?;
+            x = ops::add(&t, &r)?;
+            x = self.sconv(
+                &elu(&x)?,
+                &format!("seanet.{li}.down"),
+                ratio * 2,
+                ratio,
+                false,
+            )?;
+        }
+        x = self.sconv(&elu(&x)?, "seanet.final", 3, 1, false)?;
+        // ProjectedTransformer (8 layers, LayerNorm, RoPE, causal mask, gelu_approx MLP)
+        let l = x.shape()[1];
+        let mut m = vec![0f32; (l * l) as usize];
+        for q in 0..l {
+            for k in (q + 1)..l {
+                m[(q * l + k) as usize] = f32::NEG_INFINITY;
+            }
+        }
+        let mask = Array::from_slice(&m, &[1, 1, l, l]);
+        let mut h = x;
+        for i in 0..CE_LAYERS {
+            let p = format!("tf.{i}");
+            let n1 = fast::layer_norm(
+                &h,
+                ew.g(&format!("{p}.norm1.weight"))?,
+                ew.g(&format!("{p}.norm1.bias"))?,
+                1e-5,
+            )?;
+            let qkv = ew
+                .lin(&n1, &format!("{p}.in_proj"))?
+                .reshape(&[1, l, 3, CE_H, CE_HD])?;
+            let q = qkv.index((.., .., 0)).transpose_axes(&[0, 2, 1, 3])?;
+            let k = qkv.index((.., .., 1)).transpose_axes(&[0, 2, 1, 3])?;
+            let v = qkv.index((.., .., 2)).transpose_axes(&[0, 2, 1, 3])?;
+            let q = fast::rope(&q, CE_HD, false, 10000.0, 1.0, 0, None)?;
+            let k = fast::rope(&k, CE_HD, false, 10000.0, 1.0, 0, None)?;
+            let o = fast::scaled_dot_product_attention(
+                &q,
+                &k,
+                &v,
+                0.125,
+                ScaledDotProductAttentionMask::Array(&mask),
+                None,
+            )?;
+            let o = ew.lin(
+                &o.transpose_axes(&[0, 2, 1, 3])?.reshape(&[1, l, -1])?,
+                &format!("{p}.out_proj"),
+            )?;
+            h = ops::add(&h, ops::multiply(&o, ew.g(&format!("{p}.ls1"))?)?)?;
+            let n2 = fast::layer_norm(
+                &h,
+                ew.g(&format!("{p}.norm2.weight"))?,
+                ew.g(&format!("{p}.norm2.bias"))?,
+                1e-5,
+            )?;
+            let f = ew.lin(
+                &gelu_approx(&ew.lin(&n2, &format!("{p}.fc1"))?)?,
+                &format!("{p}.fc2"),
+            )?;
+            h = ops::add(&h, ops::multiply(&f, ew.g(&format!("{p}.ls2"))?)?)?;
+        }
+        // ConvDownsample1d (k 4, stride 2, edge padding, no bias)
+        let x = self.sconv(&h, "down", 4, 2, true)?;
+        // Split RVQ encode: rvq_first (1 codebook) and rvq_rest (its first 15
+        // of 31; the residual is sequential, so stopping there is exact) both
+        // start from x.
+        let mut codes = Vec::new();
+        for (name, books) in [("rvq_first", 0..1usize), ("rvq_rest", 1..CE_NQ)] {
+            let w = ew.g(&format!("q.{name}.input_proj.weight"))?;
+            let mut res = ops::conv1d(&x, w, 1, 0, 1, 1)?.reshape(&[-1, 256])?;
+            for b in books {
+                let (emb, c2) = &self.ce_books[b];
+                let dot = ops::matmul(&res, emb.t())?;
+                let idx = argmin_axis(ops::subtract(c2, &dot)?, -1, None)?;
+                let qv = emb.take_axis(&idx, 0)?;
+                res = ops::subtract(&res, &qv)?;
+                codes.push(idx);
+            }
+        }
+        Ok(ops::stack(&codes, -1)?.expand_dims(0)?)
+    }
+
+    /// The codes of the reference clip at `path`: from the cache if this
+    /// file's content was encoded before, else loaded and encoded. Python
+    /// encodes afresh for every prompt; the result is the same.
+    fn ref_codes(&self, path: &Path) -> R<Array> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let key: [u8; 32] = Sha256::digest(&bytes).into();
+        if let Some(codes) = self.ref_codes.borrow().get(&key) {
+            return Ok(codes.clone());
+        }
+        let audio = load_ref_audio(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let codes = self.encode_ref(&audio)?;
+        codes.eval()?;
+        let mut cache = self.ref_codes.borrow_mut();
+        if cache.len() >= REF_CACHE {
+            cache.clear();
+        }
+        cache.insert(key, codes.clone());
+        Ok(codes)
     }
 
     // ---------------- codec decoder (Qwen3-TTS 12 Hz tokenizer) ----------------
@@ -1313,11 +1532,21 @@ impl Model {
         let instruct = p.instruct.as_deref().filter(|i| !i.is_empty());
         let use_cfg = instruct.is_some() && !matches!(p.cfg_scale, None | Some(1.0));
         let scale = p.cfg_scale.unwrap_or(1.0);
+        let codes = match &p.reference {
+            Some((path, _)) => Some(self.ref_codes(path)?),
+            None => None,
+        };
+        let reference = p
+            .reference
+            .as_ref()
+            .zip(codes.as_ref())
+            .map(|((_, ref_text), codes)| (codes, ref_text.as_str()));
         let segments = segments(text);
         for segment in &segments {
-            let cond = self.prompt(&speaker, segment, instruct)?;
+            // Under CFG the uncond prompt carries the reference too.
+            let cond = self.prompt(&speaker, segment, instruct, reference)?;
             let uncond = if use_cfg {
-                Some(self.prompt(&speaker, segment, None)?)
+                Some(self.prompt(&speaker, segment, None, reference)?)
             } else {
                 None
             };
@@ -1415,13 +1644,19 @@ impl Model {
                 );
             }
         }
-        // Codec: drop the encoder; codebook embed = embedding_sum / clip(usage);
+        // Codec decoder (the encoder goes to `load_encoder`): codebook embed =
+        // embedding_sum / clip(usage);
         // conv weights from PyTorch layout to MLX's [out, kernel, in].
         let raw = Array::load_safetensors(dir.join("audio_tokenizer/model.safetensors"))?;
         let mut cw = HashMap::new();
         let mut usage: HashMap<String, Array> = HashMap::new();
         let mut sums: HashMap<String, Array> = HashMap::new();
+        let mut enc_raw = HashMap::new();
         for (k, v) in raw {
+            if k.starts_with("encoder.") {
+                enc_raw.insert(k, v);
+                continue;
+            }
             if !k.starts_with("decoder.") {
                 continue;
             }
@@ -1484,7 +1719,14 @@ impl Model {
         )?;
         let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
             .map_err(|e| format!("tokenizer: {e}"))?;
-        mlx_rs::transforms::eval(w.values().chain(cw.values()).chain(te_norms.values()))?;
+        let (ew, ce_books) = load_encoder(enc_raw)?;
+        mlx_rs::transforms::eval(
+            w.values()
+                .chain(cw.values())
+                .chain(te_norms.values())
+                .chain(ew.values())
+                .chain(ce_books.iter().flat_map(|(e, c2)| [e, c2])),
+        )?;
         Ok(Model {
             w: Weights::new(w),
             cw: Weights::new(cw),
@@ -1492,7 +1734,161 @@ impl Model {
             dd_freqs,
             te_norms,
             cd_inv_freq,
+            ew: Weights::new(ew),
+            ce_books,
+            ref_codes: RefCell::new(HashMap::new()),
         })
+    }
+}
+
+/// An encoder RVQ codebook's embeddings and their `|e|^2 / 2`.
+type Codebook = (Array, Array);
+
+/// The encoder half of `Qwen3TTSSpeechTokenizer.sanitize`, under short names:
+/// conv weights [out, in, k] -> [out, k, in]; q/k/v concatenated into
+/// `in_proj`; codebooks from `embedding_sum / max(cluster_usage, 1e-5)`.
+fn load_encoder(raw: HashMap<String, Array>) -> R<(HashMap<String, Array>, Vec<Codebook>)> {
+    let mut ew = HashMap::new();
+    let conv = |v: &Array| -> R<Array> { Ok(v.swap_axes(-1, -2)?) };
+    let seanet = |n: usize| -> Option<String> {
+        Some(match n {
+            0 => "seanet.init".into(),
+            3 | 6 | 9 | 12 => format!("seanet.{}.down", n / 3 - 1),
+            14 => "seanet.final".into(),
+            _ => return None,
+        })
+    };
+    let bad = |k: &str| format!("unexpected codec encoder weight `{k}`");
+    let mut qkv: HashMap<usize, [Option<Array>; 3]> = HashMap::new();
+    let mut books: HashMap<String, (Option<Array>, Option<Array>)> = HashMap::new();
+    for (k, v) in raw {
+        let parts: Vec<&str> = k.split('.').collect();
+        let index = |i: usize| -> R<usize> {
+            Ok(parts
+                .get(i)
+                .and_then(|p| p.parse().ok())
+                .ok_or_else(|| bad(&k))?)
+        };
+        if let Some(rest) = k.strip_prefix("encoder.encoder.layers.") {
+            let n = index(3)?;
+            let leaf = parts.last().expect("split is never empty");
+            let base = if rest.contains(".block.") {
+                let li = [1, 4, 7, 10]
+                    .iter()
+                    .position(|&x| x == n)
+                    .ok_or_else(|| bad(&k))?;
+                let res = if parts.get(5) == Some(&"1") { 0 } else { 1 };
+                format!("seanet.{li}.res{res}")
+            } else {
+                seanet(n).ok_or_else(|| bad(&k))?
+            };
+            let v = if v.ndim() == 3 { conv(&v)? } else { v };
+            ew.insert(format!("{base}.{leaf}"), v);
+        } else if k.starts_with("encoder.encoder_transformer.layers.") {
+            let i = index(3)?;
+            let rest = parts[4..].join(".");
+            let name = match rest.as_str() {
+                "self_attn.q_proj.weight" => {
+                    qkv.entry(i).or_default()[0] = Some(v);
+                    continue;
+                }
+                "self_attn.k_proj.weight" => {
+                    qkv.entry(i).or_default()[1] = Some(v);
+                    continue;
+                }
+                "self_attn.v_proj.weight" => {
+                    qkv.entry(i).or_default()[2] = Some(v);
+                    continue;
+                }
+                "self_attn.o_proj.weight" => "out_proj.weight",
+                "mlp.fc1.weight" => "fc1.weight",
+                "mlp.fc2.weight" => "fc2.weight",
+                "input_layernorm.weight" => "norm1.weight",
+                "input_layernorm.bias" => "norm1.bias",
+                "post_attention_layernorm.weight" => "norm2.weight",
+                "post_attention_layernorm.bias" => "norm2.bias",
+                "self_attn_layer_scale.scale" => "ls1",
+                "mlp_layer_scale.scale" => "ls2",
+                _ => return Err(bad(&k).into()),
+            };
+            ew.insert(format!("tf.{i}.{name}"), v);
+        } else if k == "encoder.downsample.conv.weight" {
+            ew.insert("down.weight".into(), conv(&v)?);
+        } else if let Some(rest) = k.strip_prefix("encoder.quantizer.") {
+            let name = if rest.starts_with("semantic_") {
+                "rvq_first"
+            } else {
+                "rvq_rest"
+            };
+            if rest.ends_with("input_proj.weight") {
+                ew.insert(format!("q.{name}.input_proj.weight"), conv(&v)?);
+            } else if rest.contains(".codebook.") && !rest.ends_with("initialized") {
+                let e = books.entry(format!("{name}.{}", index(4)?)).or_default();
+                if rest.ends_with("cluster_usage") {
+                    e.0 = Some(v)
+                } else {
+                    e.1 = Some(v)
+                }
+            }
+        }
+    }
+    for (i, [q, k, v]) in qkv {
+        let (Some(q), Some(k), Some(v)) = (q, k, v) else {
+            return Err(format!("codec encoder layer {i} lacks q, k or v").into());
+        };
+        ew.insert(
+            format!("tf.{i}.in_proj.weight"),
+            ops::concatenate(&[q, k, v], 0)?,
+        );
+    }
+    let mut ce_books = Vec::new();
+    for b in 0..CE_NQ {
+        let key = if b == 0 {
+            "rvq_first.0".to_string()
+        } else {
+            format!("rvq_rest.{}", b - 1)
+        };
+        let Some((Some(u), Some(sum))) = books.remove(&key) else {
+            return Err(format!("the codec encoder has no codebook `{key}`").into());
+        };
+        let emb = ops::divide(
+            &sum,
+            ops::maximum(&u, Array::from_f32(1e-5))?.expand_dims(-1)?,
+        )?;
+        let c2 = ops::divide(ops::square(&emb)?.sum_axis(-1, None)?, Array::from_f32(2.0))?;
+        ce_books.push((emb, c2));
+    }
+    Ok((ew, ce_books))
+}
+
+/// mlx-audio's `load_audio(path, sample_rate=24000)` for a mono 16-bit PCM
+/// WAV (what naru-audio stores): s16 `/ 32768.0` as f32, and a higher rate
+/// through the same kaiser_best polyphase FIR. Anything else is an error
+/// rather than audio that differs from the sidecar's.
+fn load_ref_audio(wav: &[u8]) -> R<Vec<f32>> {
+    let mut r = hound::WavReader::new(std::io::Cursor::new(wav))?;
+    let spec = r.spec();
+    if (spec.sample_format, spec.bits_per_sample) != (hound::SampleFormat::Int, 16) {
+        return Err("the native engine reads only 16-bit PCM WAV references".into());
+    }
+    if spec.channels != 1 {
+        return Err("the native engine reads only mono references".into());
+    }
+    let x: Vec<f32> = r
+        .samples::<i16>()
+        .map(|v| v.map(|v| v as f32 / 32768.0))
+        .collect::<Result<_, _>>()?;
+    if x.is_empty() {
+        return Err("the reference has no audio".into());
+    }
+    let sr = spec.sample_rate as usize;
+    let target = SAMPLE_RATE as usize;
+    if sr == target {
+        Ok(x)
+    } else if sr > target {
+        Ok(resample::resample_poly(&x, sr, target))
+    } else {
+        Err(format!("the native engine cannot upsample a {sr} Hz reference").into())
     }
 }
 
@@ -1564,5 +1960,45 @@ mod tests {
         assert!(bad(|p| p.top_p = 1.5));
         assert!(bad(|p| p.repetition_penalty = 0.0));
         assert!(bad(|p| p.cfg_scale = Some(f64::NAN)));
+        assert!(bad(
+            |p| p.reference = Some(("ref.wav".into(), String::new()))
+        ));
+        let p = Params {
+            reference: Some(("ref.wav".into(), "Hello.".to_string())),
+            ..Params::default()
+        };
+        assert!(p.check().is_ok());
+    }
+
+    fn wav(channels: u16, rate: u32, bits: u16, samples: &[i32]) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        let spec = hound::WavSpec {
+            channels,
+            sample_rate: rate,
+            bits_per_sample: bits,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::new(&mut out, spec).unwrap();
+        for &v in samples {
+            w.write_sample(v).unwrap();
+        }
+        w.finalize().unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn references_load_as_mlx_audio_does_or_fail() {
+        // 24 kHz s16 mono: s16 / 32768.
+        let x = load_ref_audio(&wav(1, 24000, 16, &[0, 16384, -32768])).unwrap();
+        assert_eq!(x, [0.0, 0.5, -1.0]);
+        // A higher rate is resampled to 24 kHz.
+        let x = load_ref_audio(&wav(1, 48000, 16, &[1000; 480])).unwrap();
+        assert_eq!(x.len(), 240);
+        // What would differ from the sidecar's audio is an error.
+        assert!(load_ref_audio(&wav(1, 24000, 16, &[])).is_err());
+        assert!(load_ref_audio(&wav(2, 24000, 16, &[0, 0])).is_err());
+        assert!(load_ref_audio(&wav(1, 24000, 24, &[0])).is_err());
+        assert!(load_ref_audio(&wav(1, 16000, 16, &[0])).is_err());
+        assert!(load_ref_audio(b"not a wav").is_err());
     }
 }

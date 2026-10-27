@@ -27,8 +27,8 @@
 //! to the sidecar when the native load fails. It takes `instructions`,
 //! `seed` and the `cfg_scale`, `temperature`, `top_p`, `top_k`,
 //! `repetition_penalty` and `max_tokens` knobs as mlx-audio does, and
-//! streams the same 0.32 s chunks; a cloned voice is an error there, since
-//! the codec encoder is not ported.
+//! streams the same 0.32 s chunks; a cloned voice (or a preview's clip)
+//! goes as `ref_audio` and `ref_text` there too (naru task 2382).
 //!
 //! The sidecar is held for a whole synthesis, so `synth` never lets the
 //! sink hold it: chunks go through an unbounded queue to a thread that
@@ -283,13 +283,6 @@ impl MlxTts {
         options: &SynthOptions,
         mut sink: Sink,
     ) -> Result<(), TtsError> {
-        let no_clone = || {
-            TtsError::Native(format!(
-                "`{}` cannot clone a voice with the native engine; \
-                 set `[mlx] native_tts = false` in config.toml to use the sidecar",
-                self.name
-            ))
-        };
         // The sidecar shim's own check: Breeze has no `speed`.
         if options.speed != 1.0 {
             return Err(TtsError::Native(format!(
@@ -298,20 +291,20 @@ impl MlxTts {
             )));
         }
         let mut params = breeze::Params::default();
-        if options.reference.is_some() {
-            return Err(no_clone());
+        if let Some((wav, ref_text)) = &options.reference {
+            params.reference = Some((wav.clone(), ref_text.clone()));
         } else if let Some(v) = self.voices.iter().find(|v| v.id == voice) {
             params.speaker = v.id.clone();
-            if v.reference.is_some() {
-                return Err(no_clone());
+            if let Some(reference) = &v.reference {
+                // No transcript: Breeze refuses this, as in the sidecar.
+                params.reference = Some((self.dir.join(reference), String::new()));
             }
-        } else if self
+        } else if let Some(c) = self
             .cloned
             .as_deref()
             .and_then(|home| voices::find(home, voice))
-            .is_some()
         {
-            return Err(no_clone());
+            params.reference = Some((c.wav, c.text));
         } else if !(self.instructs && self.voices.is_empty()) {
             return Err(TtsError::UnknownVoice {
                 model: self.name.clone(),

@@ -372,7 +372,7 @@ max_resident = "8GiB"               # budget for loaded models; idle ones are ev
 [mlx]
 python = "…"                        # written by `naru-audio mlx setup`; do not edit
 native_stt = true                   # parakeet-*-mlx runs in-process (8-bit, no Python); false runs it in the sidecar
-native_tts = false                  # true runs breeze-tts-2-8bit-mlx in-process (no Python; no voice cloning yet); false uses the sidecar
+native_tts = false                  # true runs breeze-tts-2-8bit-mlx in-process (no Python, cloned voices too); false uses the sidecar
 ```
 
 Environment variables:
