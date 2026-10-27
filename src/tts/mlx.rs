@@ -22,9 +22,9 @@
 //! `knobs`) goes as `request["knobs"]`, a name-to-number object the
 //! sidecar folds straight into `generate`'s kwargs.
 //!
-//! Breeze decodes in-process instead (`crate::mlx::breeze`) when
-//! `[mlx] native_tts = true` (naru task 2381; off by default), and falls back
-//! to the sidecar when the native load fails. It takes `instructions`,
+//! 8-bit Breeze decodes in-process instead (`crate::mlx::breeze`) unless
+//! `[mlx] native_tts` is false (naru task 2384), and falls back to the
+//! sidecar when the native load fails. It takes `instructions`,
 //! `seed` and the `cfg_scale`, `temperature`, `top_p`, `top_k`,
 //! `repetition_penalty` and `max_tokens` knobs as mlx-audio does, and
 //! streams the same 0.32 s chunks; a cloned voice (or a preview's clip)

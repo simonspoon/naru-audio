@@ -179,15 +179,17 @@ pub fn native_stt(home: &Path, name: &str) -> Result<bool, String> {
 }
 
 /// Whether TTS model `name` runs in-process ([`breeze`]) instead of in the
-/// sidecar: any Breeze model, only if `config.toml` sets
-/// `[mlx] native_tts = true` (naru task 2381; off by default).
+/// sidecar: the 8-bit Breeze model (the only checkpoint ported), unless
+/// `config.toml` sets `[mlx] native_tts = false` (naru task 2384).
 pub fn native_tts(home: &Path, name: &str) -> Result<bool, String> {
-    if !name.starts_with("breeze") {
+    // Tracks `breeze::check_quantization`: other Breeze checkpoints would
+    // only fail the native load.
+    if !(name.starts_with("breeze") && name.contains("8bit")) {
         return Ok(false);
     }
     let config = read_config(home)?;
     let on = match config.get("mlx").and_then(|t| t.get("native_tts")) {
-        None => false,
+        None => true,
         Some(v) => v
             .as_bool()
             .ok_or("config.toml: `[mlx] native_tts` is not true or false")?,
@@ -266,25 +268,28 @@ mod tests {
     }
 
     #[test]
-    fn native_tts_is_off_by_default_and_breeze_only() {
+    fn native_tts_is_the_default_and_8bit_breeze_only() {
         let home = tempfile::tempdir().unwrap();
         let breeze = "breeze-tts-2-8bit-mlx";
         let qwen = "qwen3-tts-12hz-0.6b-base-mlx";
-        // No config.toml, and no key: the sidecar.
-        assert_eq!(native_tts(home.path(), breeze), Ok(false));
+        // No config.toml, and no key: native.
+        assert_eq!(native_tts(home.path(), breeze), Ok(true));
         std::fs::write(config_path(home.path()), "[mlx]\npython = \"/p\"\n").unwrap();
-        assert_eq!(native_tts(home.path(), breeze), Ok(false));
-        std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = false\n").unwrap();
-        assert_eq!(native_tts(home.path(), breeze), Ok(false));
+        assert_eq!(native_tts(home.path(), breeze), Ok(true));
         std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = true\n").unwrap();
         assert_eq!(native_tts(home.path(), breeze), Ok(true));
-        // Only Breeze has a native port.
+        // Only 8-bit Breeze has a native port.
         assert_eq!(native_tts(home.path(), qwen), Ok(false));
+        assert_eq!(native_tts(home.path(), "breeze-tts-2-mlx"), Ok(false));
+        assert_eq!(native_tts(home.path(), "breeze-tts-2-4bit-mlx"), Ok(false));
+        // Switched off: the sidecar.
+        std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = false\n").unwrap();
+        assert_eq!(native_tts(home.path(), breeze), Ok(false));
         std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = \"yes\"\n").unwrap();
         assert!(native_tts(home.path(), breeze).is_err());
         // The STT switch is separate.
         std::fs::write(config_path(home.path()), "[mlx]\nnative_stt = false\n").unwrap();
-        assert_eq!(native_tts(home.path(), breeze), Ok(false));
+        assert_eq!(native_tts(home.path(), breeze), Ok(true));
     }
 
     #[test]
