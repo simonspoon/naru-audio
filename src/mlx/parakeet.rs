@@ -53,7 +53,7 @@ impl Parakeet {
             .name("mlx-parakeet".to_string())
             .spawn(move || {
                 let model = (|| -> R<(Model, u64)> {
-                    mlx_rs::memory::set_cache_limit(CACHE_LIMIT)?;
+                    super::native::raise_cache_limit(CACHE_LIMIT)?;
                     let before = mlx_rs::memory::active_memory()?;
                     let model = Model::load(&dir)?;
                     let after = mlx_rs::memory::active_memory()?;

@@ -688,6 +688,7 @@ impl ModelManager {
                 backend: s.backend.clone(),
                 engine: match &s.state {
                     State::Ready(Resident::Stt(model)) => model.engine().map(|(e, _)| e),
+                    State::Ready(Resident::Tts(model)) => model.engine().map(|(e, _)| e),
                     _ => None,
                 },
                 resident_bytes: s.resident_bytes,
@@ -870,7 +871,7 @@ impl ModelManager {
 
         let engine = match &loaded.model {
             Resident::Stt(model) => model.engine(),
-            Resident::Tts(_) => None,
+            Resident::Tts(model) => model.engine(),
         };
         if let Some((engine, Some(error))) = engine {
             self.log.line(

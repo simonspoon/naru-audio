@@ -102,6 +102,13 @@ pub trait TtsModel: Send + Sync {
     fn resident_bytes(&self) -> Option<u64> {
         None
     }
+
+    /// Which engine runs the model when its backend has more than one
+    /// (MLX: `native` or `sidecar`), and why the native one failed to load
+    /// when the sidecar stands in for it.
+    fn engine(&self) -> Option<(&'static str, Option<&str>)> {
+        None
+    }
 }
 
 #[derive(Debug)]
@@ -139,6 +146,8 @@ pub enum TtsError {
     GenerateFailed,
     /// The MLX sidecar answered with an error.
     Sidecar(String),
+    /// The in-process MLX engine failed.
+    Native(String),
 }
 
 impl std::fmt::Display for TtsError {
@@ -166,6 +175,7 @@ impl std::fmt::Display for TtsError {
             TtsError::InvalidGap(gap) => write!(f, "gap {gap} is not between 0 and 5 seconds"),
             TtsError::GenerateFailed => write!(f, "synthesis produced no audio"),
             TtsError::Sidecar(message) => write!(f, "the MLX sidecar failed: {message}"),
+            TtsError::Native(message) => write!(f, "native MLX failed: {message}"),
         }
     }
 }

@@ -3,6 +3,7 @@
 //! supervised process itself ([`sidecar`]); plus the in-process [`native`]
 //! MLX that will replace it.
 
+pub mod breeze;
 pub mod native;
 pub mod parakeet;
 pub mod sidecar;
@@ -177,6 +178,23 @@ pub fn native_stt(home: &Path, name: &str) -> Result<bool, String> {
     Ok(on)
 }
 
+/// Whether TTS model `name` runs in-process ([`breeze`]) instead of in the
+/// sidecar: any Breeze model, only if `config.toml` sets
+/// `[mlx] native_tts = true` (naru task 2381; off by default).
+pub fn native_tts(home: &Path, name: &str) -> Result<bool, String> {
+    if !name.starts_with("breeze") {
+        return Ok(false);
+    }
+    let config = read_config(home)?;
+    let on = match config.get("mlx").and_then(|t| t.get("native_tts")) {
+        None => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or("config.toml: `[mlx] native_tts` is not true or false")?,
+    };
+    Ok(on)
+}
+
 /// Sets `[mlx] python`, keeping every other key and table, and their
 /// comments and layout. A symlinked `config.toml` stays a symlink: its
 /// target is what is replaced.
@@ -230,6 +248,28 @@ mod tests {
         assert_eq!(native_stt(home.path(), pk), Ok(false));
         std::fs::write(config_path(home.path()), "[mlx]\nnative_stt = \"yes\"\n").unwrap();
         assert!(native_stt(home.path(), pk).is_err());
+    }
+
+    #[test]
+    fn native_tts_is_off_by_default_and_breeze_only() {
+        let home = tempfile::tempdir().unwrap();
+        let breeze = "breeze-tts-2-8bit-mlx";
+        let qwen = "qwen3-tts-12hz-0.6b-base-mlx";
+        // No config.toml, and no key: the sidecar.
+        assert_eq!(native_tts(home.path(), breeze), Ok(false));
+        std::fs::write(config_path(home.path()), "[mlx]\npython = \"/p\"\n").unwrap();
+        assert_eq!(native_tts(home.path(), breeze), Ok(false));
+        std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = false\n").unwrap();
+        assert_eq!(native_tts(home.path(), breeze), Ok(false));
+        std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = true\n").unwrap();
+        assert_eq!(native_tts(home.path(), breeze), Ok(true));
+        // Only Breeze has a native port.
+        assert_eq!(native_tts(home.path(), qwen), Ok(false));
+        std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = \"yes\"\n").unwrap();
+        assert!(native_tts(home.path(), breeze).is_err());
+        // The STT switch is separate.
+        std::fs::write(config_path(home.path()), "[mlx]\nnative_stt = false\n").unwrap();
+        assert_eq!(native_tts(home.path(), breeze), Ok(false));
     }
 
     #[test]

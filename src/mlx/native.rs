@@ -2,6 +2,7 @@
 //! (naru task 2378: build foundation only, no model yet).
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use mlx_rs::{Array, Device, ops, with_device};
 
@@ -14,6 +15,20 @@ pub fn metallib_path() -> Result<PathBuf, String> {
         .and_then(|p| p.canonicalize())
         .map_err(|e| format!("current_exe: {e}"))?;
     Ok(exe.with_file_name("mlx.metallib"))
+}
+
+/// The largest MLX cache limit any native model has asked for.
+static CACHE_LIMIT: Mutex<usize> = Mutex::new(0);
+
+/// Raises MLX's buffer cache limit to `limit`, never lowers it: the limit is
+/// process-wide, so a model loaded later must not shrink an earlier one's.
+pub fn raise_cache_limit(limit: usize) -> Result<(), mlx_rs::error::Exception> {
+    let mut max = CACHE_LIMIT.lock().unwrap_or_else(|e| e.into_inner());
+    if limit > *max {
+        mlx_rs::memory::set_cache_limit(limit)?;
+        *max = limit;
+    }
+    Ok(())
 }
 
 /// A 2x2 matmul on the GPU; `Ok` holds its result, `[7, 10, 15, 22]`.

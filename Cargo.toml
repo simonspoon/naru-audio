@@ -49,6 +49,10 @@ realfft = "3"
 # mlx.metallib must sit next to the binary (build.rs, .cargo/config.toml).
 [target.'cfg(all(target_arch = "aarch64", target_os = "macos"))'.dependencies]
 mlx-rs = "=0.32.0"
+# Breeze's mxfp8 quantized matmul and dequantize (src/mlx/breeze.rs): mlx-rs
+# hardcodes MLX's affine mode. The version mlx-rs 0.32 already pulls in.
+mlx-sys = "=0.6.0"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 
 # Replaces macOS `afconvert` where it does not exist (src/transcode.rs).
 [target.'cfg(not(target_os = "macos"))'.dependencies]

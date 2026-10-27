@@ -22,6 +22,14 @@
 //! `knobs`) goes as `request["knobs"]`, a name-to-number object the
 //! sidecar folds straight into `generate`'s kwargs.
 //!
+//! Breeze decodes in-process instead (`crate::mlx::breeze`) when
+//! `[mlx] native_tts = true` (naru task 2381; off by default), and falls back
+//! to the sidecar when the native load fails. It takes `instructions`,
+//! `seed` and the `cfg_scale`, `temperature`, `top_p`, `top_k`,
+//! `repetition_penalty` and `max_tokens` knobs as mlx-audio does, and
+//! streams the same 0.32 s chunks; a cloned voice is an error there, since
+//! the codec encoder is not ported.
+//!
 //! The sidecar is held for a whole synthesis, so `synth` never lets the
 //! sink hold it: chunks go through an unbounded queue to a thread that
 //! feeds the sink, and the sidecar is free once generation ends, however
@@ -40,16 +48,15 @@ use serde_json::{Value, json};
 
 use super::sherpa::check;
 use super::{Sink, SynthOptions, TtsError, TtsModel};
+use crate::mlx::breeze::{self, Breeze};
 use crate::mlx::sidecar::{self, Sidecar};
 use crate::registry::manifest::{Kind, Manifest, Voice};
 use crate::stt::SttError;
 use crate::voices;
 
 pub struct MlxTts {
-    sidecar: Arc<Sidecar>,
+    engine: Engine,
     name: String,
-    /// Which load of `name` this is, for [`Sidecar::unload`].
-    instance: u64,
     dir: PathBuf,
     voices: Vec<Voice>,
     /// The home whose cloned voices the model speaks in, if it clones.
@@ -65,22 +72,68 @@ pub struct MlxTts {
     integer_knobs: std::collections::HashSet<String>,
     /// What the sidecar's `load` reported.
     sample_rate: u32,
-    /// What the load added to the sidecar's MLX active memory.
-    resident_bytes: u64,
+    /// Why the native engine did not load, when the sidecar stands in.
+    native_error: Option<String>,
+}
+
+enum Engine {
+    Sidecar {
+        sidecar: Arc<Sidecar>,
+        name: String,
+        /// Which load of `name` this is, for [`Sidecar::unload`].
+        instance: u64,
+        /// What the load added to the sidecar's MLX active memory.
+        resident_bytes: u64,
+    },
+    Native(Breeze),
 }
 
 impl MlxTts {
     /// `dir` is `models/<name>/`, in the home whose sidecar loads it (§3.1).
     pub fn load(manifest: &Manifest, dir: &Path) -> Result<Self, TtsError> {
         let home = dir.parent().and_then(Path::parent).unwrap_or(dir);
-        let sidecar = sidecar::for_home(home);
         let name = manifest.model.name.clone();
-        let (instance, resident_bytes, answer) =
-            sidecar.load(&name, Kind::Tts, dir).map_err(tts_error)?;
-        let mut tts = MlxTts {
-            sidecar,
+        let native = if crate::mlx::native_tts(home, &name).map_err(|reason| {
+            TtsError::BackendUnavailable {
+                backend: manifest.model.backend.clone(),
+                reason,
+            }
+        })? {
+            Some(Breeze::load(dir))
+        } else {
+            None
+        };
+        let (engine, sample_rate, native_error) = match native {
+            Some(Ok(model)) => (Engine::Native(model), breeze::SAMPLE_RATE, None),
+            native => {
+                let sidecar = sidecar::for_home(home);
+                let (instance, resident_bytes, answer) = sidecar
+                    .load(&name, Kind::Tts, dir)
+                    .map_err(|e| match (&native, tts_error(e)) {
+                        // Neither loaded: say why for both.
+                        (Some(Err(native)), TtsError::Sidecar(sidecar)) => {
+                            TtsError::Sidecar(format!("native: {native}; sidecar: {sidecar}"))
+                        }
+                        (_, e) => e,
+                    })?;
+                let engine = Engine::Sidecar {
+                    sidecar,
+                    name: name.clone(),
+                    instance,
+                    resident_bytes,
+                };
+                // An error below drops `engine`, which unloads the model.
+                let sample_rate = answer["sample_rate"]
+                    .as_u64()
+                    .and_then(|r| u32::try_from(r).ok())
+                    .filter(|&r| r > 0)
+                    .ok_or_else(|| TtsError::Sidecar("`load` has no sample_rate".to_string()))?;
+                (engine, sample_rate, native.and_then(Result::err))
+            }
+        };
+        Ok(MlxTts {
+            engine,
             name,
-            instance,
             dir: dir.to_path_buf(),
             voices: manifest.voices.clone(),
             cloned: manifest.clones().then(|| home.to_path_buf()),
@@ -96,16 +149,9 @@ impl MlxTts {
                         .collect()
                 })
                 .unwrap_or_default(),
-            sample_rate: 0,
-            resident_bytes,
-        };
-        // An error here drops `tts`, which unloads the model.
-        tts.sample_rate = answer["sample_rate"]
-            .as_u64()
-            .and_then(|r| u32::try_from(r).ok())
-            .filter(|&r| r > 0)
-            .ok_or_else(|| TtsError::Sidecar("`load` has no sample_rate".to_string()))?;
-        Ok(tts)
+            sample_rate,
+            native_error,
+        })
     }
 }
 
@@ -126,6 +172,12 @@ impl TtsModel for MlxTts {
         mut sink: Sink,
     ) -> Result<(), TtsError> {
         check(text, options)?;
+        if let Engine::Native(model) = &self.engine {
+            return self.synth_native(model, text, voice, options, sink);
+        }
+        let Engine::Sidecar { sidecar, .. } = &self.engine else {
+            unreachable!("not native");
+        };
         let mut request = json!({"text": text, "speed": options.speed, "seed": options.seed});
         if let Some((wav, ref_text)) = &options.reference {
             // §2.6 `POST /api/voices/preview` (naru task 1458): an explicit
@@ -194,8 +246,7 @@ impl TtsModel for MlxTts {
                     }
                 }
             });
-            let result = self
-                .sidecar
+            let result = sidecar
                 .synth(&self.name, request, &mut |samples: &[f32]| {
                     tx.send(samples.to_vec()).is_ok()
                 })
@@ -207,15 +258,101 @@ impl TtsModel for MlxTts {
     }
 
     fn resident_bytes(&self) -> Option<u64> {
-        Some(self.resident_bytes)
+        Some(match &self.engine {
+            Engine::Sidecar { resident_bytes, .. } => *resident_bytes,
+            Engine::Native(model) => model.resident_bytes(),
+        })
+    }
+
+    fn engine(&self) -> Option<(&'static str, Option<&str>)> {
+        Some(match &self.engine {
+            Engine::Sidecar { .. } => ("sidecar", self.native_error.as_deref()),
+            Engine::Native(_) => ("native", None),
+        })
     }
 }
 
-/// Unloading the model unloads it from the sidecar, and the last MLX model
-/// out stops the sidecar.
-impl Drop for MlxTts {
+impl MlxTts {
+    /// `synth` on the in-process engine: the same request the sidecar
+    /// would get, as [`breeze::Params`].
+    fn synth_native(
+        &self,
+        model: &Breeze,
+        text: &str,
+        voice: &str,
+        options: &SynthOptions,
+        mut sink: Sink,
+    ) -> Result<(), TtsError> {
+        let no_clone = || {
+            TtsError::Native(format!(
+                "`{}` cannot clone a voice with the native engine; \
+                 set `[mlx] native_tts = false` in config.toml to use the sidecar",
+                self.name
+            ))
+        };
+        // The sidecar shim's own check: Breeze has no `speed`.
+        if options.speed != 1.0 {
+            return Err(TtsError::Native(format!(
+                "{} does not support speed (got {}); only the default, 1.0, is accepted",
+                self.name, options.speed
+            )));
+        }
+        let mut params = breeze::Params::default();
+        if options.reference.is_some() {
+            return Err(no_clone());
+        } else if let Some(v) = self.voices.iter().find(|v| v.id == voice) {
+            params.speaker = v.id.clone();
+            if v.reference.is_some() {
+                return Err(no_clone());
+            }
+        } else if self
+            .cloned
+            .as_deref()
+            .and_then(|home| voices::find(home, voice))
+            .is_some()
+        {
+            return Err(no_clone());
+        } else if !(self.instructs && self.voices.is_empty()) {
+            return Err(TtsError::UnknownVoice {
+                model: self.name.clone(),
+                voice: voice.to_string(),
+            });
+        }
+        if self.instructs {
+            params.instruct = options.instructions.clone();
+        }
+        params.seed = Some(options.seed);
+        for (name, &value) in &options.knobs {
+            match name.as_str() {
+                "cfg_scale" => params.cfg_scale = Some(value),
+                "temperature" => params.temperature = value,
+                "top_p" => params.top_p = value,
+                "top_k" => params.top_k = value as usize,
+                "repetition_penalty" => params.repetition_penalty = value,
+                "max_tokens" => params.max_tokens = value as usize,
+                // mlx-audio's `generate` swallows any other kwarg.
+                _ => {}
+            }
+        }
+        model
+            .synth(text, &params, &mut |samples| sink(samples))
+            .map_err(TtsError::Native)
+    }
+}
+
+/// Unloading a sidecar model unloads it from the sidecar, and the last MLX
+/// model out stops the sidecar. A native one frees itself.
+impl Drop for Engine {
     fn drop(&mut self) {
-        self.sidecar.unload(&self.name, self.instance);
+        if let Engine::Sidecar {
+            sidecar,
+            name,
+            instance,
+            ..
+        } = self
+        {
+            sidecar.unload(name, *instance);
+        }
     }
 }
 
