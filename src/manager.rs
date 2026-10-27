@@ -429,6 +429,8 @@ pub struct Status {
     pub name: String,
     pub kind: Kind,
     pub backend: String,
+    /// [`SttModel::engine`], once loaded.
+    pub engine: Option<&'static str>,
     pub resident_bytes: u64,
     /// When an idle model unloads; `None` while busy, loading, or kept forever.
     pub expires_at: Option<SystemTime>,
@@ -684,6 +686,10 @@ impl ModelManager {
                 name: name.clone(),
                 kind: s.kind,
                 backend: s.backend.clone(),
+                engine: match &s.state {
+                    State::Ready(Resident::Stt(model)) => model.engine().map(|(e, _)| e),
+                    _ => None,
+                },
                 resident_bytes: s.resident_bytes,
                 expires_at: s.expires_at,
                 busy: s.in_flight > 0,
@@ -862,14 +868,26 @@ impl ModelManager {
             );
         }
 
+        let engine = match &loaded.model {
+            Resident::Stt(model) => model.engine(),
+            Resident::Tts(_) => None,
+        };
+        if let Some((engine, Some(error))) = engine {
+            self.log.line(
+                "warn",
+                None,
+                &format!("native_load_failed model={name} engine={engine} error={error}"),
+            );
+        }
         self.log.info(
             None,
             &format!(
-                "load model={name} ms={} rss={}",
+                "load model={name} ms={} rss={}{}",
                 started.elapsed().as_millis(),
                 loaded
                     .measured_bytes
-                    .map_or("-".to_string(), |b| b.to_string())
+                    .map_or("-".to_string(), |b| b.to_string()),
+                engine.map_or(String::new(), |(e, _)| format!(" engine={e}"))
             ),
         );
         if measured.is_some() {

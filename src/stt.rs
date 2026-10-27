@@ -136,6 +136,13 @@ pub trait SttModel: Send + Sync {
     fn resident_bytes(&self) -> Option<u64> {
         None
     }
+
+    /// Which engine runs the model when its backend has more than one
+    /// (MLX: `native` or `sidecar`), and why the native one failed to load
+    /// when the sidecar stands in for it.
+    fn engine(&self) -> Option<(&'static str, Option<&str>)> {
+        None
+    }
 }
 
 #[derive(Debug)]

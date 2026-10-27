@@ -601,6 +601,7 @@ async fn ps(State(st): State<Arc<AppState>>) -> Json<Value> {
                     "name": m.name,
                     "kind": m.kind.as_str(),
                     "backend": m.backend,
+                    "engine": m.engine,
                     "resident_bytes": m.resident_bytes,
                     "expires_at": m.expires_at.map(|t| humantime::format_rfc3339_seconds(t).to_string()),
                     "busy": m.busy,

@@ -2,8 +2,9 @@
 //! Silero gates in the daemon, and a decode per utterance in the sidecar
 //! (`crate::mlx::sidecar`): parakeet-mlx or mlx-whisper, by model name.
 //! Neither has hotword biasing, so `hotwords` are ignored; only Whisper
-//! takes a language and reports word timestamps. With `[mlx] native_stt`,
-//! Parakeet decodes in-process instead (`crate::mlx::parakeet`).
+//! takes a language and reports word timestamps. Parakeet decodes
+//! in-process instead (`crate::mlx::parakeet`) unless `[mlx] native_stt`
+//! is false, and falls back to the sidecar when the native load fails.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +24,8 @@ pub struct MlxStt {
     name: String,
     vad_model: PathBuf,
     gate: Option<SpeechGate>,
+    /// Why the native engine did not load, when the sidecar stands in.
+    native_error: Option<String>,
 }
 
 enum Engine {
@@ -46,15 +49,31 @@ impl MlxStt {
             backend: manifest.model.backend.clone(),
             reason,
         };
-        let engine = if crate::mlx::native_stt(home, &name).map_err(unavailable)? {
-            Engine::Native(Parakeet::load(dir).map_err(unavailable)?)
+        let native = if crate::mlx::native_stt(home, &name).map_err(unavailable)? {
+            Some(Parakeet::load(dir))
         } else {
-            let sidecar = sidecar::for_home(home);
-            let (instance, resident_bytes, _) = sidecar.load(&name, Kind::Stt, dir)?;
-            Engine::Sidecar {
-                sidecar,
-                instance,
-                resident_bytes,
+            None
+        };
+        let (engine, native_error) = match native {
+            Some(Ok(model)) => (Engine::Native(model), None),
+            native => {
+                let sidecar = sidecar::for_home(home);
+                let (instance, resident_bytes, _) =
+                    sidecar
+                        .load(&name, Kind::Stt, dir)
+                        .map_err(|e| match &native {
+                            // Neither loaded: say why for both.
+                            Some(Err(native)) => {
+                                unavailable(format!("native: {native}; sidecar: {e}"))
+                            }
+                            _ => e,
+                        })?;
+                let engine = Engine::Sidecar {
+                    sidecar,
+                    instance,
+                    resident_bytes,
+                };
+                (engine, native.and_then(Result::err))
             }
         };
         Ok(MlxStt {
@@ -62,6 +81,7 @@ impl MlxStt {
             name,
             vad_model,
             gate: load_gate(dir),
+            native_error,
         })
     }
 }
@@ -193,6 +213,14 @@ impl SttModel for MlxStt {
             Engine::Sidecar { resident_bytes, .. } => *resident_bytes,
             Engine::Native(model) => model.resident_bytes(),
         })
+    }
+
+    fn engine(&self) -> Option<(&'static str, Option<&str>)> {
+        let engine = match self.engine {
+            Engine::Sidecar { .. } => "sidecar",
+            Engine::Native(_) => "native",
+        };
+        Some((engine, self.native_error.as_deref()))
     }
 }
 

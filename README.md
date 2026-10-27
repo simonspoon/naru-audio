@@ -371,7 +371,7 @@ max_resident = "8GiB"               # budget for loaded models; idle ones are ev
 
 [mlx]
 python = "…"                        # written by `naru-audio mlx setup`; do not edit
-native_stt = false                  # true runs parakeet-*-mlx in-process (8-bit, no Python) instead of in the sidecar
+native_stt = true                   # parakeet-*-mlx runs in-process (8-bit, no Python); false runs it in the sidecar
 ```
 
 Environment variables:

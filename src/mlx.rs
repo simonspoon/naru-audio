@@ -161,15 +161,15 @@ pub fn python(home: &Path) -> Result<PathBuf, String> {
 }
 
 /// Whether STT model `name` runs in-process ([`parakeet`]) instead of in
-/// the sidecar: `config.toml` `[mlx] native_stt = true`, for a Parakeet
-/// model. Off by default (naru task 2379).
+/// the sidecar: any Parakeet model, unless `config.toml` sets
+/// `[mlx] native_stt = false` (naru task 2380).
 pub fn native_stt(home: &Path, name: &str) -> Result<bool, String> {
     if !name.starts_with("parakeet") {
         return Ok(false);
     }
     let config = read_config(home)?;
     let on = match config.get("mlx").and_then(|t| t.get("native_stt")) {
-        None => false,
+        None => true,
         Some(v) => v
             .as_bool()
             .ok_or("config.toml: `[mlx] native_stt` is not true or false")?,
@@ -213,19 +213,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_stt_is_opt_in_and_parakeet_only() {
+    fn native_stt_is_the_default_and_parakeet_only() {
         let home = tempfile::tempdir().unwrap();
         let pk = "parakeet-tdt-0.6b-v2-mlx";
         let whisper = "whisper-large-v3-turbo-mlx";
-        // No config.toml, and no key: the sidecar.
-        assert_eq!(native_stt(home.path(), pk), Ok(false));
+        // No config.toml, and no key: native.
+        assert_eq!(native_stt(home.path(), pk), Ok(true));
         std::fs::write(config_path(home.path()), "[mlx]\npython = \"/p\"\n").unwrap();
-        assert_eq!(native_stt(home.path(), pk), Ok(false));
+        assert_eq!(native_stt(home.path(), pk), Ok(true));
         std::fs::write(config_path(home.path()), "[mlx]\nnative_stt = true\n").unwrap();
         assert_eq!(native_stt(home.path(), pk), Ok(true));
         // Only Parakeet has a native port.
         assert_eq!(native_stt(home.path(), whisper), Ok(false));
-        // Switched back.
+        // Switched off: the sidecar.
         std::fs::write(config_path(home.path()), "[mlx]\nnative_stt = false\n").unwrap();
         assert_eq!(native_stt(home.path(), pk), Ok(false));
         std::fs::write(config_path(home.path()), "[mlx]\nnative_stt = \"yes\"\n").unwrap();
