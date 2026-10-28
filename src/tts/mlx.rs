@@ -36,8 +36,8 @@
 //! preview's clip) and its transcript are the reference, sampled with the
 //! sidecar's `CLONE_SAMPLING` unless the `temperature`, `top_p`, `top_k`,
 //! `repetition_penalty` or `max_tokens` knobs say otherwise; `speed` is
-//! ignored, as mlx-audio's Qwen3-TTS ignores it. It hands on the whole
-//! utterance once generated, not 0.32 s chunks as they are made.
+//! ignored, as mlx-audio's Qwen3-TTS ignores it. It streams the same 0.32 s
+//! chunks as they are made (naru task 2388).
 //!
 //! The sidecar is held for a whole synthesis, so `synth` never lets the
 //! sink hold it: chunks go through an unbounded queue to a thread that

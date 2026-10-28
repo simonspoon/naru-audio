@@ -645,7 +645,7 @@ impl Weights {
 /// mlx-audio's `KVCache`: keys and values preallocated in blocks of
 /// [`KV_STEP`] steps, written in place, so a long generation does not leave
 /// a buffer of every size in MLX's cache.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct KvCache {
     kv: Option<(Array, Array)>,
     pub(super) offset: i32,
@@ -729,6 +729,7 @@ pub(super) struct Codec {
 
 /// The conv buffers, overlap-add tails and transformer KV cache a stream of
 /// codec frames carries (`reset_streaming_state` is a fresh one).
+#[derive(Clone)]
 pub(super) struct CodecState {
     bufs: HashMap<String, Array>,
     kv: Vec<KvCache>,
@@ -742,6 +743,26 @@ impl CodecState {
             kv: (0..CD_LAYERS).map(|_| KvCache::default()).collect(),
             offset: 0,
         }
+    }
+
+    /// Copies every array carried into its own buffer, so a kept state holds
+    /// only them: a conv buffer is a view of its whole input, which (even
+    /// evaluated) keeps that input's memory alive.
+    pub(super) fn detach(&mut self) -> R<()> {
+        let own = |a: &Array| -> R<Array> {
+            let f = a.as_dtype(Dtype::Float32)?;
+            f.eval()?;
+            Ok(Array::from_slice(f.as_slice::<f32>(), a.shape()).as_dtype(a.dtype())?)
+        };
+        for b in self.bufs.values_mut() {
+            *b = own(b)?;
+        }
+        for c in &mut self.kv {
+            if let Some((k, v)) = &mut c.kv {
+                (*k, *v) = (own(k)?, own(v)?);
+            }
+        }
+        Ok(())
     }
 }
 

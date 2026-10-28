@@ -18,8 +18,9 @@
 //! The speaker encoder (naru task 2387, `speaker_encoder.py`'s ECAPA-TDNN on
 //! `mel_spectrogram`) turns the reference clip into the x-vector; it and the
 //! clip's codec codes are cached by the clip's SHA-256, so a voice is encoded
-//! once. Not yet streamed (naru task 2388): the whole utterance is generated
-//! before its audio is decoded and handed on.
+//! once; so is the codec decoder primed with those codes. Audio streams as
+//! the sidecar's does (naru task 2388): each 0.32 s of frames is decoded and
+//! handed on as soon as it is generated.
 //!
 //! MLX runs on one thread that owns the model: [`Qwen3Tts`] sends it work.
 
@@ -555,6 +556,9 @@ struct Model {
     window: Array,
     /// Reference x-vectors by the clip's SHA-256.
     xvectors: RefCell<HashMap<[u8; 32], Array>>,
+    /// The codec decoder primed with a reference's codes, by the codes'
+    /// SHA-256: priming takes longer than the first 0.32 s of speech.
+    primed: RefCell<HashMap<[u8; 32], CodecState>>,
     tok: tokenizers::Tokenizer,
     codec: Codec,
     inv_freq: Array,
@@ -630,6 +634,7 @@ impl Model {
             mel_fb,
             window,
             xvectors: RefCell::new(HashMap::new()),
+            primed: RefCell::new(HashMap::new()),
             tok,
             codec,
             inv_freq,
@@ -896,9 +901,13 @@ impl Model {
         Ok(codes)
     }
 
-    /// `_generate_icl` for one chunk: the frames until EOS or `max_tokens`.
+    /// `_generate_icl(stream=True)` for one chunk: the frames until EOS or
+    /// `max_tokens`, each [`CHUNK_FRAMES`] (0.32 s) decoded through `decoder` and
+    /// emitted as soon as it is read back, the rest at the end. `false` if
+    /// the synthesis was cancelled.
     /// Pipelined: each frame's graph is queued on the GPU before the frame
-    /// before it is read back, so building one overlaps running the other.
+    /// before it is read back, so building one overlaps running the other,
+    /// except for the frame that fills a chunk.
     /// The EOS check is a frame late, so one frame too many is sampled at
     /// the end and dropped (its random draws come after every kept one).
     fn generate(
@@ -907,11 +916,13 @@ impl Model {
         prompt: &Array,
         p: &Params,
         xs: &GenConsts,
+        decoder: &mut CodecState,
         emit: &mut dyn FnMut(Vec<f32>) -> bool,
-    ) -> R<Option<Vec<Vec<i32>>>> {
+    ) -> R<bool> {
         let st = self.talker_stack();
         let mut cache = caches(st.layers);
         let mut input = prompt.clone();
+        // Frames read back and not yet decoded.
         let mut frames = Vec::new();
         // The last frames' codebook-0 tokens, for the repetition penalty.
         let mut recent: Vec<Array> = Vec::new();
@@ -928,7 +939,20 @@ impl Model {
         for _ in 0..p.max_tokens {
             // A cancelled synthesis stops here, not after the whole chunk.
             if !emit(Vec::new()) {
-                return Ok(None);
+                return Ok(false);
+            }
+            // The frame that fills a chunk is read back and decoded before the
+            // next frame is queued: queued after it, the decode would wait on
+            // the GPU for that frame too.
+            if frames.len() == CHUNK_FRAMES - 1
+                && let Some(prev) = queued.take()
+            {
+                if !keep(prev, &mut frames)? {
+                    break;
+                }
+                if !emit(self.codec.decode_frames(decoder, &std::mem::take(&mut frames))?) {
+                    return Ok(false);
+                }
             }
             let hidden = self.stack(&st, &input, &mut cache)?;
             let logits = self.w.qlin(&hidden, "talker.codec_head")?;
@@ -943,7 +967,7 @@ impl Model {
             if let Some(prev) = queued.take()
                 && !keep(prev, &mut frames)?
             {
-                return Ok(Some(frames));
+                break;
             }
             recent.push(codes[0].clone());
             if recent.len() > REPETITION_CONTEXT {
@@ -954,22 +978,18 @@ impl Model {
         if let Some(prev) = queued {
             keep(prev, &mut frames)?;
         }
-        Ok(Some(frames))
+        Ok(frames.is_empty() || emit(self.codec.decode_frames(decoder, &frames)?))
     }
 
     /// The sidecar's `synth` for a cloned voice: per chunk of `text`, the
-    /// seed, ICL generation, and the streaming decoder primed with the
-    /// reference codes (their audio dropped), fed 0.32 s at a time.
+    /// seed, and ICL generation into the streaming decoder primed with the
+    /// reference codes ([`Model::primed`]), fed 0.32 s at a time.
     fn synth(&self, text: &str, p: &Params, emit: &mut dyn FnMut(Vec<f32>) -> bool) -> R<()> {
         p.check()?;
         let (wav, ref_text) = &p.reference;
         let xvector = self.xvector(wav)?;
         let codes = self.codec.ref_codes(wav)?;
-        let ref_frames: Vec<Vec<i32>> = {
-            let c = codes.as_dtype(Dtype::Int32)?;
-            c.eval()?;
-            c.as_slice::<i32>().chunks(NCB).map(<[i32]>::to_vec).collect()
-        };
+        let primed = self.primed(&codes)?;
         let xs = GenConsts::new(self)?;
         for chunk in split_chunks(text) {
             // The sidecar seeds MLX's global key before each chunk; sampling
@@ -979,18 +999,8 @@ impl Model {
                 None => RandomState::new()?,
             };
             let prompt = self.icl_prompt(&chunk, ref_text, &codes, &xvector)?;
-            let Some(frames) = self.generate(&mut rng, &prompt, p, &xs, emit)? else {
+            if !self.generate(&mut rng, &prompt, p, &xs, &mut primed.clone(), emit)? {
                 return Ok(());
-            };
-            if frames.is_empty() {
-                continue;
-            }
-            let mut st = CodecState::new();
-            self.codec.decode_frames(&mut st, &ref_frames)?;
-            for piece in frames.chunks(CHUNK_FRAMES) {
-                if !emit(self.codec.decode_frames(&mut st, piece)?) {
-                    return Ok(());
-                }
             }
         }
         Ok(())
@@ -1158,6 +1168,32 @@ impl Model {
         }
         cache.insert(key, x.clone());
         Ok(x)
+    }
+
+    /// The sidecar's `primed`: the codec decoder after the reference's codes
+    /// went through it (their audio dropped), cached by the codes' SHA-256.
+    fn primed(&self, codes: &Array) -> R<CodecState> {
+        let c = codes.as_dtype(Dtype::Int32)?;
+        c.eval()?;
+        let mut hash = Sha256::new();
+        for code in c.as_slice::<i32>() {
+            hash.update(code.to_le_bytes());
+        }
+        let key: [u8; 32] = hash.finalize().into();
+        if let Some(st) = self.primed.borrow().get(&key) {
+            return Ok(st.clone());
+        }
+        let frames: Vec<Vec<i32>> =
+            c.as_slice::<i32>().chunks(NCB).map(<[i32]>::to_vec).collect();
+        let mut st = CodecState::new();
+        self.codec.decode_frames(&mut st, &frames)?;
+        st.detach()?;
+        let mut cache = self.primed.borrow_mut();
+        if cache.len() >= REF_CACHE {
+            cache.clear();
+        }
+        cache.insert(key, st.clone());
+        Ok(st)
     }
 
     /// `mel_spectrogram`: reflect-padded by (n_fft - hop) / 2, an uncentred
