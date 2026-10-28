@@ -199,16 +199,15 @@ pub fn native_tts(home: &Path, name: &str) -> Result<bool, String> {
 }
 
 /// Whether TTS model `name` runs in-process ([`qwen3_tts`]) instead of in
-/// the sidecar: the two ported Qwen3-TTS Base checkpoints, only when
-/// `config.toml` sets `[mlx] native_qwen3_tts = true` (naru task 2386; off by
-/// default until it streams and clones on its own).
+/// the sidecar: the two ported Qwen3-TTS Base checkpoints, unless
+/// `config.toml` sets `[mlx] native_qwen3_tts = false` (naru task 2389).
 pub fn native_qwen3_tts(home: &Path, name: &str) -> Result<bool, String> {
     if !matches!(name, "qwen3-tts-0.6b-base-mlx" | "qwen3-tts-1.7b-base-mlx") {
         return Ok(false);
     }
     let config = read_config(home)?;
     let on = match config.get("mlx").and_then(|t| t.get("native_qwen3_tts")) {
-        None => false,
+        None => true,
         Some(v) => v
             .as_bool()
             .ok_or("config.toml: `[mlx] native_qwen3_tts` is not true or false")?,
@@ -312,12 +311,13 @@ mod tests {
     }
 
     #[test]
-    fn native_qwen3_tts_is_opt_in_and_base_only() {
+    fn native_qwen3_tts_is_the_default_and_base_only() {
         let home = tempfile::tempdir().unwrap();
         let (small, large) = ("qwen3-tts-0.6b-base-mlx", "qwen3-tts-1.7b-base-mlx");
-        assert_eq!(native_qwen3_tts(home.path(), small), Ok(false));
-        std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = true\n").unwrap();
-        assert_eq!(native_qwen3_tts(home.path(), large), Ok(false));
+        // No config.toml, and no key: native.
+        assert_eq!(native_qwen3_tts(home.path(), small), Ok(true));
+        std::fs::write(config_path(home.path()), "[mlx]\nnative_tts = false\n").unwrap();
+        assert_eq!(native_qwen3_tts(home.path(), large), Ok(true));
         std::fs::write(config_path(home.path()), "[mlx]\nnative_qwen3_tts = true\n").unwrap();
         assert_eq!(native_qwen3_tts(home.path(), small), Ok(true));
         assert_eq!(native_qwen3_tts(home.path(), large), Ok(true));
@@ -325,6 +325,10 @@ mod tests {
         assert_eq!(native_qwen3_tts(home.path(), "qwen3-tts-0.6b-mlx"), Ok(false));
         assert_eq!(native_qwen3_tts(home.path(), "qwen3-tts-1.7b-voicedesign-mlx"), Ok(false));
         assert_eq!(native_qwen3_tts(home.path(), "breeze-tts-2-8bit-mlx"), Ok(false));
+        // Switched off: the sidecar.
+        std::fs::write(config_path(home.path()), "[mlx]\nnative_qwen3_tts = false\n").unwrap();
+        assert_eq!(native_qwen3_tts(home.path(), small), Ok(false));
+        assert_eq!(native_qwen3_tts(home.path(), large), Ok(false));
         std::fs::write(config_path(home.path()), "[mlx]\nnative_qwen3_tts = 1\n").unwrap();
         assert!(native_qwen3_tts(home.path(), small).is_err());
     }

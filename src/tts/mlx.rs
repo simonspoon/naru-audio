@@ -31,8 +31,8 @@
 //! goes as `ref_audio` and `ref_text` there too (naru task 2382).
 //!
 //! The two Qwen3-TTS Base checkpoints decode in-process too
-//! (`crate::mlx::qwen3_tts`) when `[mlx] native_qwen3_tts` is true (naru task
-//! 2386, off by default), with the same fallback. A cloned voice (or a
+//! (`crate::mlx::qwen3_tts`) unless `[mlx] native_qwen3_tts` is false (naru
+//! task 2389), with the same fallback. A cloned voice (or a
 //! preview's clip) and its transcript are the reference, sampled with the
 //! sidecar's `CLONE_SAMPLING` unless the `temperature`, `top_p`, `top_k`,
 //! `repetition_penalty` or `max_tokens` knobs say otherwise; `speed` is
