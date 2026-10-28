@@ -45,11 +45,11 @@ use sha2::{Digest, Sha256};
 
 mod resample;
 
-type R<T> = Result<T, Box<dyn std::error::Error>>;
+pub(super) type R<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// MLX's buffer cache, capped (task 2368: ~5.0 GB peak instead of 8.4 GB, for
 /// 2-7 % of speed). Process-wide, so raised only (`native::raise_cache_limit`).
-const CACHE_LIMIT: usize = 256 << 20;
+pub(super) const CACHE_LIMIT: usize = 256 << 20;
 /// `KVCache.step` in mlx-audio: caches grow in blocks of this many steps.
 const KV_STEP: i32 = 256;
 
@@ -103,7 +103,7 @@ const REF_CACHE: usize = 32;
 pub const SAMPLE_RATE: u32 = 24000;
 /// The sidecar's `STREAMING_INTERVAL` (0.32 s) in codec frames:
 /// `int(0.32 * 24000 / 1920)`.
-const CHUNK_FRAMES: usize = 4;
+pub(super) const CHUNK_FRAMES: usize = 4;
 /// `generate`'s own default.
 pub const MAX_TOKENS: usize = 750;
 
@@ -423,7 +423,7 @@ fn split_long_segment(text: &str, max_chars: usize) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// A Python float literal: weakly typed, so it takes the other operand's dtype.
-fn s(x: f32, like: &Array) -> R<Array> {
+pub(super) fn s(x: f32, like: &Array) -> R<Array> {
     Ok(Array::from_f32(x).as_dtype(like.dtype())?)
 }
 
@@ -479,8 +479,37 @@ fn extra_padding(len: i32, k: i32, stride: i32, total: i32) -> i32 {
     (ideal - len).max(0)
 }
 
-struct Weights {
+/// How a checkpoint's quantized layers are packed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Quant {
+    /// Breeze's 8-bit: mxfp8, group 32, scales only.
+    Mxfp8,
+    /// MLX's affine mode (Qwen3-TTS 8-bit: group 64), scales and biases.
+    Affine { group: i32, bits: i32 },
+}
+
+impl Quant {
+    /// The mode, group size and bits mlx-c takes, and the biases, if any.
+    fn args<'a>(
+        self,
+        w: &'a Weights,
+        p: &str,
+    ) -> R<(CString, i32, i32, Option<&'a Array>)> {
+        Ok(match self {
+            Quant::Mxfp8 => (CString::new("mxfp8")?, 32, 8, None),
+            Quant::Affine { group, bits } => (
+                CString::new("affine")?,
+                group,
+                bits,
+                Some(w.g(&format!("{p}.biases"))?),
+            ),
+        })
+    }
+}
+
+pub(super) struct Weights {
     map: HashMap<String, Array>,
+    quant: Quant,
     /// One GPU stream for every quantized op, freed with the weights.
     stream: mlx_sys::mlx_stream,
 }
@@ -492,13 +521,21 @@ impl Drop for Weights {
 }
 
 impl Weights {
+    /// Weights whose quantized layers, if any, are mxfp8 (Breeze's).
     fn new(map: HashMap<String, Array>) -> Self {
+        Self::quantized(map, Quant::Mxfp8)
+    }
+    pub(super) fn quantized(map: HashMap<String, Array>, quant: Quant) -> Self {
         Weights {
             map,
+            quant,
             stream: unsafe { mlx_sys::mlx_default_gpu_stream_new() },
         }
     }
-    fn g(&self, k: &str) -> R<&Array> {
+    pub(super) fn values(&self) -> impl Iterator<Item = &Array> {
+        self.map.values()
+    }
+    pub(super) fn g(&self, k: &str) -> R<&Array> {
         self.map
             .get(k)
             .ok_or_else(|| format!("the checkpoint has no weight `{k}`").into())
@@ -506,12 +543,12 @@ impl Weights {
     fn opt(&self, k: &str) -> Option<&Array> {
         self.map.get(k)
     }
-    /// nn.QuantizedLinear in mxfp8 mode (group 32, 8 bits, no biases).
-    /// mlx-rs's quantized_matmul hardcodes affine mode, so call mlx-c.
-    fn qlin(&self, x: &Array, p: &str) -> R<Array> {
+    /// nn.QuantizedLinear in this checkpoint's [`Quant`] mode. mlx-rs's
+    /// quantized_matmul hardcodes affine mode, so call mlx-c.
+    pub(super) fn qlin(&self, x: &Array, p: &str) -> R<Array> {
         let w = self.g(&format!("{p}.weight"))?;
         let sc = self.g(&format!("{p}.scales"))?;
-        let mode = CString::new("mxfp8")?;
+        let (mode, group, bits, biases) = self.quant.args(self, p)?;
         let y = unsafe {
             let mut res = mlx_sys::mlx_array_new();
             let none = mlx_sys::mlx_array_new();
@@ -520,14 +557,14 @@ impl Weights {
                 x.as_ptr(),
                 w.as_ptr(),
                 sc.as_ptr(),
-                none,
+                biases.map_or(none, |b| b.as_ptr()),
                 true,
                 mlx_sys::mlx_optional_int {
-                    value: 32,
+                    value: group,
                     has_value: true,
                 },
                 mlx_sys::mlx_optional_int {
-                    value: 8,
+                    value: bits,
                     has_value: true,
                 },
                 mode.as_ptr(),
@@ -545,13 +582,15 @@ impl Weights {
             None => y,
         })
     }
-    /// nn.QuantizedEmbedding in mxfp8 mode: dequantize the gathered rows.
+    /// nn.QuantizedEmbedding in this checkpoint's [`Quant`] mode: dequantize
+    /// the gathered rows.
     fn qemb(&self, ids: &Array, p: &str, wkey: Option<&str>) -> R<Array> {
         let w = self
             .g(wkey.unwrap_or(&format!("{p}.weight")))?
             .take_axis(ids, 0)?;
         let sc = self.g(&format!("{p}.scales"))?.take_axis(ids, 0)?;
-        let mode = CString::new("mxfp8")?;
+        let (mode, group, bits, biases) = self.quant.args(self, p)?;
+        let biases = biases.map(|b| b.take_axis(ids, 0)).transpose()?;
         unsafe {
             let mut res = mlx_sys::mlx_array_new();
             let none = mlx_sys::mlx_array_new();
@@ -560,13 +599,13 @@ impl Weights {
                 &mut res,
                 w.as_ptr(),
                 sc.as_ptr(),
-                none,
+                biases.as_ref().map_or(none, |b| b.as_ptr()),
                 mlx_sys::mlx_optional_int {
-                    value: 32,
+                    value: group,
                     has_value: true,
                 },
                 mlx_sys::mlx_optional_int {
-                    value: 8,
+                    value: bits,
                     has_value: true,
                 },
                 mode.as_ptr(),
@@ -587,14 +626,14 @@ impl Weights {
         }
     }
     /// Float nn.Linear: x @ W.T + b.
-    fn lin(&self, x: &Array, p: &str) -> R<Array> {
+    pub(super) fn lin(&self, x: &Array, p: &str) -> R<Array> {
         let y = ops::matmul(x, self.g(&format!("{p}.weight"))?.t())?;
         Ok(match self.opt(&format!("{p}.bias")) {
             Some(b) => ops::add(&y, b)?,
             None => y,
         })
     }
-    fn rms(&self, x: &Array, p: &str, eps: f32) -> R<Array> {
+    pub(super) fn rms(&self, x: &Array, p: &str, eps: f32) -> R<Array> {
         Ok(fast::rms_norm(
             x,
             Some(self.g(&format!("{p}.weight"))?),
@@ -607,14 +646,14 @@ impl Weights {
 /// [`KV_STEP`] steps, written in place, so a long generation does not leave
 /// a buffer of every size in MLX's cache.
 #[derive(Default)]
-struct KvCache {
+pub(super) struct KvCache {
     kv: Option<(Array, Array)>,
-    offset: i32,
+    pub(super) offset: i32,
 }
 
 impl KvCache {
     /// Appends `k` and `v` (`[B, H, n, D]`) and returns everything cached.
-    fn update(&mut self, k: Array, v: Array) -> R<(Array, Array)> {
+    pub(super) fn update(&mut self, k: Array, v: Array) -> R<(Array, Array)> {
         let prev = self.offset;
         let n = k.shape()[2];
         let full = self
@@ -658,18 +697,26 @@ impl KvCache {
 /// ([`Params::depth_cache`]).
 type DepthKv = Option<(Array, Array)>;
 
-fn heads(x: &Array, b: i32, l: i32, h: i32, d: i32) -> R<Array> {
+pub(super) fn heads(x: &Array, b: i32, l: i32, h: i32, d: i32) -> R<Array> {
     Ok(x.reshape(&[b, l, h, d])?)
 }
 
 struct Model {
     w: Weights,
-    cw: Weights,
     tok: tokenizers::Tokenizer,
     dd_freqs: Array,
     // T5Gemma2 norms add 1 to a zero-initialised weight; precomputed in bf16
     // like Python's `1.0 + self.weight`.
     te_norms: HashMap<String, Array>,
+    codec: Codec,
+}
+
+/// The Qwen3-TTS 12 Hz speech tokenizer (`speech_tokenizer.py`), which Breeze
+/// ships as its `audio_tokenizer/` and Qwen3-TTS as its `speech_tokenizer/`
+/// (the same weights): the streaming decoder, and the encoder for a
+/// reference clip's codes.
+pub(super) struct Codec {
+    cw: Weights,
     cd_inv_freq: Array,
     /// Codec encoder weights, under the short names [`load_encoder`] gives.
     ew: Weights,
@@ -682,14 +729,14 @@ struct Model {
 
 /// The conv buffers, overlap-add tails and transformer KV cache a stream of
 /// codec frames carries (`reset_streaming_state` is a fresh one).
-struct CodecState {
+pub(super) struct CodecState {
     bufs: HashMap<String, Array>,
     kv: Vec<KvCache>,
     offset: i32,
 }
 
 impl CodecState {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         CodecState {
             bufs: HashMap::new(),
             kv: (0..CD_LAYERS).map(|_| KvCache::default()).collect(),
@@ -698,7 +745,7 @@ impl CodecState {
     }
 }
 
-fn caches(n: usize) -> Vec<KvCache> {
+pub(super) fn caches(n: usize) -> Vec<KvCache> {
     (0..n).map(|_| KvCache::default()).collect()
 }
 
@@ -1193,6 +1240,9 @@ impl Model {
         Ok(e.sum_axis(-2, None)?)
     }
 
+}
+
+impl Codec {
     // ---------------- codec encoder (Mimi, as Qwen3TTSSpeechTokenizerEncoder) ----------------
 
     /// mimi `StreamableConv1d.__call__` (causal) on NLC input.
@@ -1308,7 +1358,7 @@ impl Model {
     /// The codes of the reference clip at `path`: from the cache if this
     /// file's content was encoded before, else loaded and encoded. Python
     /// encodes afresh for every prompt; the result is the same.
-    fn ref_codes(&self, path: &Path) -> R<Array> {
+    pub(super) fn ref_codes(&self, path: &Path) -> R<Array> {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let key: [u8; 32] = Sha256::digest(&bytes).into();
         if let Some(codes) = self.ref_codes.borrow().get(&key) {
@@ -1557,12 +1607,15 @@ impl Model {
     }
 
     /// One codec step as samples; the step's graph is evaluated here.
-    fn decode_frames(&self, st: &mut CodecState, frames: &[Vec<i32>]) -> R<Vec<f32>> {
+    pub(super) fn decode_frames(&self, st: &mut CodecState, frames: &[Vec<i32>]) -> R<Vec<f32>> {
         let a = self.codec_step(st, frames)?;
         a.eval()?;
         Ok(a.as_slice::<f32>().to_vec())
     }
 
+}
+
+impl Model {
     // ---------------- generate ----------------
 
     /// The sidecar's path: `generate(stream=True, streaming_interval=0.32)`.
@@ -1577,7 +1630,7 @@ impl Model {
         let use_cfg = instruct.is_some() && !matches!(p.cfg_scale, None | Some(1.0));
         let scale = p.cfg_scale.unwrap_or(1.0);
         let codes = match &p.reference {
-            Some((path, _)) => Some(self.ref_codes(path)?),
+            Some((path, _)) => Some(self.codec.ref_codes(path)?),
             None => None,
         };
         let reference = p
@@ -1650,7 +1703,7 @@ impl Model {
                 pending.push(frame.clone());
                 if pending.len() >= CHUNK_FRAMES {
                     let chunk: Vec<Vec<i32>> = pending.drain(..CHUNK_FRAMES).collect();
-                    if !emit(self.decode_frames(&mut st, &chunk)?) {
+                    if !emit(self.codec.decode_frames(&mut st, &chunk)?) {
                         return Ok(());
                     }
                 }
@@ -1665,11 +1718,11 @@ impl Model {
                 // EOS before any frame: mlx-audio decodes one dummy frame of
                 // ones (`_empty_audio`) rather than raising.
                 let dummy = vec![vec![1i32; NCB as usize]];
-                let audio = self.decode_frames(&mut CodecState::new(), &dummy)?;
+                let audio = self.codec.decode_frames(&mut CodecState::new(), &dummy)?;
                 if !emit(audio) {
                     return Ok(());
                 }
-            } else if !pending.is_empty() && !emit(self.decode_frames(&mut st, &pending)?) {
+            } else if !pending.is_empty() && !emit(self.codec.decode_frames(&mut st, &pending)?) {
                 return Ok(());
             }
         }
@@ -1695,10 +1748,52 @@ impl Model {
                 );
             }
         }
+        // Llama3 rope frequencies for the depth decoder, computed as Python does.
+        let ar = arange_f32(0, DD_HD / 2, DD_HD as f32)?;
+        let freqs = ops::power(Array::from_f32(500000.0), &ar)?;
+        let (factor, lo, hi, old) = (32.0f32, 0.001953125f32, 0.0078125f32, 16.0f32);
+        let wl = ops::multiply(&freqs, Array::from_f32(2.0 * std::f32::consts::PI))?;
+        let (lo_wl, hi_wl) = (old / lo, old / hi);
+        let freqs = ops::select(
+            &ops::gt(&wl, Array::from_f32(lo_wl))?,
+            ops::multiply(&freqs, Array::from_f32(factor))?,
+            &freqs,
+        )?;
+        let medium = ops::logical_and(
+            &ops::gt(&wl, Array::from_f32(hi_wl))?,
+            &ops::lt(&wl, Array::from_f32(lo_wl))?,
+        )?;
+        let smooth = ops::divide(
+            ops::subtract(ops::divide(Array::from_f32(old), &wl)?, Array::from_f32(lo))?,
+            Array::from_f32(hi - lo),
+        )?;
+        let one = Array::from_f32(1.0);
+        let denom = ops::add(
+            ops::divide(ops::subtract(&one, &smooth)?, Array::from_f32(factor))?,
+            &smooth,
+        )?;
+        let dd_freqs = ops::select(&medium, ops::divide(&freqs, &denom)?, &freqs)?;
+        let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
+            .map_err(|e| format!("tokenizer: {e}"))?;
+        let codec = Codec::load(&dir.join("audio_tokenizer/model.safetensors"))?;
+        mlx_rs::transforms::eval(w.values().chain(te_norms.values()))?;
+        Ok(Model {
+            w: Weights::new(w),
+            tok,
+            dd_freqs,
+            te_norms,
+            codec,
+        })
+    }
+}
+
+impl Codec {
+    /// Loads the speech tokenizer's `model.safetensors` at `path`, evaluated.
+    pub(super) fn load(path: &Path) -> R<Codec> {
         // Codec decoder (the encoder goes to `load_encoder`): codebook embed =
         // embedding_sum / clip(usage);
         // conv weights from PyTorch layout to MLX's [out, kernel, in].
-        let raw = Array::load_safetensors(dir.join("audio_tokenizer/model.safetensors"))?;
+        let raw = Array::load_safetensors(path)?;
         let mut cw = HashMap::new();
         let mut usage: HashMap<String, Array> = HashMap::new();
         let mut sums: HashMap<String, Array> = HashMap::new();
@@ -1737,53 +1832,21 @@ impl Model {
             let e = ops::divide(sum, ops::clip(u.expand_dims(-1)?, (1e-5f32, ()))?)?;
             cw.insert(format!("{b}.codebook.embed.weight"), e);
         }
-        // Llama3 rope frequencies for the depth decoder, computed as Python does.
-        let ar = arange_f32(0, DD_HD / 2, DD_HD as f32)?;
-        let freqs = ops::power(Array::from_f32(500000.0), &ar)?;
-        let (factor, lo, hi, old) = (32.0f32, 0.001953125f32, 0.0078125f32, 16.0f32);
-        let wl = ops::multiply(&freqs, Array::from_f32(2.0 * std::f32::consts::PI))?;
-        let (lo_wl, hi_wl) = (old / lo, old / hi);
-        let freqs = ops::select(
-            &ops::gt(&wl, Array::from_f32(lo_wl))?,
-            ops::multiply(&freqs, Array::from_f32(factor))?,
-            &freqs,
-        )?;
-        let medium = ops::logical_and(
-            &ops::gt(&wl, Array::from_f32(hi_wl))?,
-            &ops::lt(&wl, Array::from_f32(lo_wl))?,
-        )?;
-        let smooth = ops::divide(
-            ops::subtract(ops::divide(Array::from_f32(old), &wl)?, Array::from_f32(lo))?,
-            Array::from_f32(hi - lo),
-        )?;
-        let one = Array::from_f32(1.0);
-        let denom = ops::add(
-            ops::divide(ops::subtract(&one, &smooth)?, Array::from_f32(factor))?,
-            &smooth,
-        )?;
-        let dd_freqs = ops::select(&medium, ops::divide(&freqs, &denom)?, &freqs)?;
         // `1.0 / (base ** (mx.arange(0, dim, 2, dtype=f32) / dim))`, on device.
         let ar = arange_f32(0, CD_HD / 2, CD_HD as f32)?;
         let cd_inv_freq = ops::divide(
             Array::from_f32(1.0),
             ops::power(Array::from_f32(CD_THETA), &ar)?,
         )?;
-        let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
-            .map_err(|e| format!("tokenizer: {e}"))?;
         let (ew, ce_books) = load_encoder(enc_raw)?;
         mlx_rs::transforms::eval(
-            w.values()
-                .chain(cw.values())
-                .chain(te_norms.values())
+            cw.values()
                 .chain(ew.values())
-                .chain(ce_books.iter().flat_map(|(e, c2)| [e, c2])),
+                .chain(ce_books.iter().flat_map(|(e, c2)| [e, c2]))
+                .chain([&cd_inv_freq]),
         )?;
-        Ok(Model {
-            w: Weights::new(w),
+        Ok(Codec {
             cw: Weights::new(cw),
-            tok,
-            dd_freqs,
-            te_norms,
             cd_inv_freq,
             ew: Weights::new(ew),
             ce_books,

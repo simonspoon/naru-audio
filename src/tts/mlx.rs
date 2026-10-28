@@ -30,6 +30,15 @@
 //! streams the same 0.32 s chunks; a cloned voice (or a preview's clip)
 //! goes as `ref_audio` and `ref_text` there too (naru task 2382).
 //!
+//! The two Qwen3-TTS Base checkpoints decode in-process too
+//! (`crate::mlx::qwen3_tts`) when `[mlx] native_qwen3_tts` is true (naru task
+//! 2386, off by default), with the same fallback. A cloned voice (or a
+//! preview's clip) and its transcript are the reference, sampled with the
+//! sidecar's `CLONE_SAMPLING` unless the `temperature`, `top_p`, `top_k`,
+//! `repetition_penalty` or `max_tokens` knobs say otherwise; `speed` is
+//! ignored, as mlx-audio's Qwen3-TTS ignores it. It hands on the whole
+//! utterance once generated, not 0.32 s chunks as they are made.
+//!
 //! The sidecar is held for a whole synthesis, so `synth` never lets the
 //! sink hold it: chunks go through an unbounded queue to a thread that
 //! feeds the sink, and the sidecar is free once generation ends, however
@@ -49,6 +58,7 @@ use serde_json::{Value, json};
 use super::sherpa::check;
 use super::{Sink, SynthOptions, TtsError, TtsModel};
 use crate::mlx::breeze::{self, Breeze};
+use crate::mlx::qwen3_tts::{self, Qwen3Tts};
 use crate::mlx::sidecar::{self, Sidecar};
 use crate::registry::manifest::{Kind, Manifest, Voice};
 use crate::stt::SttError;
@@ -88,6 +98,7 @@ enum Engine {
         resident_bytes: u64,
     },
     Native(Breeze),
+    NativeQwen3(Qwen3Tts),
 }
 
 impl MlxTts {
@@ -95,18 +106,19 @@ impl MlxTts {
     pub fn load(manifest: &Manifest, dir: &Path) -> Result<Self, TtsError> {
         let home = dir.parent().and_then(Path::parent).unwrap_or(dir);
         let name = manifest.model.name.clone();
-        let native = if crate::mlx::native_tts(home, &name).map_err(|reason| {
-            TtsError::BackendUnavailable {
-                backend: manifest.model.backend.clone(),
-                reason,
-            }
-        })? {
-            Some(Breeze::load(dir))
+        let unavailable = |reason| TtsError::BackendUnavailable {
+            backend: manifest.model.backend.clone(),
+            reason,
+        };
+        let native = if crate::mlx::native_tts(home, &name).map_err(unavailable)? {
+            Some(Breeze::load(dir).map(Engine::Native))
+        } else if crate::mlx::native_qwen3_tts(home, &name).map_err(unavailable)? {
+            Some(Qwen3Tts::load(dir).map(Engine::NativeQwen3))
         } else {
             None
         };
         let depth_cache = match native {
-            Some(Ok(_)) => crate::mlx::breeze_depth_cache(home).map_err(|reason| {
+            Some(Ok(Engine::Native(_))) => crate::mlx::breeze_depth_cache(home).map_err(|reason| {
                 TtsError::BackendUnavailable {
                     backend: manifest.model.backend.clone(),
                     reason,
@@ -115,7 +127,7 @@ impl MlxTts {
             _ => false,
         };
         let (engine, sample_rate, native_error) = match native {
-            Some(Ok(model)) => (Engine::Native(model), breeze::SAMPLE_RATE, None),
+            Some(Ok(engine)) => (engine, breeze::SAMPLE_RATE, None),
             native => {
                 let sidecar = sidecar::for_home(home);
                 let (instance, resident_bytes, answer) = sidecar
@@ -186,6 +198,9 @@ impl TtsModel for MlxTts {
         check(text, options)?;
         if let Engine::Native(model) = &self.engine {
             return self.synth_native(model, text, voice, options, sink);
+        }
+        if let Engine::NativeQwen3(model) = &self.engine {
+            return self.synth_qwen3(model, text, voice, options, sink);
         }
         let Engine::Sidecar { sidecar, .. } = &self.engine else {
             unreachable!("not native");
@@ -273,13 +288,14 @@ impl TtsModel for MlxTts {
         Some(match &self.engine {
             Engine::Sidecar { resident_bytes, .. } => *resident_bytes,
             Engine::Native(model) => model.resident_bytes(),
+            Engine::NativeQwen3(model) => model.resident_bytes(),
         })
     }
 
     fn engine(&self) -> Option<(&'static str, Option<&str>)> {
         Some(match &self.engine {
             Engine::Sidecar { .. } => ("sidecar", self.native_error.as_deref()),
-            Engine::Native(_) => ("native", None),
+            Engine::Native(_) | Engine::NativeQwen3(_) => ("native", None),
         })
     }
 }
@@ -331,6 +347,54 @@ impl MlxTts {
         for (name, &value) in &options.knobs {
             match name.as_str() {
                 "cfg_scale" => params.cfg_scale = Some(value),
+                "temperature" => params.temperature = value,
+                "top_p" => params.top_p = value,
+                "top_k" => params.top_k = value as usize,
+                "repetition_penalty" => params.repetition_penalty = value,
+                "max_tokens" => params.max_tokens = value as usize,
+                // mlx-audio's `generate` swallows any other kwarg.
+                _ => {}
+            }
+        }
+        model
+            .synth(text, &params, &mut |samples| sink(samples))
+            .map_err(TtsError::Native)
+    }
+}
+
+impl MlxTts {
+    /// `synth` on the in-process Qwen3-TTS: what the sidecar does for a
+    /// cloned voice, as [`qwen3_tts::Params`].
+    fn synth_qwen3(
+        &self,
+        model: &Qwen3Tts,
+        text: &str,
+        voice: &str,
+        options: &SynthOptions,
+        mut sink: Sink,
+    ) -> Result<(), TtsError> {
+        let reference = if let Some((wav, ref_text)) = &options.reference {
+            (wav.clone(), ref_text.clone())
+        } else if let Some(c) = self
+            .cloned
+            .as_deref()
+            .and_then(|home| voices::find(home, voice))
+        {
+            (c.wav, c.text)
+        } else {
+            return Err(TtsError::UnknownVoice {
+                model: self.name.clone(),
+                voice: voice.to_string(),
+            });
+        };
+        let mut params = qwen3_tts::Params::new(reference);
+        // The sidecar's `CLONE_SAMPLING`.
+        params.temperature = 0.55;
+        params.top_p = 0.8;
+        params.top_k = 20;
+        params.seed = Some(options.seed);
+        for (name, &value) in &options.knobs {
+            match name.as_str() {
                 "temperature" => params.temperature = value,
                 "top_p" => params.top_p = value,
                 "top_k" => params.top_k = value as usize,
