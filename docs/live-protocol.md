@@ -124,6 +124,11 @@ The server only reports; it never changes the mode itself, so a client that want
   failing to load, nothing is ever flagged. A flagged line is an `ambient_verdict`.
 - **Conversations.** The socket that heard it sends its own `wake` or `ambient_verdict`; every other socket of its
   conversation, control sockets included, gets the same event once.
+- **The server's own listener** (naru task 2372, `POST /ambient`, `docs/ambient.md`) is a member of a conversation
+  with the local mic in place of a socket. Every socket of that conversation gets its `ambient_flag`, `utterance`,
+  `wake`, `ambient_verdict` and `level` events (an `ambient_flag` or `utterance` from it is the only kind a socket
+  receives that it did not hear itself). It follows the conversation's mode, and its microphone is shut while any
+  audio socket of the conversation has `agent_speaking` true, and 400 ms after.
 
 ## Reconnect and resync
 

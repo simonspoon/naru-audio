@@ -4,6 +4,8 @@
 
 mod admin;
 mod live;
+use live::host;
+pub use live::host::{AmbientHost, Capture};
 mod prep;
 mod pulls;
 mod sample_transcript;
@@ -62,8 +64,9 @@ pub struct AppState {
     /// reply's audio under `<home>/recent`. Off by default, so no spoken
     /// content is stored.
     pub keep_recent: bool,
-    /// `serve --mic`: headless capture from a local input device (src/mic.rs).
-    pub mic: Option<crate::mic::Mic>,
+    /// The server's own ambient listener on a local input device
+    /// (`POST /ambient`, src/server/live/host.rs); `None` without one.
+    pub mic: Option<AmbientHost>,
 }
 
 /// The request's `X-Request-Id`, for handlers' log lines.
@@ -92,6 +95,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/audio/transcriptions/stream", get(stream::stream))
         .route("/v1/audio/live", get(live::live))
+        .route("/ambient", get(host::status).post(host::switch))
+        .route("/ambient/log", get(host::log))
         .route(
             "/v1/audio/speaker/enroll",
             post(speaker::enroll).layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
@@ -248,7 +253,7 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
         "api": 1,
         "pid": std::process::id(),
         "uptime_s": st.started.elapsed().as_secs(),
-        "mic": st.mic.as_ref().map(|m| m.status()),
+        "mic": st.mic.as_ref().and_then(|m| m.mic_status()),
         "profile": {
             "name": profile.name,
             "arch": profile.arch,

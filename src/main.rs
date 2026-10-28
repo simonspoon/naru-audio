@@ -49,16 +49,6 @@ enum Command {
             value_parser = clap::builder::BoolishValueParser::new()
         )]
         keep_recent: bool,
-        /// Listen on a local input device from startup, without a client
-        /// app (macOS). Opens on its own thread: startup never waits on the
-        /// mic permission prompt. Off by default.
-        #[arg(
-            long,
-            env = "NARU_AUDIO_MIC",
-            action = clap::ArgAction::SetTrue,
-            value_parser = clap::builder::BoolishValueParser::new()
-        )]
-        mic: bool,
     },
     /// Download models, and what they require, into $NARU_AUDIO_HOME.
     Pull {
@@ -180,7 +170,7 @@ enum VoiceAction {
 #[derive(Subcommand)]
 enum MicAction {
     /// Capture for a while and print the level, through the same capture
-    /// `serve --mic` uses.
+    /// `POST /ambient` uses.
     Test {
         /// Input device by exact name; else NARU_AUDIO_MIC_DEVICE, then
         /// config.toml's [mic] device, then the built-in mic.
@@ -208,14 +198,13 @@ enum Format {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let (listen, allow_remote, log_file, keep_recent, mic) = match Cli::parse().command {
+    let (listen, allow_remote, log_file, keep_recent) = match Cli::parse().command {
         Command::Serve {
             listen,
             allow_remote,
             log_file,
             keep_recent,
-            mic,
-        } => (listen, allow_remote, log_file, keep_recent, mic),
+        } => (listen, allow_remote, log_file, keep_recent),
         Command::Health => return health(&daemon_url()),
         Command::Ps => return ps(&daemon_url()),
         Command::Transcribe {
@@ -321,27 +310,11 @@ async fn main() -> ExitCode {
         settings,
         Arc::new(BackendLoader),
     );
-    let mic = if mic {
-        let device = match naru_audio::mic::configured_device(registry.home()) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("naru-audio: {e}");
-                return ExitCode::from(2);
-            }
-        };
-        // Nothing reads the frames yet (ambient, naru task 2372): the
-        // receiver is dropped and they are discarded.
-        let (frames, _) = tokio::sync::mpsc::channel(64);
-        match naru_audio::mic::Mic::start(device, log.clone(), frames) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                log.line("warn", None, &format!("mic_unavailable error={e:?}"));
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // Off until `POST /ambient` switches it on (naru task 2372).
+    let mic = Some(server::AmbientHost::device(
+        registry.home().to_path_buf(),
+        log.clone(),
+    ));
     let app = server::router(Arc::new(AppState {
         port: addr.port(),
         allow_remote,

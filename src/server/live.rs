@@ -13,7 +13,7 @@
 //! A finished segment is then judged by [`crate::live_mode`] and the speaker
 //! guard ([`crate::speaker`]) before it becomes an `utterance`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
@@ -30,7 +30,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
 use super::stream::{
@@ -49,6 +49,8 @@ use crate::registry::manifest::Kind;
 use crate::speaker::{self, DEFAULT_MODEL, DEFAULT_THRESHOLD, Identity, Library, SpeakerVerifier};
 use crate::stt::vad::Vad;
 use crate::turn;
+
+pub mod host;
 
 /// Typed binary frames: the first byte.
 const FRAME_MIC: u8 = 0x00;
@@ -171,6 +173,9 @@ struct Conv {
     /// `wake`, `ambient_verdict` and `level` events as `(sender's member id, event)`,
     /// to every other member; the sender sends its own.
     events: broadcast::Sender<(u64, Value)>,
+    /// Members whose client is playing a reply, so the server's own
+    /// listener (`host.rs`) shuts its microphone too.
+    speaking: HashSet<u64>,
 }
 
 /// Member ids, so a member skips the events it published itself.
@@ -220,6 +225,7 @@ fn join(key: &str, seed: Option<Mode>) -> Result<(Member, Mode, u64), Fail> {
                 members: 0,
                 tx,
                 events,
+                speaking: HashSet::new(),
             })
         }
     };
@@ -258,6 +264,28 @@ fn log_mode(st: &AppState, req_id: &str, conv: Option<&str>, mode: Mode, seq: Op
             mode_name(mode)
         ),
     );
+}
+
+/// Records whether member `id` of `key` is playing a reply, then publishes a
+/// `state` as [`publish_state`] does.
+fn publish_speaking(key: &str, id: u64, speaking: bool) {
+    if let Some(conv) = CONVERSATIONS.lock().unwrap().get_mut(key) {
+        if speaking {
+            conv.speaking.insert(id);
+        } else {
+            conv.speaking.remove(&id);
+        }
+    }
+    publish_state(key);
+}
+
+/// Whether any member of `key` is playing a reply.
+fn anyone_speaking(key: &str) -> bool {
+    CONVERSATIONS
+        .lock()
+        .unwrap()
+        .get(key)
+        .is_some_and(|c| !c.speaking.is_empty())
 }
 
 /// A new `state` for every member with the mode unchanged (one member's
@@ -319,6 +347,11 @@ impl Drop for Member {
         let mut table = CONVERSATIONS.lock().unwrap();
         if let Some(conv) = table.get_mut(&self.key) {
             conv.members -= 1;
+            // A member that left mid-reply no longer shuts anyone's mic.
+            if conv.speaking.remove(&self.id) {
+                conv.seq += 1;
+                let _ = conv.tx.send((conv.seq, conv.mode));
+            }
             if conv.members == 0 {
                 table.remove(&self.key);
             }
@@ -625,6 +658,25 @@ impl Live {
         })
     }
 
+    /// Microphone samples as the VAD gets them: metered, recorded by a
+    /// running enrollment, then silence while the gate is shut or the frame
+    /// is the reference heard back (the VAD keeps its clock). Kept in the ring.
+    fn hear(&mut self, samples: Vec<f32>) -> Vec<f32> {
+        self.note_level(&samples);
+        if let Some(clip) = &mut self.enrolling {
+            let room = ENROLL_MAX_SAMPLES.saturating_sub(clip.len());
+            clip.extend_from_slice(&samples[..samples.len().min(room)]);
+        }
+        let echo = self.echo.is_echo(&samples, self.began.elapsed());
+        let fed = if !echo && self.gate_open() {
+            samples
+        } else {
+            vec![0.0; samples.len()]
+        };
+        self.push_ring(&fed);
+        fed
+    }
+
     fn note_level(&mut self, samples: &[f32]) {
         if samples.is_empty() {
             return;
@@ -830,53 +882,13 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         return Ok(Ended::Gone);
     }
     let load_started = Instant::now();
-    let model = st
-        .models
-        .acquire(manifest, cfg.keep_alive)
-        .await
-        .map_err(|e| manager_error(st, req_id, e))?;
+    let (model, vad) = acquire(st, req_id, manifest, &cfg).await?;
     let load_ms = if loaded {
         0
     } else {
         load_started.elapsed().as_millis() as u64
     };
-    let Some(vad_model) = model.stt().vad_model().map(Path::to_path_buf) else {
-        return Err(Fail {
-            code: "backend_unavailable",
-            message: format!("the model \"{}\" cannot stream: it has no VAD", cfg.model),
-            close: close_code::ERROR,
-        });
-    };
-    let max_speech = 2.0 * cfg.max_segment as f32 / RATE as f32;
-    let vad = {
-        let vad_cfg = cfg.vad.clone();
-        tokio::task::spawn_blocking(move || {
-            Vad::load_with_max_speech(&vad_model, &vad_cfg, max_speech)
-        })
-    }
-    .await
-    .map_err(|e| internal(st, req_id, e.to_string()))?
-    .map_err(|e| Fail {
-        code: "model_load_failed",
-        message: e.to_string(),
-        close: close_code::ERROR,
-    })?;
-
-    // A missing or unreadable library is an empty one: the guard fails open.
-    let (library, library_stamp) = {
-        let home = st.registry.home().to_path_buf();
-        tokio::task::spawn_blocking(move || Library::load_stamped(&home))
-    }
-    .await
-    .map_err(|e| internal(st, req_id, e.to_string()))?;
-    let library = library.unwrap_or_else(|e| {
-        st.log.line(
-            "warn",
-            Some(req_id),
-            &format!("live_enrollment_unreadable {e}"),
-        );
-        Library::default()
-    });
+    let (library, library_stamp) = load_library(st, req_id).await?;
 
     // A conversation's mode and seq win over the resumed ones.
     let (mut member, mode, shared_seq) = match &start.conversation {
@@ -936,6 +948,65 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         ),
     }
     result
+}
+
+/// The speech-to-text model held for the session, and its VAD.
+async fn acquire(
+    st: &Arc<AppState>,
+    req_id: &str,
+    manifest: crate::registry::manifest::Manifest,
+    cfg: &Config,
+) -> Result<(crate::manager::Guard, Vad), Fail> {
+    let model = st
+        .models
+        .acquire(manifest, cfg.keep_alive)
+        .await
+        .map_err(|e| manager_error(st, req_id, e))?;
+    let Some(vad_model) = model.stt().vad_model().map(Path::to_path_buf) else {
+        return Err(Fail {
+            code: "backend_unavailable",
+            message: format!("the model \"{}\" cannot stream: it has no VAD", cfg.model),
+            close: close_code::ERROR,
+        });
+    };
+    let max_speech = 2.0 * cfg.max_segment as f32 / RATE as f32;
+    let vad = {
+        let vad_cfg = cfg.vad.clone();
+        tokio::task::spawn_blocking(move || {
+            Vad::load_with_max_speech(&vad_model, &vad_cfg, max_speech)
+        })
+    }
+    .await
+    .map_err(|e| internal(st, req_id, e.to_string()))?
+    .map_err(|e| Fail {
+        code: "model_load_failed",
+        message: e.to_string(),
+        close: close_code::ERROR,
+    })?;
+    Ok((model, vad))
+}
+
+/// The voice library and its stamp. A missing or unreadable library is an
+/// empty one: the guard fails open.
+async fn load_library(
+    st: &Arc<AppState>,
+    req_id: &str,
+) -> Result<(Library, Option<(std::time::SystemTime, u64)>), Fail> {
+    let (library, library_stamp) = {
+        let home = st.registry.home().to_path_buf();
+        tokio::task::spawn_blocking(move || Library::load_stamped(&home))
+    }
+    .await
+    .map_err(|e| internal(st, req_id, e.to_string()))?;
+    let library = library.unwrap_or_else(|e| {
+        st.log.line(
+            "warn",
+            Some(req_id),
+            &format!("live_enrollment_unreadable {e}"),
+        );
+        Library::default()
+    });
+    Ok((library, library_stamp))
 }
 
 /// A `control` socket: joins `start.conversation` and carries its mode
@@ -1034,26 +1105,26 @@ fn remember_state(session: &str, live: &Live) {
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn drive(
-    st: &Arc<AppState>,
-    req_id: &str,
-    socket: &mut WebSocket,
-    session_id: &str,
-    live: &mut Live,
-    member: &mut Option<Member>,
-    cfg: Config,
+/// The segmenter and decode threads: their input, their events, and the
+/// samples sent but not yet decoded.
+fn workers(
+    st: &AppState,
+    cfg: &Config,
     vad: Vad,
     model: crate::manager::Guard,
-) -> Result<Ended, Fail> {
+) -> (
+    UnboundedSender<Input>,
+    UnboundedReceiver<Event>,
+    Arc<AtomicUsize>,
+) {
     let backlog = Arc::new(AtomicUsize::new(0));
     let busy = Arc::new(AtomicBool::new(false));
     let (input_tx, input_rx) = unbounded_channel();
     let (job_tx, job_rx) = unbounded_channel();
-    let (event_tx, mut events) = unbounded_channel();
+    let (event_tx, events) = unbounded_channel();
     {
         let (events, backlog, busy) = (event_tx.clone(), backlog.clone(), busy.clone());
-        let segments = Segments::new(&cfg, job_tx, events, backlog, busy);
+        let segments = Segments::new(cfg, job_tx, events, backlog, busy);
         let (log, dir) = (st.log.clone(), st.registry.model_dir(turn::DEFAULT_MODEL));
         // Loaded on this thread, once per process, so a first session's
         // audio waits in the channel rather than blocking the socket.
@@ -1066,6 +1137,22 @@ async fn drive(
         let (vad, backlog) = (cfg.vad.clone(), backlog.clone());
         tokio::task::spawn_blocking(move || decode(model, vad, job_rx, event_tx, backlog, busy));
     }
+    (input_tx, events, backlog)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive(
+    st: &Arc<AppState>,
+    req_id: &str,
+    socket: &mut WebSocket,
+    session_id: &str,
+    live: &mut Live,
+    member: &mut Option<Member>,
+    cfg: Config,
+    vad: Vad,
+    model: crate::manager::Guard,
+) -> Result<Ended, Fail> {
+    let (input_tx, mut events, backlog) = workers(st, &cfg, vad, model);
     // Speak tasks write here; `out_tx` stays alive so `recv` never ends.
     let (out_tx, mut out) = unbounded_channel::<Value>();
 
@@ -1114,16 +1201,7 @@ async fn drive(
                             live.echo.push_reference(&samples, live.began.elapsed());
                             continue;
                         }
-                        live.note_level(&samples);
-                        if let Some(clip) = &mut live.enrolling {
-                            let room = ENROLL_MAX_SAMPLES.saturating_sub(clip.len());
-                            clip.extend_from_slice(&samples[..samples.len().min(room)]);
-                        }
-                        // A shut gate feeds silence: the VAD keeps its clock.
-                        // A frame that is the reference heard back is shut the same way.
-                        let echo = live.echo.is_echo(&samples, live.began.elapsed());
-                        let fed = if !echo && live.gate_open() { samples } else { vec![0.0; samples.len()] };
-                        live.push_ring(&fed);
+                        let fed = live.hear(samples);
                         let queued = backlog.fetch_add(fed.len(), Ordering::SeqCst) + fed.len();
                         if queued > MAX_BACKLOG_SAMPLES {
                             return Err(Fail {
@@ -1147,7 +1225,7 @@ async fn drive(
                         }
                     }
                     Message::Text(text) => {
-                        let conv = member.as_ref().map(|m| m.key.as_str());
+                        let conv = member.as_ref().map(|m| (m.key.as_str(), m.id));
                         let sent = client_message(
                             st, req_id, session_id, live, conv, &out_tx, &input_tx, &mut stopping,
                             &text,
@@ -1230,7 +1308,7 @@ async fn client_message(
     req_id: &str,
     session_id: &str,
     live: &mut Live,
-    conv: Option<&str>,
+    conv: Option<(&str, u64)>,
     out: &UnboundedSender<Value>,
     input: &UnboundedSender<Input>,
     stopping: &mut bool,
@@ -1246,8 +1324,8 @@ async fn client_message(
         }
         ClientMessage::Mode { mode } => {
             let mode = parse_mode(&mode)?;
-            if let Some(key) = conv {
-                log_mode(st, req_id, conv, mode, publish_mode(key, mode));
+            if let Some((key, _)) = conv {
+                log_mode(st, req_id, Some(key), mode, publish_mode(key, mode));
             } else {
                 log_mode(st, req_id, None, mode, None);
                 if mode != live.mode() {
@@ -1275,7 +1353,7 @@ async fn client_message(
                     }
                 }
                 match conv {
-                    Some(key) => publish_state(key),
+                    Some((key, id)) => publish_speaking(key, id, value),
                     None => sent.push(live.state_event(None)),
                 }
                 remember_state(session_id, live);
@@ -1290,7 +1368,7 @@ async fn client_message(
         }
         ClientMessage::Enroll { action, person } => {
             let mut events = enroll(st, req_id, live, &action, person).await;
-            if let Some(key) = conv {
+            if let Some((key, _)) = conv {
                 let before = events.len();
                 events.retain(|e| e["type"] != "state");
                 if events.len() < before {

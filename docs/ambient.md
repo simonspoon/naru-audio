@@ -48,10 +48,31 @@ mode every admitted segment (the one that becomes an `ambient_flag`) is also ing
   a conversation the socket sends its own and every other socket of the conversation gets the same one.
 - Entering `ambient` from another mode ends the machine's conversation, so the next wake word wakes again.
 
+## The server's own listener (`server/live/host.rs`, naru task 2372)
+
+The daemon can listen on the local mic (`src/mic.rs`) with no client attached: a server-owned member of a live
+conversation, its frames going through the same pipeline as an audio socket's (VAD, STT, speaker scoring, the
+machine, the gate, wake words from naru's config). It is **off by default** and never starts by itself: not at
+daemon launch, not after a restart (nothing is persisted). Only `POST /ambient` turns it on.
+
+| Route | |
+|---|---|
+| `GET /ambient` | `{"on":false,"conversation":null,"mic":null}`; while on, `conversation` is its key and `mic` the capture's status (as `/health`'s `mic`). |
+| `POST /ambient` | `{"on":true,"conversation":"…"}` loads the default STT model, opens the input device (`NARU_AUDIO_MIC_DEVICE`, else `config.toml` `[mic] device`, else the built-in mic) and joins `conversation` (default `ambient`), beginning it in `ambient` if it is new. Already on, it changes nothing. `{"on":false}` leaves the conversation and closes the device before it answers; one sent while an `on` is still loading the model waits for it. A listener that ends by itself (the device gone for good, a decode failure) closes the device too. Answers as `GET /ambient`. 400 `invalid_request` for a missing `on` or a bad `conversation`; 503 when the model or device cannot open. |
+| `GET /ambient/log` | `{"events":[…]}`: the `ambient_flag`, `utterance`, `wake` and `ambient_verdict` events it published, oldest first, the last 2 minutes and at most 500 (as `TranscriptLog`). In memory only; cleared when it turns on. |
+
+Its events go to every socket of its conversation (`docs/live-protocol.md`, Ambient). It follows the
+conversation's mode; while any audio socket of the conversation has `agent_speaking` true (and 400 ms after) its
+mic is shut, as a socket's own is. When decoding falls more than the stream's backlog behind, mic frames are
+dropped (one `ambient_backlog` warning) rather than queued. A daemon without the route's microphone answers 503;
+off macOS, opening the device fails.
+
 ## Tests
 
 `tests/live.rs` checks the socket: one `wake` for `wake.wav`, none for `plain.wav`, and the same `wake` on a
-second socket of the conversation. `tests/ambient.rs` ports the scenarios of `AmbientMachineTests.swift` (wake, custom wake words, sound-alike,
+second socket of the conversation. For the server's listener it injects the same fixtures through the capture
+channel: one `wake` on a control socket and in `GET /ambient/log`, lines and no wake for `plain.wav`, capture
+closed after `off`, and nothing heard while a member's client plays a reply. `tests/ambient.rs` ports the scenarios of `AmbientMachineTests.swift` (wake, custom wake words, sound-alike,
 echo tail, silence return, gate routing). `src/ambient/intern.rs` tests the prompt, escaping, calibration and
 the 0.9 threshold edge. There is no Swift route test or fixture file to diff against, so parity is by
 the ported scenarios, not a shared fixture. The model-backed path is not run in CI.

@@ -17,7 +17,7 @@ use naru_audio::log::Logger;
 use naru_audio::manager::{BackendLoader, KeepAlive, ModelManager, Settings};
 use naru_audio::profile::Profile;
 use naru_audio::registry::{self, Registry};
-use naru_audio::server::{AppState, router};
+use naru_audio::server::{AmbientHost, AppState, Capture, router};
 use naru_audio::speaker::{self, Clip, Library, SpeakerVerifier};
 use naru_audio::stt::audio;
 use serde_json::{Value, json};
@@ -81,6 +81,10 @@ fn model_home() -> Option<tempfile::TempDir> {
 }
 
 async fn serve(home: &Path) -> String {
+    serve_with(home, None).await
+}
+
+async fn serve_with(home: &Path, mic: Option<AmbientHost>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let log = Arc::new(Logger::stderr());
@@ -104,7 +108,7 @@ async fn serve(home: &Path) -> String {
         models: Arc::new(models),
         pulls: Arc::new(naru_audio::server::PullTracker::new()),
         keep_recent: false,
-        mic: None,
+        mic,
     }));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("127.0.0.1:{port}")
@@ -1073,6 +1077,192 @@ async fn every_conversation_socket_gets_the_wake() {
     assert_eq!(close, Some(1000), "{rest:?}");
     assert_eq!(wake_events(&rest), 0, "{rest:?}");
     eprintln!("ran: control wake {on_ctl}");
+}
+
+// ---- the server's own listener (naru task 2372) ---------------------------
+// `POST /ambient` with the capture channel fed from wav fixtures, not a mic.
+
+type Frames = Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Sender<Vec<f32>>>>>;
+
+/// A host whose "microphone" is a channel the test writes to.
+fn injected() -> (AmbientHost, Frames) {
+    let frames: Frames = Default::default();
+    let host = AmbientHost::new({
+        let frames = frames.clone();
+        move || {
+            let (tx, rx) = tokio::sync::mpsc::channel(4096);
+            *frames.lock().unwrap() = Some(tx);
+            Ok(Capture {
+                mic: None,
+                frames: rx,
+            })
+        }
+    });
+    (host, frames)
+}
+
+async fn inject(frames: &Frames, pcm: &[f32]) {
+    let tx = frames.lock().unwrap().clone().expect("the listener is on");
+    for frame in pcm.chunks(640) {
+        tx.send(frame.to_vec()).await.unwrap();
+    }
+}
+
+/// One HTTP/1.1 request; the status and the JSON body.
+async fn http(addr: &str, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    tcp.write_all(req.as_bytes()).await.unwrap();
+    let mut raw = String::new();
+    tcp.read_to_string(&mut raw).await.unwrap();
+    let status = raw[9..12].parse().unwrap();
+    let json = raw
+        .split_once("\r\n\r\n")
+        .and_then(|(_, b)| serde_json::from_str(b).ok())
+        .unwrap_or(Value::Null);
+    (status, json)
+}
+
+/// `GET /ambient/log`'s events of `kind`.
+async fn logged(addr: &str, kind: &str) -> Vec<Value> {
+    let (status, log) = http(addr, "GET", "/ambient/log", None).await;
+    assert_eq!(status, 200, "{log}");
+    log["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == kind)
+        .cloned()
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ambient_needs_a_microphone_and_a_boolean() {
+    let home = fake_home();
+    let addr = serve(home.path()).await;
+    let (status, body) = http(&addr, "GET", "/ambient", None).await;
+    assert_eq!(status, 503, "{body}");
+    let (host, _) = injected();
+    let addr = serve_with(home.path(), Some(host)).await;
+    let (status, body) = http(&addr, "GET", "/ambient", None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        json!({"on": false, "conversation": null, "mic": null})
+    );
+    for bad in [
+        json!({}),
+        json!({"on": "yes"}),
+        json!({"on": true, "conversation": ""}),
+    ] {
+        let (status, body) = http(&addr, "POST", "/ambient", Some(bad.clone())).await;
+        assert_eq!(status, 400, "{bad}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_request", "{body}");
+    }
+    let (status, body) = http(&addr, "POST", "/ambient", Some(json!({"on": false}))).await;
+    assert_eq!((status, body["on"].clone()), (200, json!(false)), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_server_listener_wakes_once_and_logs_lines() {
+    let Some(home) = model_home() else { return };
+    let (host, frames) = injected();
+    let addr = serve_with(home.path(), Some(host)).await;
+    let conv = "c-host";
+    let (status, on) = http(
+        &addr,
+        "POST",
+        "/ambient",
+        Some(json!({"on": true, "conversation": conv})),
+    )
+    .await;
+    assert_eq!(status, 200, "{on}");
+    assert_eq!(
+        (&on["on"], &on["conversation"]),
+        (&json!(true), &json!(conv))
+    );
+    // A socket joining finds the listener's conversation in ambient.
+    let (mut ctl, first) = control(&addr, conv, "live").await;
+    assert_eq!(first["mode"], "ambient", "{first}");
+
+    inject(&frames, &wake_line()).await;
+    let wake = next_of(&mut ctl, "wake").await;
+    inject(&frames, &two_plains()).await;
+    // Both plain lines too (the wake line's flag came before its wake), on
+    // the socket and in the log.
+    let mut flags = 1;
+    let mut wakes = 1;
+    while flags < 3 {
+        let e = next_where(&mut ctl, "a line", |e| {
+            e["type"] == "ambient_flag" || e["type"] == "wake"
+        })
+        .await;
+        if e["type"] == "wake" {
+            wakes += 1;
+        } else {
+            flags += 1;
+        }
+    }
+    assert_eq!(wakes, 1, "a second wake");
+    let logged_wakes = logged(&addr, "wake").await;
+    assert_eq!(logged_wakes, vec![wake.clone()]);
+    assert_eq!(logged(&addr, "ambient_flag").await.len(), 3);
+    eprintln!("ran: host wake {wake}");
+
+    let (status, off) = http(&addr, "POST", "/ambient", Some(json!({"on": false}))).await;
+    assert_eq!((status, off["on"].clone()), (200, json!(false)), "{off}");
+    // The capture channel's receiver is gone: capture stopped.
+    let tx = frames.lock().unwrap().clone().unwrap();
+    tokio::time::timeout(Duration::from_secs(5), tx.closed())
+        .await
+        .expect("capture still open after off");
+    let (_, status) = http(&addr, "GET", "/ambient", None).await;
+    assert_eq!(status["on"], false, "{status}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_playing_a_reply_shuts_the_server_listener() {
+    let Some(home) = model_home() else { return };
+    let (host, frames) = injected();
+    let addr = serve_with(home.path(), Some(host)).await;
+    let conv = "c-host-echo";
+    let (status, on) = http(
+        &addr,
+        "POST",
+        "/ambient",
+        Some(json!({"on": true, "conversation": conv})),
+    )
+    .await;
+    assert_eq!(status, 200, "{on}");
+    let (mut audio, _) = ready(&addr, json!({"conversation": conv})).await;
+    audio
+        .send(text(json!({"type": "agent_speaking", "value": true})))
+        .await
+        .unwrap();
+    let state = next_of(&mut audio, "state").await;
+    assert_eq!(state["agent_speaking"], true, "{state}");
+    // Let the listener take the state before the frames.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    inject(&frames, &wake_line()).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(logged(&addr, "ambient_flag").await.is_empty());
+    assert!(logged(&addr, "wake").await.is_empty());
+    // Playback over (and the hold past): it hears again.
+    audio
+        .send(text(json!({"type": "agent_speaking", "value": false})))
+        .await
+        .unwrap();
+    next_of(&mut audio, "state").await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    inject(&frames, &wake_line()).await;
+    let wake = next_of(&mut audio, "wake").await;
+    eprintln!("ran: wake after playback {wake}");
+    stop(&mut audio).await;
 }
 
 // ---- voice library (naru task 2260) --------------------------------------
