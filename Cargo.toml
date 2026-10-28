@@ -43,6 +43,12 @@ libc = "0.2"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-24"] }
 ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["disable-linking"] }
 realfft = "3"
+# Headless mic capture (src/mic.rs, naru task 2371). coreaudio-sys and
+# core-foundation-sys are the versions cpal already pulls in; mic.rs reads the
+# devices' transport type and name with them to find the built-in mic.
+cpal = "0.15"
+coreaudio-sys = "0.2"
+core-foundation-sys = "0.8"
 
 # Native MLX (src/mlx/native.rs), Apple Silicon only: MLX does not build for
 # x86_64 macOS. Builds MLX from source with CMake and the Xcode Metal toolchain;

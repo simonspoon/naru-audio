@@ -324,6 +324,9 @@ keep_alive = "5m"                   # how long an idle model stays loaded; 0 unl
 [memory]
 max_resident = "8GiB"               # budget for loaded models; idle ones are evicted, oldest first, to fit
 
+[mic]
+device = "BlackHole 2ch"            # serve --mic's input device, by exact name; default the built-in mic, not the system default
+
 [mlx]
 breeze_depth_cache = false          # Breeze only: true caches its depth decoder, ~30 % faster but different samples than mlx-audio's
 ```
@@ -336,6 +339,8 @@ Environment variables:
 | `NARU_AUDIO_LISTEN` | `serve`'s bind address (default `127.0.0.1:7870`); same as `--listen`. |
 | `NARU_AUDIO_LOG` | `serve`'s log file; same as `--log-file`. |
 | `NARU_AUDIO_KEEP_RECENT` | `1` turns on `serve --keep-recent`, a debugging aid for agents: each `/speech` reply is saved to `recent/<id>.wav` (newest 50). Off by default. |
+| `NARU_AUDIO_MIC` | `1` turns on `serve --mic` (macOS): capture from a local input device from startup, on its own thread, reopening it when it errors, disappears or changes rate. `/health`'s `mic` shows the device, `running`, `level_dbfs` and `probably_denied` (3 s of exact zeros, as a denied mic gives). `naru-audio mic test --device NAME --seconds 5` prints the level. Off by default. |
+| `NARU_AUDIO_MIC_DEVICE` | The mic's input device by exact name; overrides `config.toml`. |
 | `NARU_AUDIO_STT_MODEL`, `NARU_AUDIO_TTS_MODEL` | Default models; override `config.toml`. |
 | `NARU_AUDIO_KEEP_ALIVE` | Default keep-alive; overrides `config.toml`. |
 | `NARU_AUDIO_URL` | Where the client commands find the daemon (default `http://127.0.0.1:7870`). |
@@ -513,6 +518,7 @@ src/
   stt/  tts/         sherpa-onnx and MLX engines, VAD, speech gate, hotwords, leveller
   mlx.rs, mlx/       native MLX engines (Parakeet, Breeze, Qwen3-TTS) and `mlx check`
   voices.rs          cloned voices
+  mic.rs             headless mic capture (cpal, macOS) and `mic test`
   log.rs, error.rs   log lines and rotation; the error envelope
 catalog/             built-in model manifests (embedded at build time)
 tests/               integration tests; tests/fixtures/ holds audio fixtures

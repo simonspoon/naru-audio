@@ -62,6 +62,8 @@ pub struct AppState {
     /// reply's audio under `<home>/recent`. Off by default, so no spoken
     /// content is stored.
     pub keep_recent: bool,
+    /// `serve --mic`: headless capture from a local input device (src/mic.rs).
+    pub mic: Option<crate::mic::Mic>,
 }
 
 /// The request's `X-Request-Id`, for handlers' log lines.
@@ -246,6 +248,7 @@ async fn health(State(st): State<Arc<AppState>>) -> Json<Value> {
         "api": 1,
         "pid": std::process::id(),
         "uptime_s": st.started.elapsed().as_secs(),
+        "mic": st.mic.as_ref().map(|m| m.status()),
         "profile": {
             "name": profile.name,
             "arch": profile.arch,
@@ -1023,6 +1026,7 @@ mod tests {
             models: Arc::new(models),
             pulls: Arc::new(PullTracker::new()),
             keep_recent: false,
+            mic: None,
         }))
     }
 

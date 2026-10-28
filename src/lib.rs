@@ -7,6 +7,7 @@ pub mod error;
 pub mod live_mode;
 pub mod log;
 pub mod manager;
+pub mod mic;
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 pub mod mlx;
 #[cfg(all(windows, target_env = "msvc"))]

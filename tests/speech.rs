@@ -202,6 +202,7 @@ impl Server {
             models: Arc::new(models),
             pulls: Arc::new(naru_audio::server::PullTracker::new()),
             keep_recent,
+            mic: None,
         }));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.spawn(async move {

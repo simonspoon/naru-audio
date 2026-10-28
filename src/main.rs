@@ -49,6 +49,16 @@ enum Command {
             value_parser = clap::builder::BoolishValueParser::new()
         )]
         keep_recent: bool,
+        /// Listen on a local input device from startup, without a client
+        /// app (macOS). Opens on its own thread: startup never waits on the
+        /// mic permission prompt. Off by default.
+        #[arg(
+            long,
+            env = "NARU_AUDIO_MIC",
+            action = clap::ArgAction::SetTrue,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        mic: bool,
     },
     /// Download models, and what they require, into $NARU_AUDIO_HOME.
     Pull {
@@ -140,6 +150,11 @@ enum Command {
         #[command(subcommand)]
         action: MlxAction,
     },
+    /// The local mic capture (macOS).
+    Mic {
+        #[command(subcommand)]
+        action: MicAction,
+    },
     /// Cloned voices in $NARU_AUDIO_HOME/voices, spoken by any cloning model
     /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx, breeze-tts-2-8bit-mlx).
     Voice {
@@ -163,6 +178,20 @@ enum VoiceAction {
 }
 
 #[derive(Subcommand)]
+enum MicAction {
+    /// Capture for a while and print the level, through the same capture
+    /// `serve --mic` uses.
+    Test {
+        /// Input device by exact name; else NARU_AUDIO_MIC_DEVICE, then
+        /// config.toml's [mic] device, then the built-in mic.
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long, default_value_t = 5.0)]
+        seconds: f64,
+    },
+}
+
+#[derive(Subcommand)]
 enum MlxAction {
     /// Check the in-process (native) MLX: mlx.metallib next to this binary
     /// and a matmul on the GPU.
@@ -179,13 +208,14 @@ enum Format {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let (listen, allow_remote, log_file, keep_recent) = match Cli::parse().command {
+    let (listen, allow_remote, log_file, keep_recent, mic) = match Cli::parse().command {
         Command::Serve {
             listen,
             allow_remote,
             log_file,
             keep_recent,
-        } => (listen, allow_remote, log_file, keep_recent),
+            mic,
+        } => (listen, allow_remote, log_file, keep_recent, mic),
         Command::Health => return health(&daemon_url()),
         Command::Ps => return ps(&daemon_url()),
         Command::Transcribe {
@@ -231,6 +261,7 @@ async fn main() -> ExitCode {
             .await;
         }
         Command::Mlx { action } => return mlx_command(action),
+        Command::Mic { action } => return mic_command(action).await,
         Command::Voice { action } => return voice_command(action),
         // §3.7: these work without a daemon, directly on $NARU_AUDIO_HOME.
         command => return registry_command(command),
@@ -290,6 +321,27 @@ async fn main() -> ExitCode {
         settings,
         Arc::new(BackendLoader),
     );
+    let mic = if mic {
+        let device = match naru_audio::mic::configured_device(registry.home()) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("naru-audio: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        // Nothing reads the frames yet (ambient, naru task 2372): the
+        // receiver is dropped and they are discarded.
+        let (frames, _) = tokio::sync::mpsc::channel(64);
+        match naru_audio::mic::Mic::start(device, log.clone(), frames) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                log.line("warn", None, &format!("mic_unavailable error={e:?}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let app = server::router(Arc::new(AppState {
         port: addr.port(),
         allow_remote,
@@ -299,6 +351,7 @@ async fn main() -> ExitCode {
         models: Arc::new(models),
         pulls: Arc::new(naru_audio::server::PullTracker::new()),
         keep_recent,
+        mic,
     }));
     if let Err(e) = axum::serve(listener, app).await {
         eprintln!("naru-audio: server error: {e}");
@@ -340,6 +393,79 @@ fn mlx_command(_: MlxAction) -> ExitCode {
         "naru-audio: mlx requires Apple Silicon (arm64 macOS); this build has no MLX backend"
     );
     ExitCode::FAILURE
+}
+
+/// `mic test`: exits 1 if the device is missing or no audio arrived.
+async fn mic_command(action: MicAction) -> ExitCode {
+    let MicAction::Test { device, seconds } = action;
+    let device = match device {
+        Some(d) => Some(d),
+        None => match registry::default_home().map(|h| naru_audio::mic::configured_device(&h)) {
+            Some(Ok(d)) => d,
+            Some(Err(e)) => {
+                eprintln!("naru-audio: {e}");
+                return ExitCode::from(2);
+            }
+            None => None,
+        },
+    };
+    // A test of a named device never falls back to another (the real mic).
+    if let Some(want) = &device
+        && !naru_audio::mic::input_names().contains(want)
+    {
+        eprintln!("naru-audio: mic: no input device named {want:?}");
+        return ExitCode::FAILURE;
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+    let mic = match naru_audio::mic::Mic::start(device.clone(), Arc::new(Logger::stderr()), tx) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("naru-audio: mic: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // The clock starts once the device is open, not while a prompt is up.
+    let give_up = Instant::now() + Duration::from_secs(60);
+    while !mic.status().running {
+        if Instant::now() > give_up {
+            eprintln!(
+                "naru-audio: mic: did not open: {:?}",
+                mic.status().last_error
+            );
+            // Not a return: dropping `mic` joins a thread that may be
+            // blocked on the mic permission prompt.
+            std::process::exit(1);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut samples: Vec<f32> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs_f64(seconds.max(0.0));
+    while let Ok(Some(frame)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        samples.extend(frame);
+    }
+    let status = mic.status();
+    drop(mic);
+    let opened = status.device.unwrap_or_else(|| "-".into());
+    // The device vanished between the check above and opening.
+    if let Some(want) = &device
+        && &opened != want
+    {
+        eprintln!("naru-audio: mic: {want:?} went away; opened {opened:?}");
+        return ExitCode::FAILURE;
+    }
+    let peak = samples.iter().fold(0f32, |m, x| m.max(x.abs()));
+    let peak_dbfs = 20.0 * peak.max(1e-6).log10();
+    println!(
+        "device={opened:?} samples={} seconds={:.2} rms_dbfs={:.1} peak={peak:.4} peak_dbfs={peak_dbfs:.1} probably_denied={}",
+        samples.len(),
+        samples.len() as f64 / naru_audio::mic::RATE as f64,
+        naru_audio::mic::dbfs(&samples),
+        status.probably_denied
+    );
+    if samples.is_empty() {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }
 
 /// `voice add`, on $NARU_AUDIO_HOME; exits 1 on failure.
@@ -387,6 +513,7 @@ fn registry_command(command: Command) -> ExitCode {
         | Command::Say { .. }
         | Command::Stream { .. }
         | Command::Mlx { .. }
+        | Command::Mic { .. }
         | Command::Voice { .. } => {
             unreachable!("handled by main")
         }

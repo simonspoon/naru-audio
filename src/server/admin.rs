@@ -240,6 +240,7 @@ mod tests {
             models: Arc::new(models),
             pulls: Arc::new(PullTracker::new()),
             keep_recent: false,
+            mic: None,
         }))
     }
 
