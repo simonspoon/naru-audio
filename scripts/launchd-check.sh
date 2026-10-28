@@ -32,7 +32,7 @@ echo "$out" | plutil -lint - >/dev/null || fail "printed plist does not lint"
 [ ! -e "$PLIST" ] && [ -z "$(log)" ] || fail "--print touched something"
 for want in com.naru.audio RunAtLoad KeepAlive Interactive "$PREFIX/bin/naru-audio" "<string>serve</string>" \
   "<string>--allow-remote</string>" "<string>--listen</string>" "<string>0.0.0.0:7870</string>" \
-  "$HOME/.naru-audio/serve.log" "$HOME/.naru-audio/serve.err.log" "$HOME/.naru-audio/mlx/.venv/bin" "naru_audio=info"; do
+  "$HOME/.naru-audio/serve.log" "$HOME/.naru-audio/serve.err.log" "naru_audio=info"; do
   echo "$out" | grep -qF "$want" || fail "plist lacks $want"
 done
 ok "plist renders and lints"

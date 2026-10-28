@@ -1,8 +1,21 @@
-# Breeze TTS 2 (BreezeBlue), mlx-community's 8-bit (mxfp8) conversion.
-# Same model, licence, capabilities and prompt format as the bf16 entry
-# (breeze-tts-2-mlx.toml, see its header); only the weights differ: one
-# model.safetensors (~4.6 GB total) instead of two shards, and
-# config.json carries a "quantization" block (8 bits, mode mxfp8).
+# Breeze TTS 2 (BreezeBlue), mlx-community's 8-bit (mxfp8) conversion, run
+# in-process by the native Breeze engine (src/mlx/breeze.rs, naru tasks
+# 2381-2384). The only Breeze checkpoint with a native port: the bf16 and
+# 4-bit entries were dropped with the Python MLX process (naru task 2391). It
+# clones a reference recording (no preset speakers, so its voices are the
+# cloned ones under $NARU_AUDIO_HOME/voices/, each taken as `ref_audio` with
+# its transcript as `ref_text`), and separately takes the request's
+# `instructions` as `instruct` to make a voice up from a description. 24 kHz
+# output. `speed` is not supported at all: a non-1.0 speed is an error.
+# One model.safetensors (~4.6 GB total); config.json carries a
+# "quantization" block (8 bits, mode mxfp8).
+#
+# Licence: this is BreezeBlue's own research/non-commercial grant, not an
+# OSI license — "This Agreement permits research and non-commercial use of
+# the Model Materials free of charge. It does not grant any commercial
+# rights and is not an open source license. Commercial use requires a
+# separate written license from BreezeBlue." (LICENSE, pinned below) — so
+# `non_commercial` is set, same as pocket-tts-int8.
 #
 # Every [[file]] of the repo at the pinned commit but README.md and
 # .gitattributes; sizes and LFS hash from the HF API, the small files'
@@ -17,7 +30,7 @@ platforms   = ["macos-arm64", "macos-x86_64"]
 languages   = ["en", "zh"]
 license     = "BreezeBlue Research and Non-Commercial License"
 license_url = "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-8bit/blob/c6e4a2ff6ab9afba68b7853de802273ffe23fb49/LICENSE"
-non_commercial = true                    # see the bf16 file's LICENSE excerpt
+non_commercial = true                    # see the LICENSE excerpt above
 
 [backend.mlx]
 # Speaks in the cloned voices under $NARU_AUDIO_HOME/voices/.

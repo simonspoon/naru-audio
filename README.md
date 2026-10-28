@@ -41,7 +41,7 @@ models, and memory use. The tabs:
 | **Overview** | See which models are running, on disk or not pulled (load, unload, pull). Browse the default TTS model's voices with waveforms and play a preview of each. |
 | **Models** | Search and filter the whole catalog (TTS, STT, on disk, running). Pull with progress and cancel, remove, load or unload a model, see its license, and choose the default STT and TTS models. |
 | **Voices** | Pick a model, then browse its built-in, cloned and designed voices. Type a line and hear it, set a voice as the model's default, export, rename or delete a voice, or import one back. |
-| **Clone** | Make a voice from a recording: drop in a file, record one, or take a saved sample; trim it to 5-15 s, auto-transcribe it, hear a test line, then save. Needs Apple Silicon and the MLX sidecar. |
+| **Clone** | Make a voice from a recording: drop in a file, record one, or take a saved sample; trim it to 5-15 s, auto-transcribe it, hear a test line, then save. Needs Apple Silicon (the MLX models). |
 | **Design** | Make up a voice from a description (quick-pick chips such as female, low, warm), compare takes of a test line (pick how many, each on its own seed), and save the one you like. |
 | **Playground** | **Speak**: type text, pick a model, voice and the model's own controls, and play or save the audio. **Listen**: upload or record audio and get a transcript. |
 | **Samples** | Your voice-prep library. Upload or record a clip of any length and open it in **Sample Studio**: separate speakers, remove crosstalk and background, pick the best takes, crop and cut, run a denoise chain, edit against the transcript, and save a clean sample to clone from. |
@@ -77,8 +77,8 @@ curl http://127.0.0.1:7870/v1/audio/transcriptions -F file=@speech.wav -F model=
   built-in sherpa-onnx backend (ONNX Runtime, statically linked), on every
   platform, with no Python and no GPU.
 - **Apple Silicon, for the MLX models only.** Models whose backend is `mlx`
-  (Parakeet on MLX, the Qwen3-TTS Base models and Breeze) run in a Python sidecar on arm64 macOS. They need
-  [`uv`](https://docs.astral.sh/uv/) and a one-time `naru-audio mlx setup`.
+  (Parakeet on MLX, the Qwen3-TTS Base models and Breeze) run in-process on arm64 macOS, with no
+  Python; they need `mlx.metallib` beside the binary (see [Building from source](#building-from-source)).
   On other machines they are listed as unavailable.
 - **macOS for `voice add`**: clips are converted with the system `afconvert`.
 - **Disk and memory for models.** Models are downloaded on request, not
@@ -127,9 +127,7 @@ request.
 | `parakeet-tdt-0.6b-v2-mlx` | STT (English) | mlx | 2.5 GB |
 | `qwen3-tts-0.6b-base-mlx` | TTS, speaks cloned voices | mlx | 2.0 GB |
 | `qwen3-tts-1.7b-base-mlx` | TTS, speaks cloned voices | mlx | 3.1 GB |
-| `breeze-tts-2-mlx` | TTS, clones or designs a voice, **non-commercial** | mlx | 7.6 GB |
-| `breeze-tts-2-8bit-mlx` | `breeze-tts-2-mlx` quantized to 8 bit (mxfp8), **non-commercial** | mlx | 4.6 GB |
-| `breeze-tts-2-4bit-mlx` | `breeze-tts-2-mlx` quantized to 4 bit (mxfp4), **non-commercial** | mlx | 3.0 GB |
+| `breeze-tts-2-8bit-mlx` | TTS, clones or designs a voice, 8 bit (mxfp8), **non-commercial** | mlx | 4.6 GB |
 
 Supporting models, pulled automatically or on demand:
 
@@ -145,7 +143,7 @@ Supporting models, pulled automatically or on demand:
 Each model's license is in its catalog file (`license = …`); check it before
 you use a model's output. `naru-audio list` and `GET /v1/models` show it
 (`x_license`, `x_license_url`). Pulling a non-commercial model
-(`pocket-tts-int8`, `breeze-tts-2-mlx`
+(`pocket-tts-int8`, `breeze-tts-2-8bit-mlx`
 BreezeBlue's research/non-commercial license, `speaker-diarization-reverb-titanet`
 Rev's non-production license) prints a warning; `x_non_commercial` marks it
 in the API. None of them is a default.
@@ -168,16 +166,10 @@ Models are loaded on first use and unloaded after `keep_alive` of idleness
 ### Backends
 
 - **sherpa-onnx** runs the default models in-process on every platform.
-- **MLX** runs the other models in a Python process the daemon supervises
-  (the *sidecar*), on Apple Silicon only. Set it up once:
-
-  ```sh
-  naru-audio mlx setup      # needs uv on PATH; installs a venv in ~/.naru-audio/mlx
-  naru-audio mlx status     # shows the recorded interpreter and whether it imports the sidecar
-  ```
-
-  The sidecar starts on the first MLX request. How it works is under
-  [The MLX sidecar](#the-mlx-sidecar).
+- **MLX** runs the other models in-process too (Rust ports through
+  `mlx-rs`, no Python), on Apple Silicon only. `naru-audio mlx check`
+  confirms `mlx.metallib` is beside the binary and runs a matmul on the GPU.
+  How it works is under [The MLX backend](#the-mlx-backend).
 
 ## Speech gate and VAD
 
@@ -210,12 +202,11 @@ naru-audio say "A different voice." -v am_adam -o adam.wav
 Both `say` and `transcribe` take `-` for stdin; `say -o -` streams the WAV to
 stdout one sentence at a time.
 
-**Cloning** needs Apple Silicon and the MLX sidecar. The easiest way is the
+**Cloning** needs Apple Silicon (the MLX models). The easiest way is the
 admin UI's **Clone** tab (or **Samples**, to clean a long recording first).
 From the terminal:
 
 ```sh
-naru-audio mlx setup                              # once; needs uv on PATH
 naru-audio pull qwen3-tts-0.6b-base-mlx
 naru-audio voice add myvoice clip.wav --text "Exactly what the clip says."
 naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
@@ -246,7 +237,7 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   request, so a new one works without restarting the daemon.
 - `voice add` (the CLI) always records `qwen3-tts-0.6b-base-mlx`; it has no
   `--model`. `POST /v1/audio/voices` (and the admin UI) take one, for
-  `qwen3-tts-1.7b-base-mlx` or `breeze-tts-2-mlx` instead. `say` with a cloned
+  `qwen3-tts-1.7b-base-mlx` or `breeze-tts-2-8bit-mlx` instead. `say` with a cloned
   voice and no `-m` picks `qwen3-tts-0.6b-base-mlx`; an explicit `-m` that
   voice was not made for is refused rather than silently ignored.
 - `GET /v1/models` names each model's cloning and voice-design capability
@@ -278,26 +269,27 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
 
 Per-model notes:
 
-- `breeze-tts-2-mlx` (**BreezeBlue Research and Non-Commercial License,
+- `breeze-tts-2-8bit-mlx` (**BreezeBlue Research and Non-Commercial License,
   non-commercial only**: "it does not grant any commercial rights") clones
   or designs a voice, does not support `speed`, and streams normally.
 
-**Voice design**: `breeze-tts-2-mlx` can also make a voice up from
+**Voice design**: `breeze-tts-2-8bit-mlx` can also make a voice up from
 `--instructions` (the admin UI's **Design** tab does this with chips), with no
 voice named. The two are mutually exclusive per request, and a named cloned
 voice always wins if both are given:
 
 ```sh
-naru-audio say "Good evening." -m breeze-tts-2-mlx \
+naru-audio say "Good evening." -m breeze-tts-2-8bit-mlx \
   --instructions "A warm, husky woman in her thirties. Speak slowly." -o designed.wav
 ```
 
-**Dropped models**: the MLX catalog keeps `parakeet-tdt-0.6b-v2-mlx`, the
-Breeze trio and the two Qwen3-TTS Base models. A config that still names a
+**Dropped models**: the MLX catalog keeps `parakeet-tdt-0.6b-v2-mlx`,
+`breeze-tts-2-8bit-mlx` and the two Qwen3-TTS Base models. A config that still names a
 dropped model (the Whisper, Qwen3-ASR, Chatterbox, IndexTTS, OmniVoice and
-VoxCPM2 entries, `qwen3-tts-0.6b-mlx` or the Qwen3-TTS VoiceDesign model)
-falls back with a warning: STT to `parakeet-tdt-0.6b-v2-mlx`,
-`qwen3-tts-0.6b-mlx` to `qwen3-tts-0.6b-base-mlx`, any other dropped TTS model
+VoxCPM2 entries, `qwen3-tts-0.6b-mlx`, the Qwen3-TTS VoiceDesign model, or
+the bf16 and 4-bit Breeze) falls back with a warning: STT to `parakeet-tdt-0.6b-v2-mlx`,
+`qwen3-tts-0.6b-mlx` to `qwen3-tts-0.6b-base-mlx`, the other Breeze models to
+`breeze-tts-2-8bit-mlx`, any other dropped TTS model
 to `qwen3-tts-1.7b-base-mlx`. Its `[defaults.voices]` entry carries over to
 the replacement.
 
@@ -314,8 +306,7 @@ All state lives in `$NARU_AUDIO_HOME`, default `~/.naru-audio`:
 ├── prep/           Sample Studio clips and samples
 ├── recent/         only with --keep-recent: the newest 50 synthesised replies
 ├── state/          measured memory use per model
-├── tmp/            partial downloads and locks
-└── mlx/            the MLX sidecar's venv (Apple Silicon)
+└── tmp/            partial downloads and locks
 ```
 
 `config.toml` (every key is optional; the admin UI's default-model controls
@@ -334,12 +325,7 @@ keep_alive = "5m"                   # how long an idle model stays loaded; 0 unl
 max_resident = "8GiB"               # budget for loaded models; idle ones are evicted, oldest first, to fit
 
 [mlx]
-python = "…"                        # written by `naru-audio mlx setup`; do not edit
-native_stt = true                   # parakeet-*-mlx runs in-process (8-bit, no Python); false runs it in the sidecar
-native_tts = true                   # breeze-tts-2-8bit-mlx runs in-process (no Python, cloned voices too); false runs it in the sidecar
-breeze_depth_cache = false          # native Breeze only: true caches its depth decoder, ~30 % faster but different samples than the sidecar
-native_qwen3_tts = true             # qwen3-tts-{0.6b,1.7b}-base-mlx runs in-process (same audio as the sidecar, cloned voices too,
-                                    # streamed in 0.32 s chunks); false runs it in the sidecar
+breeze_depth_cache = false          # Breeze only: true caches its depth decoder, ~30 % faster but different samples than mlx-audio's
 ```
 
 Environment variables:
@@ -418,7 +404,7 @@ not write spoken text, transcripts, microphone audio or generated audio to
 disk. Its log records request lines (route, status, timings, ids,
 character and sentence counts, model and voice names) and never writes the
 spoken text or transcripts itself; error lines carry the underlying error
-message from the library or MLX sidecar. Audio and text in a request are held in memory while it runs.
+message from the library or MLX engine. Audio and text in a request are held in memory while it runs.
 
 What is stored is what you create on purpose: pulled models, cloned voices
 and their reference clips and transcripts, and Sample Studio clips and
@@ -440,9 +426,7 @@ Leave it off otherwise. Turning it off does not delete an existing
 | `cannot listen on 127.0.0.1:7870` | Something else holds the port; use `--listen 127.0.0.1:PORT` (and `NARU_AUDIO_URL` for the clients). |
 | `refusing to listen on non-loopback address … without --allow-remote` | Add `--allow-remote`, after reading [Network access](#configuration). |
 | HTTP 403 `forbidden_origin` | A browser page on another origin called the daemon (the admin UI at `/admin` is same-origin and fine). Call it from a server-side process, or open the page from the daemon itself. |
-| HTTP 503 `backend_unavailable` on an MLX model | Not Apple Silicon, or the sidecar is not set up: run `naru-audio mlx setup`, then `naru-audio mlx status`. |
-| `` `uv` is not on PATH `` | `brew install uv`, then `naru-audio mlx setup` again. |
-| Log line `mlx_env_stale` after an upgrade | The sidecar's dependencies changed: run `naru-audio mlx setup`. |
+| HTTP 503 `backend_unavailable` on an MLX model | Not Apple Silicon, or the model did not load: the `message` says why; run `naru-audio mlx check` (most often `mlx.metallib` is missing beside the binary). |
 | `/health` reports running under Rosetta | You installed the x86_64 build on Apple Silicon; install the arm64 one. |
 | HTTP 507 `insufficient_memory` | Loaded models are busy and the next one does not fit: raise `[memory] max_resident` or use a smaller model. |
 | A model fails to load after files were changed | `naru-audio verify NAME`; if it fails, `naru-audio rm NAME` and pull it again. |
@@ -480,7 +464,7 @@ Everything above is scriptable. The relevant pieces:
   `naru-audio pull NAME` or `POST /api/pull`.
 - Never log audio or transcript text.
 
-The full spec (API, error codes, registry, memory budget, sidecar protocol)
+The full spec (API, error codes, registry, memory budget, MLX backend)
 is [docs/design.md](docs/design.md).
 
 ## Building from source
@@ -509,7 +493,7 @@ kernels come in a separate ~184 MB `mlx.metallib`, built into
 symlinked binary, the directory of the file it points to). Without it,
 MLX exits the process at its first GPU op;
 `naru-audio mlx check` confirms it is there and runs a matmul on the GPU.
-No Python is needed to build; the sidecar's files and the admin UI are embedded in the
+No Python is needed to build or run; the admin UI is embedded in the
 binary. `./start.sh` builds a release binary and runs `serve` with any
 arguments you pass.
 
@@ -527,11 +511,10 @@ src/
   profile.rs         hardware profile (RAM, arch, Rosetta)
   backend.rs         which backends can run here; loads STT/TTS models
   stt/  tts/         sherpa-onnx and MLX engines, VAD, speech gate, hotwords, leveller
-  mlx.rs, mlx/       `mlx setup|status` and the sidecar process
+  mlx.rs, mlx/       native MLX engines (Parakeet, Breeze, Qwen3-TTS) and `mlx check`
   voices.rs          cloned voices
   log.rs, error.rs   log lines and rotation; the error envelope
 catalog/             built-in model manifests (embedded at build time)
-mlx/                 the Python sidecar (naru_audio_mlx), its pyproject and uv.lock
 tests/               integration tests; tests/fixtures/ holds audio fixtures
 examples/            tts_spike.rs, the benchmark behind docs/tts-spike.md
 docs/                design.md (the spec), tts-spike.md and its corpus
@@ -561,38 +544,20 @@ naru-audio pull default pocket-tts-int8
 NARU_AUDIO_REQUIRE_MODELS=1 cargo test --all-targets
 ```
 
-`tests/mlx.rs` runs only on Apple Silicon. It drives the real sidecar
-protocol against a stdlib-only fake, so it needs `/usr/bin/python3` but not
-MLX.
+## The MLX backend
 
-## The MLX sidecar
+MLX models run in-process, as Rust ports through `mlx-rs` (no Python):
 
-MLX models run in a Python process the daemon supervises, not in Rust:
+- **Engines:** `src/mlx/parakeet.rs` (Parakeet TDT, a port of
+  parakeet-mlx), `src/mlx/breeze.rs` (Breeze TTS 2, 8-bit) and
+  `src/mlx/qwen3_tts.rs` (Qwen3-TTS Base, 0.6B and 1.7B), each matching the
+  mlx-audio / parakeet-mlx code it replaced. `src/mlx/native.rs` holds what
+  they share: the `mlx.metallib` check and the MLX cache limit.
+- **Runtime:** MLX loads its kernels from `mlx.metallib` beside the binary;
+  `naru-audio mlx check` verifies it.
 
-- **Source:** [mlx/naru_audio_mlx/](mlx/naru_audio_mlx/) (`__main__.py`
-  runs parakeet-mlx, mlx-whisper and mlx-audio; `protocol.py` defines the frames).
-  [mlx/pyproject.toml](mlx/pyproject.toml) pins Python 3.12 and the
-  libraries; [mlx/uv.lock](mlx/uv.lock) locks them.
-- **Install:** these files are embedded in the binary. `naru-audio mlx
-  setup` writes them to `~/.naru-audio/mlx/`, runs `uv sync --frozen`
-  there, and records the venv's interpreter in `config.toml` `[mlx]
-  python`. `naru-audio mlx status` checks that it imports.
-- **Runtime:** the daemon starts `python -m naru_audio_mlx --socket …` on
-  the first MLX request and talks length-prefixed JSON frames (plus raw
-  f32 samples) over a Unix socket. On each `serve` start it refreshes the
-  deployed `.py` files from the binary; a changed `pyproject.toml` or
-  `uv.lock` needs `naru-audio mlx setup` again.
-- **Changing dependencies:** edit `mlx/pyproject.toml`, run `uv lock` in
-  `mlx/`, commit both, rebuild, then `naru-audio mlx setup`.
-- **Python tests** use the installed venv, from `mlx/`:
-
-  ```sh
-  cd mlx
-  ~/.naru-audio/mlx/.venv/bin/python -m unittest tests.test_synth tests.test_transcribe_whisper
-  ```
-
-To add an MLX model, add a catalog entry with `backend = "mlx"`; see the
-`qwen3-tts-*-mlx.toml` files and [docs/design.md §5.3](docs/design.md).
+A new MLX model needs a native engine as well as a catalog entry with
+`backend = "mlx"`; see [docs/design.md §5.3](docs/design.md).
 
 ## Release process
 

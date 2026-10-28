@@ -135,3 +135,43 @@ changed only as a deploy step by the live main thread, never by an agent:
 
 Roll back: restore the previous binary as above and put
 `stt = "whisper-large-v3-turbo-mlx"` back.
+
+# Deploying the Python sidecar removal (naru task 2391)
+
+From this build on naru-audio has no Python at all: every `mlx` model runs
+in-process (Parakeet, 8-bit Breeze, both Qwen3-TTS Base sizes). Gone:
+`naru-audio mlx setup` and `mlx status` (`mlx check` stays), the
+`[mlx] native_stt`, `native_tts` and `native_qwen3_tts` fallback switches,
+`[mlx] python`, and the venv on the LaunchAgent's `PATH`. Left-over keys in
+`config.toml` are ignored, so the real config still loads unchanged. A
+failed native load is now 503 `backend_unavailable` with the reason; there
+is nothing to fall back to.
+
+`breeze-tts-2-mlx` (bf16) and `breeze-tts-2-4bit-mlx` had no native port and
+are dropped like the models in task 2390: a default naming one falls back to
+`breeze-tts-2-8bit-mlx` with a `dropped_model` warning; pulled copies are
+hidden until `naru-audio rm`. The real install has both pulled and one
+cloned voice made for the 4-bit model; that voice no longer plays until it
+is re-made for `breeze-tts-2-8bit-mlx`.
+
+## Upgrade steps (live main thread only, never an agent)
+
+1. Recommended, not required: do the task 2390 steps first if they have not
+   run. The real `stt` default is still `whisper-large-v3-turbo-mlx`; without
+   the edit the daemon falls back to Parakeet with a warning.
+2. Install the binary and `mlx.metallib` as under Install above. Restart by
+   re-rendering the LaunchAgent, so its `PATH` drops
+   `~/.naru-audio/mlx/.venv/bin` (`scripts/launchd.sh install` rewrites
+   `~/Library/LaunchAgents/com.naru.audio.plist` and restarts it).
+3. Check: `naru-audio mlx check`, then the Check section above (every
+   `load model=…` ends `engine=native`), and no Python child of the daemon:
+   `pgrep -lf naru_audio_mlx` prints nothing.
+4. Remove the stale Python environment (~1.3 GB) and its config key:
+   `rm -rf ~/.naru-audio/mlx`, then delete the `[mlx]` table
+   (`python = …`) from `~/.naru-audio/config.toml`.
+5. Optional, to free disk: `naru-audio rm breeze-tts-2-mlx breeze-tts-2-4bit-mlx`
+   (and the task 2390 models). `uv` itself is no longer needed by naru-audio.
+
+Roll back: restore the previous binary (Roll back above), skipping step 4
+until the new build has run for a while; the old binary still finds the
+venv and its `[mlx] python`.

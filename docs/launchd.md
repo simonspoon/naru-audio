@@ -13,7 +13,7 @@ alive; the `com.naru.audio` user agent can. Nothing loads it automatically.
   binary; `cargo install` does not); check with `naru-audio mlx check`.
 - Logs: `~/.naru-audio/serve.log` and `serve.err.log`.
 - Env: launchd starts bare, so the plist sets `HOME`, `RUST_LOG=naru_audio=info` and a `PATH`
-  with `~/.naru-audio/mlx/.venv/bin` first (the MLX sidecar), then cargo, local, Homebrew and system dirs.
+  of cargo, local, Homebrew and system dirs.
 - `install --print` shows the plist; `--dry-run` shows the plan. `uninstall` boots the agent out
   and removes the plist.
 - **Security:** `--allow-remote` on `0.0.0.0` is unauthenticated, exactly like the manual run.

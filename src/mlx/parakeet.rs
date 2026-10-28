@@ -1,5 +1,4 @@
-//! Parakeet TDT in-process through mlx-rs (naru task 2379), the native
-//! alternative to the sidecar's parakeet-mlx: a port of parakeet_mlx 0.5.2's
+//! Parakeet TDT in-process through mlx-rs (naru task 2379): a port of parakeet_mlx 0.5.2's
 //! inference path (log-mel, dw_striding subsampling, rel-pos conformer,
 //! LSTM prediction net, joint, greedy TDT decode), from the 2367 prototype.
 //!

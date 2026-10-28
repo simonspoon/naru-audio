@@ -312,7 +312,7 @@ fn synthesise(
     rx
 }
 
-/// How many sentences the MLX sidecar's `split_sentences` makes of `text`:
+/// How many sentences Qwen3-TTS's `split_sentences` makes of `text`:
 /// split after `. ! ?` before whitespace, after `。！？`, and at newlines;
 /// a piece under 12 characters joins the next (a short last one, the
 /// previous), so it only ever counts once.
@@ -404,7 +404,7 @@ fn save_recent(
 
 /// A failed synthesis, classified where the [`TtsError`] is still at hand.
 struct Failure {
-    /// The backend went away mid-synthesis (a crashed MLX sidecar, §5.3).
+    /// The backend is unavailable (§2.6 `backend_unavailable`).
     unavailable: bool,
     message: String,
 }
@@ -1637,7 +1637,7 @@ mod tests {
     use super::sentence_count;
 
     #[test]
-    fn sentences_are_counted_as_the_sidecar_splits_them() {
+    fn sentences_are_counted_as_qwen3_tts_splits_them() {
         // "Dr." is short and joins the next piece; "3.14" has no space.
         assert_eq!(sentence_count("Dr. Smith paid 3.14 dollars."), 1);
         assert_eq!(

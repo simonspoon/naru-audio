@@ -1,6 +1,5 @@
 //! §3 `/admin`: the static, buildless admin UI, embedded at compile time
-//! from `src/admin/` (same `include_bytes!` pattern as the MLX sidecar
-//! files, `src/mlx.rs:16-28`). `GET /admin` and `/admin/` serve
+//! from `src/admin/` (`include_bytes!`). `GET /admin and `/admin/` serve
 //! `index.html`; `GET /admin/{*path}` serves any other asset by exact path
 //! match, or a JSON 404 envelope for anything not in the table.
 

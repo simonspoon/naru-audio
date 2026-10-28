@@ -135,14 +135,13 @@ enum Command {
         #[arg(long)]
         partials: bool,
     },
-    /// The MLX sidecar's Python environment (Apple Silicon only).
+    /// The in-process MLX (Apple Silicon only).
     Mlx {
         #[command(subcommand)]
         action: MlxAction,
     },
     /// Cloned voices in $NARU_AUDIO_HOME/voices, spoken by any cloning model
-    /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx, breeze-tts-2-mlx,
-    /// breeze-tts-2-8bit-mlx, breeze-tts-2-4bit-mlx).
+    /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx, breeze-tts-2-8bit-mlx).
     Voice {
         #[command(subcommand)]
         action: VoiceAction,
@@ -165,11 +164,6 @@ enum VoiceAction {
 
 #[derive(Subcommand)]
 enum MlxAction {
-    /// Install the sidecar's venv with uv into $NARU_AUDIO_HOME/mlx and
-    /// record its interpreter in config.toml.
-    Setup,
-    /// Show the recorded interpreter and whether it imports the sidecar.
-    Status,
     /// Check the in-process (native) MLX: mlx.metallib next to this binary
     /// and a matmul on the GPU.
     Check,
@@ -290,10 +284,6 @@ async fn main() -> ExitCode {
     for w in &settings.warnings {
         log.line("warn", None, w);
     }
-    // Before any model load can start the sidecar.
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    naru_audio::mlx::refresh_scripts(registry.home(), &log);
-
     let models = ModelManager::new(
         registry.clone(),
         log.clone(),
@@ -328,46 +318,17 @@ fn open_registry() -> Result<Registry, ExitCode> {
     })
 }
 
-/// §3.7 `mlx setup|status`, on $NARU_AUDIO_HOME, and `mlx check`; all exit 1
-/// on failure.
+/// `mlx check`; exits 1 on failure.
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 fn mlx_command(action: MlxAction) -> ExitCode {
-    use naru_audio::mlx;
-
-    if let MlxAction::Check = action {
-        return match mlx::native::self_check() {
-            Ok(report) => {
-                println!("{report}");
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("naru-audio: mlx check: {e}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    let Some(home) = registry::default_home() else {
-        eprintln!("naru-audio: set NARU_AUDIO_HOME or HOME");
-        return ExitCode::FAILURE;
-    };
-    if let MlxAction::Setup = action
-        && let Err(e) = mlx::setup(&home)
-    {
-        eprintln!("naru-audio: mlx setup: {e}");
-        return ExitCode::FAILURE;
-    }
-    let (python, result) = mlx::status(&home);
-    if let Some(python) = python {
-        println!("python   {}", python.display());
-        println!("exists   {}", if python.is_file() { "yes" } else { "no" });
-    }
-    match result {
-        Ok(()) => {
-            println!("imports  yes");
+    let MlxAction::Check = action;
+    match naru_audio::mlx::native::self_check() {
+        Ok(report) => {
+            println!("{report}");
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("naru-audio: mlx: {e}");
+            eprintln!("naru-audio: mlx check: {e}");
             ExitCode::FAILURE
         }
     }

@@ -40,7 +40,7 @@ pub struct Word {
     pub end: f64,
     pub text: String,
     /// The engine's confidence in the word, 0..=1; `None` where the engine
-    /// reports none (only MLX Whisper does).
+    /// reports none.
     pub confidence: Option<f32>,
 }
 
@@ -72,8 +72,7 @@ pub trait SttModel: Send + Sync {
     /// [`Segment`]s split into [`Word`]s with their own timestamps
     /// (naru task 1461 §8: voice-prep's transcript step). `Err(SttError::
     /// WordTimestampsUnsupported)` by default; only a backend that reports
-    /// per-token timestamps (`sherpa-onnx`'s Parakeet, the MLX Whisper via
-    /// [`SttModel::decode_words_in`]) overrides it.
+    /// per-token timestamps (`sherpa-onnx`'s Parakeet) overrides it.
     fn decode_words(
         &self,
         _pcm16k: &[f32],
@@ -111,7 +110,7 @@ pub trait SttModel: Send + Sync {
     }
 
     /// [`SttModel::decode_words_in`] that keeps fillers, false starts and
-    /// repetitions when `verbatim` and the backend can (the MLX Whisper);
+    /// repetitions when `verbatim` and the backend can (none does today);
     /// the `bool` answered is whether the decode was verbatim. The default
     /// is a normal decode, answered `false`.
     fn decode_words_verbatim(
@@ -132,14 +131,13 @@ pub trait SttModel: Send + Sync {
     }
 
     /// The bytes the model holds outside the daemon's own RSS (§3.5: an
-    /// MLX model lives in the sidecar), when it reports them.
+    /// MLX model's Metal memory), when it reports them.
     fn resident_bytes(&self) -> Option<u64> {
         None
     }
 
-    /// Which engine runs the model when its backend has more than one
-    /// (MLX: `native` or `sidecar`), and why the native one failed to load
-    /// when the sidecar stands in for it.
+    /// Which engine runs the model (MLX: `native`), and why another one
+    /// stands in for it, if one does.
     fn engine(&self) -> Option<(&'static str, Option<&str>)> {
         None
     }
@@ -158,8 +156,6 @@ pub enum SttError {
     NoVadModel(String),
     Engine(engine::EngineError),
     Vad(vad::VadError),
-    /// The MLX sidecar answered a request with an error (§5.3).
-    Sidecar(String),
     /// The in-process MLX model failed a decode (naru task 2379).
     Native(String),
     /// [`SttModel::decode_words`]'s default: this backend reports no
@@ -183,7 +179,6 @@ impl std::fmt::Display for SttError {
             }
             SttError::Engine(e) => e.fmt(f),
             SttError::Vad(e) => e.fmt(f),
-            SttError::Sidecar(message) => write!(f, "the MLX sidecar failed: {message}"),
             SttError::Native(message) => write!(f, "native MLX failed: {message}"),
             SttError::WordTimestampsUnsupported => {
                 write!(f, "this model does not report word timestamps")

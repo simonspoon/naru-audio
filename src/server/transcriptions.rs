@@ -541,8 +541,8 @@ pub(super) fn bad_request(
     }
 }
 
-/// §2.6 code for a failed decode: the backend went away mid-decode (a
-/// crashed MLX sidecar, §5.3), or anything else.
+/// §2.6 code for a failed decode: the backend is unavailable, or anything
+/// else.
 fn decode_code(e: &SttError) -> &'static str {
     match e {
         SttError::BackendUnavailable { .. } => "backend_unavailable",

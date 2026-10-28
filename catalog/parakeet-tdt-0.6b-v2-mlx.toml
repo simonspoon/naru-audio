@@ -1,5 +1,6 @@
-# The same model as parakeet-tdt-0.6b-v2-int8, served by the MLX sidecar
-# (§5.3). `from_pretrained` needs only these two files.
+# The same model as parakeet-tdt-0.6b-v2-int8, run in-process by the
+# native Parakeet engine (src/mlx/parakeet.rs, §5.3), which needs only
+# these two files.
 
 [model]
 name        = "parakeet-tdt-0.6b-v2-mlx"
@@ -10,7 +11,7 @@ platforms   = ["macos-arm64", "macos-x86_64"]
 languages   = ["en"]
 license     = "CC-BY-4.0"
 license_url = "https://creativecommons.org/licenses/by/4.0/"
-resident_bytes = 2_600_000_000           # estimate; the sidecar's `stats` corrects it
+resident_bytes = 2_600_000_000           # estimate; what a load measures corrects it
 requires    = ["silero-vad", "audio-tagging-ced-tiny"]
 
 [[file]]

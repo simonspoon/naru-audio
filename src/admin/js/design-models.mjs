@@ -159,9 +159,7 @@ const GENERIC = {
 };
 
 export const DESIGN_MODELS = {
-  'breeze-tts-2-mlx': BREEZE,
   'breeze-tts-2-8bit-mlx': BREEZE,
-  'breeze-tts-2-4bit-mlx': BREEZE,
 };
 
 /** Model-specific data for `id`, or the generic fallback. `hint` (the

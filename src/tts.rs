@@ -54,13 +54,13 @@ pub struct SynthOptions {
     /// Every other manifest-declared knob (`Manifest::prompt_format`'s
     /// `knobs`, naru task 1458), by name, already checked against its
     /// `min`/`max`; `speed` and `exaggeration` go through their own fields
-    /// above instead, even though they are also declared knobs. Sent on to
-    /// the MLX sidecar as `generate` kwargs (`MlxTts::synth`); the
+    /// above instead, even though they are also declared knobs. The MLX
+    /// engines read the sampling ones (`MlxTts::synth`); the
     /// `sherpa-onnx` backend has no knob but `speed` (its own field), so it
     /// ignores this.
     pub knobs: BTreeMap<String, f64>,
-    /// The sampling seed (`POST /v1/audio/speech` `seed`); the MLX sidecar
-    /// seeds its random state with it before each generate. Other backends
+    /// The sampling seed (`POST /v1/audio/speech` `seed`); the MLX engines
+    /// seed MLX's random state with it. Other backends
     /// ignore it.
     pub seed: u64,
 }
@@ -98,14 +98,13 @@ pub trait TtsModel: Send + Sync {
     ) -> Result<(), TtsError>;
 
     /// The bytes the model holds outside the daemon's own RSS (§3.5: an
-    /// MLX model lives in the sidecar), when it reports them.
+    /// MLX model's Metal memory), when it reports them.
     fn resident_bytes(&self) -> Option<u64> {
         None
     }
 
-    /// Which engine runs the model when its backend has more than one
-    /// (MLX: `native` or `sidecar`), and why the native one failed to load
-    /// when the sidecar stands in for it.
+    /// Which engine runs the model (MLX: `native`), and why another one
+    /// stands in for it, if one does.
     fn engine(&self) -> Option<(&'static str, Option<&str>)> {
         None
     }
@@ -144,8 +143,6 @@ pub enum TtsError {
     InvalidGap(f32),
     /// `generate` returned no audio without being cancelled.
     GenerateFailed,
-    /// The MLX sidecar answered with an error.
-    Sidecar(String),
     /// The in-process MLX engine failed.
     Native(String),
 }
@@ -174,7 +171,6 @@ impl std::fmt::Display for TtsError {
             TtsError::NulInText => write!(f, "the text contains a NUL character"),
             TtsError::InvalidGap(gap) => write!(f, "gap {gap} is not between 0 and 5 seconds"),
             TtsError::GenerateFailed => write!(f, "synthesis produced no audio"),
-            TtsError::Sidecar(message) => write!(f, "the MLX sidecar failed: {message}"),
             TtsError::Native(message) => write!(f, "native MLX failed: {message}"),
         }
     }

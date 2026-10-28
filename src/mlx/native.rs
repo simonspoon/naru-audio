@@ -1,5 +1,5 @@
-//! In-process MLX through mlx-rs, the native replacement for the [`super::sidecar`]
-//! (naru task 2378: build foundation only, no model yet).
+//! In-process MLX through mlx-rs (naru task 2378): what every native engine
+//! shares (the metallib, the cache limit, `mlx check`).
 
 use std::path::PathBuf;
 use std::sync::Mutex;

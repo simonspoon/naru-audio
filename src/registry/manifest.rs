@@ -15,14 +15,6 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/audio-tagging-ced-tiny.toml"),
     ),
     (
-        "breeze-tts-2-mlx.toml",
-        include_str!("../../catalog/breeze-tts-2-mlx.toml"),
-    ),
-    (
-        "breeze-tts-2-4bit-mlx.toml",
-        include_str!("../../catalog/breeze-tts-2-4bit-mlx.toml"),
-    ),
-    (
         "breeze-tts-2-8bit-mlx.toml",
         include_str!("../../catalog/breeze-tts-2-8bit-mlx.toml"),
     ),
@@ -227,11 +219,11 @@ pub struct PromptFormatInline {
     pub example: Option<String>,
 }
 
-/// Kwargs `synth()` in `mlx/naru_audio_mlx/__main__.py` sets itself, so a
-/// knob of the same name would clobber them (`kwargs.update(knobs)`) or
-/// raise a duplicate-kwarg error in `model.generate(...)`. `exaggeration`
-/// is deliberately absent: Chatterbox's knob of that name overrides the
-/// same dial on purpose. Applies to the `mlx` backend only.
+/// mlx-audio `generate` kwargs the request itself sets (the voice, its
+/// reference, `instructions`, `speed`, streaming), so a knob may not take
+/// one of their names. `exaggeration` is deliberately absent: a knob of
+/// that name overrides the same dial on purpose. Applies to the `mlx`
+/// backend only.
 const RESERVED_KNOB_NAMES: &[&str] = &[
     "ref_audio",
     "ref_text",
@@ -659,9 +651,7 @@ mod tests {
             cat.models.keys().collect::<Vec<_>>(),
             [
                 "audio-tagging-ced-tiny",
-                "breeze-tts-2-4bit-mlx",
                 "breeze-tts-2-8bit-mlx",
-                "breeze-tts-2-mlx",
                 "campplus-sv-en",
                 "kokoro-v1.0",
                 "parakeet-tdt-0.6b-v2-int8",
@@ -836,34 +826,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_breeze_quantized_clone_and_instruct_and_are_non_commercial() {
-        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
-        for (id, repo) in [
-            ("breeze-tts-2-8bit-mlx", "Breeze-TTS-2-mlx-8bit"),
-            ("breeze-tts-2-4bit-mlx", "Breeze-TTS-2-mlx-4bit"),
-        ] {
-            let m = &cat.models[id];
-            assert_eq!(m.model.kind, Kind::Tts);
-            assert_eq!(m.model.backend, "mlx");
-            assert!(m.model.non_commercial, "{id}");
-            assert!(m.clones(), "{id}");
-            assert!(m.clone_requires_transcript(), "{id}");
-            assert!(m.instructs(), "{id}");
-            let license_url = m.model.license_url.as_deref().unwrap();
-            assert!(
-                license_url.starts_with(&format!(
-                    "https://huggingface.co/mlx-community/{repo}/blob/"
-                )) && license_url.ends_with("/LICENSE"),
-                "{license_url}"
-            );
-            assert!(m.files.iter().any(|f| f.path == "LICENSE"), "{id}");
-        }
-    }
-
-    #[test]
     fn builtin_breeze_clones_and_instructs_and_is_non_commercial() {
         let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
-        let m = &cat.models["breeze-tts-2-mlx"];
+        let m = &cat.models["breeze-tts-2-8bit-mlx"];
         assert_eq!(m.model.kind, Kind::Tts);
         assert_eq!(m.model.backend, "mlx");
         assert_eq!(
@@ -873,8 +838,8 @@ mod tests {
         assert_eq!(
             m.model.license_url.as_deref(),
             Some(
-                "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/blob/\
-                 3c8829fb7fd335818f085cd2ef49b4100c0e46c8/LICENSE"
+                "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-8bit/blob/\
+                 c6e4a2ff6ab9afba68b7853de802273ffe23fb49/LICENSE"
             )
         );
         // Naru 1446: BreezeBlue's own LICENSE grants research and
@@ -888,8 +853,9 @@ mod tests {
         for f in &m.files {
             let url = f.url.as_deref().unwrap();
             assert!(
-                url.starts_with("https://huggingface.co/mlx-community/Breeze-TTS-2-mlx/resolve/")
-                    && url.ends_with(&format!("/{}", f.path)),
+                url.starts_with(
+                    "https://huggingface.co/mlx-community/Breeze-TTS-2-mlx-8bit/resolve/"
+                ) && url.ends_with(&format!("/{}", f.path)),
                 "{url}"
             );
         }
@@ -943,7 +909,7 @@ mod tests {
         // manifest is still intact: this regressed once (naru_1457),
         // deleting Breeze's LICENSE `[[file]]` when its prompt_format was
         // inserted above it.
-        let breeze = &cat.models["breeze-tts-2-mlx"];
+        let breeze = &cat.models["breeze-tts-2-8bit-mlx"];
         assert!(
             breeze.files.iter().any(|f| f.path == "LICENSE"),
             "{:?}",
@@ -979,8 +945,8 @@ mod tests {
             );
         }
 
-        // The Base pair's defaults are the tighter sampling the sidecar
-        // applies to a cloned voice.
+        // The Base pair's defaults are the tighter sampling the native
+        // engine applies to a cloned voice (`CLONE_SAMPLING`).
         for name in ["qwen3-tts-0.6b-base-mlx", "qwen3-tts-1.7b-base-mlx"] {
             let pf = cat.models[name].prompt_format().unwrap();
             assert_eq!(

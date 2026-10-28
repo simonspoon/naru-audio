@@ -1,11 +1,11 @@
 //! Breeze TTS 2 (mlx-community's 8-bit, mxfp8) in-process through mlx-rs
-//! (naru task 2381), the native alternative to the sidecar's mlx-audio: a port
+//! (naru task 2381): a port
 //! of mlx-audio 0.5.6's `tts/models/breeze_tts/breeze_tts.py` (T5Gemma2 text
 //! encoder, Qwen3 backbone for codebook 0, Llama depth decoder for codebooks
 //! 1-15, sampling, CFG) and the decoder half of
 //! `qwen3_tts/speech_tokenizer.py` (streaming codec decoder), from the 2368
-//! prototype. Its sampled codes and its audio are bit-identical to the
-//! sidecar's at the same seed, so the quirks below are deliberate:
+//! prototype. Its sampled codes and its audio are bit-identical to
+//! mlx-audio's at the same seed, so the quirks below are deliberate:
 //!
 //! - GELU is compiled, in Python's exact form (`sqrt(2/pi)` folded in double);
 //! - the codec's RMSNorm uses `power`, not `square`;
@@ -19,7 +19,7 @@
 //! The depth decoder recomputes its whole sequence for each codebook, as
 //! Python does. [`Params::depth_cache`] (naru task 2383, off by default)
 //! caches its keys and values within a frame instead: ~30 % faster, but the
-//! float order differs, so it samples different codes than the sidecar.
+//! float order differs, so it samples different codes than mlx-audio.
 //! Voice cloning (naru task 2382, from the 2369 prototype) adds the codec
 //! *encoder* (Mimi SEANet, 8-layer transformer, stride-2 downsample,
 //! split-RVQ encode, as `Qwen3TTSSpeechTokenizerEncoder` wires them), the
@@ -101,7 +101,7 @@ pub(super) const REF_CACHE: usize = 32;
 
 /// Of every sample produced.
 pub const SAMPLE_RATE: u32 = 24000;
-/// The sidecar's `STREAMING_INTERVAL` (0.32 s) in codec frames:
+/// mlx-audio's `streaming_interval` as naru-audio used it (0.32 s), in codec frames:
 /// `int(0.32 * 24000 / 1920)`.
 pub(super) const CHUNK_FRAMES: usize = 4;
 /// `generate`'s own default.
@@ -126,7 +126,7 @@ pub struct Params {
     /// `ref_text`).
     pub reference: Option<(PathBuf, String)>,
     /// Cache the depth decoder's keys and values within each frame (not in
-    /// Python): faster, but no longer bit-identical to the sidecar.
+    /// Python): faster, but no longer bit-identical to mlx-audio.
     pub depth_cache: bool,
 }
 
@@ -1639,7 +1639,7 @@ impl Codec {
 impl Model {
     // ---------------- generate ----------------
 
-    /// The sidecar's path: `generate(stream=True, streaming_interval=0.32)`.
+    /// mlx-audio's `generate(stream=True, streaming_interval=0.32)`.
     /// `emit` gets each chunk and returns `false` to stop.
     fn generate(&self, text: &str, p: &Params, emit: &mut dyn FnMut(Vec<f32>) -> bool) -> R<()> {
         p.check()?;
@@ -1999,7 +1999,7 @@ fn load_encoder(raw: HashMap<String, Array>) -> R<(HashMap<String, Array>, Vec<C
 /// mlx-audio's `load_audio(path, sample_rate=24000)` for a mono 16-bit PCM
 /// WAV (what naru-audio stores): s16 `/ 32768.0` as f32, and a higher rate
 /// through the same kaiser_best polyphase FIR. Anything else is an error
-/// rather than audio that differs from the sidecar's.
+/// rather than audio that differs from mlx-audio's.
 pub(super) fn load_ref_audio(wav: &[u8]) -> R<Vec<f32>> {
     let mut r = hound::WavReader::new(std::io::Cursor::new(wav))?;
     let spec = r.spec();
@@ -2129,7 +2129,7 @@ mod tests {
         // A higher rate is resampled to 24 kHz.
         let x = load_ref_audio(&wav(1, 48000, 16, &[1000; 480])).unwrap();
         assert_eq!(x.len(), 240);
-        // What would differ from the sidecar's audio is an error.
+        // What would differ from mlx-audio's audio is an error.
         assert!(load_ref_audio(&wav(1, 24000, 16, &[])).is_err());
         assert!(load_ref_audio(&wav(2, 24000, 16, &[0, 0])).is_err());
         assert!(load_ref_audio(&wav(1, 24000, 24, &[0])).is_err());

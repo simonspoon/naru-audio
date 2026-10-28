@@ -1,15 +1,14 @@
 //! Qwen3-TTS Base (mlx-community's 8-bit, affine) in-process through mlx-rs
-//! (naru task 2386), the native alternative to the sidecar's mlx-audio for
-//! the two kept checkpoints, `qwen3-tts-0.6b-base-mlx` and
+//! (naru task 2386), for the two kept checkpoints, `qwen3-tts-0.6b-base-mlx` and
 //! `qwen3-tts-1.7b-base-mlx`: a port of mlx-audio 0.5.6's
 //! `tts/models/qwen3_tts` ICL path (`_prepare_icl_generation_inputs`,
-//! `_generate_icl`, `_sample_token`, `talker.py`), as the sidecar drives it
-//! for a cloned voice (`naru_audio_mlx/__main__.py`: `split_chunks`, a seed
-//! per chunk, `primed`). The speech tokenizer (codec decoder and encoder) is
+//! `_generate_icl`, `_sample_token`, `talker.py`), as naru-audio's former
+//! Python shim drove it for a cloned voice (`split_chunks`, a seed per
+//! chunk, `primed`). The speech tokenizer (codec decoder and encoder) is
 //! Breeze's ([`super::breeze::Codec`]), the same weights.
 //!
 //! As in [`super::breeze`], its sampled codes and audio are bit-identical to
-//! the sidecar's at the same seed (naru task 2386, both sizes), so Python's
+//! the Python's at the same seed (naru task 2386, both sizes), so Python's
 //! numerics are mirrored: the talker's RoPE angles from a matmul, cos/sin
 //! cast to the activations' dtype; additive causal masks; `nn.log_softmax`'s
 //! max shift under top-p; every projection run on the same shapes as Python
@@ -19,7 +18,7 @@
 //! `mel_spectrogram`) turns the reference clip into the x-vector; it and the
 //! clip's codec codes are cached by the clip's SHA-256, so a voice is encoded
 //! once; so is the codec decoder primed with those codes. Audio streams as
-//! the sidecar's does (naru task 2388): each 0.32 s of frames is decoded and
+//! the Python's did (naru task 2388): each 0.32 s of frames is decoded and
 //! handed on as soon as it is generated.
 //!
 //! MLX runs on one thread that owns the model: [`Qwen3Tts`] sends it work.
@@ -56,7 +55,7 @@ const HEAD_DIM: i32 = 128;
 const NCB: usize = 16;
 
 /// What one synthesis takes, with `generate`'s own defaults in
-/// [`Params::default`] (the sidecar's `CLONE_SAMPLING` is the caller's).
+/// [`Params::default`] (`CLONE_SAMPLING` is the caller's, `crate::tts::mlx`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Params {
     /// The voice to clone: the reference WAV and its transcript.
@@ -66,7 +65,7 @@ pub struct Params {
     pub top_p: f64,
     pub top_k: usize,
     pub repetition_penalty: f64,
-    /// Seeds MLX's global random state before each chunk, as the sidecar does.
+    /// Seeds MLX's global random state before each chunk, as the Python did.
     pub seed: Option<u64>,
 }
 
@@ -213,7 +212,7 @@ impl Drop for Qwen3Tts {
 }
 
 // ---------------------------------------------------------------------------
-// Text chunks (the sidecar's `split_sentences` and `split_chunks`)
+// Text chunks (the Python shim's `split_sentences` and `split_chunks`)
 // ---------------------------------------------------------------------------
 
 /// A sentence shorter than this many characters joins its neighbour.
@@ -981,7 +980,7 @@ impl Model {
         Ok(frames.is_empty() || emit(self.codec.decode_frames(decoder, &frames)?))
     }
 
-    /// The sidecar's `synth` for a cloned voice: per chunk of `text`, the
+    /// The Python shim's `synth` for a cloned voice: per chunk of `text`, the
     /// seed, and ICL generation into the streaming decoder primed with the
     /// reference codes ([`Model::primed`]), fed 0.32 s at a time.
     fn synth(&self, text: &str, p: &Params, emit: &mut dyn FnMut(Vec<f32>) -> bool) -> R<()> {
@@ -992,7 +991,7 @@ impl Model {
         let primed = self.primed(&codes)?;
         let xs = GenConsts::new(self)?;
         for chunk in split_chunks(text) {
-            // The sidecar seeds MLX's global key before each chunk; sampling
+            // The Python seeded MLX's global key before each chunk; sampling
             // splits a key off it per draw, as this does.
             let mut rng = match p.seed {
                 Some(seed) => RandomState::with_seed(seed)?,
@@ -1170,7 +1169,7 @@ impl Model {
         Ok(x)
     }
 
-    /// The sidecar's `primed`: the codec decoder after the reference's codes
+    /// The Python shim's `primed`: the codec decoder after the reference's codes
     /// went through it (their audio dropped), cached by the codes' SHA-256.
     fn primed(&self, codes: &Array) -> R<CodecState> {
         let c = codes.as_dtype(Dtype::Int32)?;
@@ -1309,8 +1308,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chunks_match_the_sidecar() {
-        // (text, split_sentences, split_chunks) from the sidecar's own Python.
+    fn chunks_match_the_python() {
+        // (text, split_sentences, split_chunks) from the Python shim itself.
         let cases: &[(&str, &[&str], &[&str])] = &[
             ("Sure, will do.", &["Sure, will do."], &["Sure, will do."]),
             (

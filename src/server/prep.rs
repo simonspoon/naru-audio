@@ -562,7 +562,7 @@ fn transcript_json(t: &Transcript) -> Value {
 /// `POST /v1/audio/prep/clips/{id}/transcribe` (naru task 1461 §8
 /// pipeline step 1): word timestamps from the default (or requested)
 /// speech-to-text model, plus speaker diarization unless `diarize:false`.
-/// Only a `sherpa-onnx` Parakeet model and the MLX Whisper model report
+/// Only a `sherpa-onnx` Parakeet model reports
 /// word timestamps ([`crate::stt::SttModel::decode_words`]'s default is
 /// "unsupported"); the MLX Parakeet does not, so the daemon's default
 /// `stt_model` may need overriding here even where it serves

@@ -1,67 +1,33 @@
-//! The `mlx` [`TtsModel`] (§5.3): mlx-audio in the sidecar
-//! (`crate::mlx::sidecar`), which streams each chunk as it is generated.
-//! The model is whatever mlx-audio's `load_model` makes of the pulled
-//! directory; a voice is its `[[voice]]` id, handed to mlx-audio's
-//! `generate` as `voice`, and its `reference` recording, if any, as
-//! `ref_audio`. A model that clones (`crate::voices`) also takes a cloned
-//! voice's name: its clip goes as `ref_audio` and its transcript as
-//! `ref_text`, with no `voice`. A model that instructs
-//! (`Manifest::instructs`) is sent the request's `instructions` as
-//! mlx-audio's `instruct`; if it has no voices (VoiceDesign), that is its
-//! voice, and the voice asked for is ignored. VoxCPM2 both clones and
-//! instructs: a named cloned voice wins (`crate::server::speech::voice`),
-//! else `instructions` designs one. `sid` is not used. `speed` is passed
-//! on as mlx-audio's `speed`, which Qwen3-TTS ignores; Chatterbox and
-//! VoxCPM2 ignore it too (VoxCPM2's `generate` has no `speed` parameter at
-//! all), but the sidecar shim rejects a non-1.0 `speed` for either
-//! outright, so a caller gets a clear error instead of normal-speed audio
-//! (`naru_audio_mlx/__main__.py`). A model that exaggerates
-//! (`Manifest::exaggerates`, Chatterbox) is sent the request's
-//! `exaggeration` as mlx-audio's `exaggeration`. Every other knob a
-//! manifest declares (naru task 1458, `Manifest::prompt_format`'s
-//! `knobs`) goes as `request["knobs"]`, a name-to-number object the
-//! sidecar folds straight into `generate`'s kwargs.
+//! The `mlx` [`TtsModel`] (§5.3), in-process through mlx-rs: 8-bit Breeze
+//! (`crate::mlx::breeze`, naru tasks 2381-2384) and the two Qwen3-TTS Base
+//! checkpoints (`crate::mlx::qwen3_tts`, naru tasks 2386-2389). Any other
+//! `mlx` model has no engine and does not load.
 //!
-//! 8-bit Breeze decodes in-process instead (`crate::mlx::breeze`) unless
-//! `[mlx] native_tts` is false (naru task 2384), and falls back to the
-//! sidecar when the native load fails. It takes `instructions`,
-//! `seed` and the `cfg_scale`, `temperature`, `top_p`, `top_k`,
-//! `repetition_penalty` and `max_tokens` knobs as mlx-audio does, and
-//! streams the same 0.32 s chunks; a cloned voice (or a preview's clip)
-//! goes as `ref_audio` and `ref_text` there too (naru task 2382).
+//! Breeze takes `instructions`, `seed` and the `cfg_scale`, `temperature`,
+//! `top_p`, `top_k`, `repetition_penalty` and `max_tokens` knobs as
+//! mlx-audio does; a voice is its `[[voice]]` id, a cloned voice (or a
+//! preview's clip) goes as `ref_audio` and `ref_text` (naru task 2382). It
+//! has no `speed`: anything but 1.0 is an error.
 //!
-//! The two Qwen3-TTS Base checkpoints decode in-process too
-//! (`crate::mlx::qwen3_tts`) unless `[mlx] native_qwen3_tts` is false (naru
-//! task 2389), with the same fallback. A cloned voice (or a
-//! preview's clip) and its transcript are the reference, sampled with the
-//! sidecar's `CLONE_SAMPLING` unless the `temperature`, `top_p`, `top_k`,
-//! `repetition_penalty` or `max_tokens` knobs say otherwise; `speed` is
-//! ignored, as mlx-audio's Qwen3-TTS ignores it. It streams the same 0.32 s
-//! chunks as they are made (naru task 2388).
+//! Qwen3-TTS speaks only cloned voices: the clip (or a preview's) and its
+//! transcript are the reference, sampled with `CLONE_SAMPLING` unless the
+//! `temperature`, `top_p`, `top_k`, `repetition_penalty` or `max_tokens`
+//! knobs say otherwise; `speed` is ignored, as mlx-audio's Qwen3-TTS
+//! ignores it.
 //!
-//! The sidecar is held for a whole synthesis, so `synth` never lets the
-//! sink hold it: chunks go through an unbounded queue to a thread that
-//! feeds the sink, and the sidecar is free once generation ends, however
-//! slowly the client reads.
-//!
-//! No gap and no leveller, as for Pocket (`super::sherpa`): the chunks are
-//! fixed lengths of audio cut mid-sentence (0.32 s, `STREAMING_INTERVAL` in
-//! the sidecar), so a gap would be a pause mid-word, and a gain per chunk
-//! would step in level from one to the next. `gap` is still checked, so a
-//! request means the same whatever model serves it.
+//! Both stream 0.32 s chunks as they are made (naru task 2388). No gap and
+//! no leveller, as for Pocket (`super::sherpa`): the chunks are fixed
+//! lengths of audio cut mid-sentence, so a gap would be a pause mid-word,
+//! and a gain per chunk would step in level from one to the next. `gap` is
+//! still checked, so a request means the same whatever model serves it.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
-
-use serde_json::{Value, json};
 
 use super::sherpa::check;
 use super::{Sink, SynthOptions, TtsError, TtsModel};
 use crate::mlx::breeze::{self, Breeze};
 use crate::mlx::qwen3_tts::{self, Qwen3Tts};
-use crate::mlx::sidecar::{self, Sidecar};
-use crate::registry::manifest::{Kind, Manifest, Voice};
-use crate::stt::SttError;
+use crate::registry::manifest::{Manifest, Voice};
 use crate::voices;
 
 pub struct MlxTts {
@@ -73,86 +39,39 @@ pub struct MlxTts {
     cloned: Option<PathBuf>,
     /// Whether the model takes `instructions`.
     instructs: bool,
-    /// Whether the model takes `exaggeration`.
-    exaggerates: bool,
-    /// Names of `Manifest::prompt_format`'s knobs whose kwarg takes an
-    /// int (`step` set, naru task 1458), so `synth` sends the sidecar a
-    /// JSON integer rather than a float mlx-audio's own arg parsing would
-    /// otherwise choke on (e.g. `range(num_steps)`).
-    integer_knobs: std::collections::HashSet<String>,
-    /// What the sidecar's `load` reported.
-    sample_rate: u32,
-    /// Why the native engine did not load, when the sidecar stands in.
-    native_error: Option<String>,
-    /// `[mlx] breeze_depth_cache`, for the native engine.
+    /// `[mlx] breeze_depth_cache`, for Breeze.
     depth_cache: bool,
 }
 
 enum Engine {
-    Sidecar {
-        sidecar: Arc<Sidecar>,
-        name: String,
-        /// Which load of `name` this is, for [`Sidecar::unload`].
-        instance: u64,
-        /// What the load added to the sidecar's MLX active memory.
-        resident_bytes: u64,
-    },
-    Native(Breeze),
-    NativeQwen3(Qwen3Tts),
+    Breeze(Breeze),
+    Qwen3(Qwen3Tts),
 }
 
 impl MlxTts {
-    /// `dir` is `models/<name>/`, in the home whose sidecar loads it (§3.1).
+    /// `dir` is `models/<name>/`, in the home whose voices it speaks (§3.1).
     pub fn load(manifest: &Manifest, dir: &Path) -> Result<Self, TtsError> {
         let home = dir.parent().and_then(Path::parent).unwrap_or(dir);
         let name = manifest.model.name.clone();
-        let unavailable = |reason| TtsError::BackendUnavailable {
+        // A failed load is 503 `backend_unavailable`, as for STT.
+        let unavailable = |reason: String| TtsError::BackendUnavailable {
             backend: manifest.model.backend.clone(),
             reason,
         };
-        let native = if crate::mlx::native_tts(home, &name).map_err(unavailable)? {
-            Some(Breeze::load(dir).map(Engine::Native))
-        } else if crate::mlx::native_qwen3_tts(home, &name).map_err(unavailable)? {
-            Some(Qwen3Tts::load(dir).map(Engine::NativeQwen3))
+        let engine = if name.starts_with("breeze") {
+            // `Breeze::load` refuses all but the 8-bit checkpoint.
+            Engine::Breeze(Breeze::load(dir).map_err(unavailable)?)
+        } else if matches!(
+            name.as_str(),
+            "qwen3-tts-0.6b-base-mlx" | "qwen3-tts-1.7b-base-mlx"
+        ) {
+            Engine::Qwen3(Qwen3Tts::load(dir).map_err(unavailable)?)
         } else {
-            None
+            return Err(unavailable(format!("no native MLX engine for {name}")));
         };
-        let depth_cache = match native {
-            Some(Ok(Engine::Native(_))) => crate::mlx::breeze_depth_cache(home).map_err(|reason| {
-                TtsError::BackendUnavailable {
-                    backend: manifest.model.backend.clone(),
-                    reason,
-                }
-            })?,
-            _ => false,
-        };
-        let (engine, sample_rate, native_error) = match native {
-            Some(Ok(engine)) => (engine, breeze::SAMPLE_RATE, None),
-            native => {
-                let sidecar = sidecar::for_home(home);
-                let (instance, resident_bytes, answer) = sidecar
-                    .load(&name, Kind::Tts, dir)
-                    .map_err(|e| match (&native, tts_error(e)) {
-                        // Neither loaded: say why for both.
-                        (Some(Err(native)), TtsError::Sidecar(sidecar)) => {
-                            TtsError::Sidecar(format!("native: {native}; sidecar: {sidecar}"))
-                        }
-                        (_, e) => e,
-                    })?;
-                let engine = Engine::Sidecar {
-                    sidecar,
-                    name: name.clone(),
-                    instance,
-                    resident_bytes,
-                };
-                // An error below drops `engine`, which unloads the model.
-                let sample_rate = answer["sample_rate"]
-                    .as_u64()
-                    .and_then(|r| u32::try_from(r).ok())
-                    .filter(|&r| r > 0)
-                    .ok_or_else(|| TtsError::Sidecar("`load` has no sample_rate".to_string()))?;
-                (engine, sample_rate, native.and_then(Result::err))
-            }
+        let depth_cache = match engine {
+            Engine::Breeze(_) => crate::mlx::breeze_depth_cache(home).map_err(unavailable)?,
+            Engine::Qwen3(_) => false,
         };
         Ok(MlxTts {
             engine,
@@ -161,19 +80,6 @@ impl MlxTts {
             voices: manifest.voices.clone(),
             cloned: manifest.clones().then(|| home.to_path_buf()),
             instructs: manifest.instructs(),
-            exaggerates: manifest.exaggerates(),
-            integer_knobs: manifest
-                .prompt_format()
-                .map(|pf| {
-                    pf.knobs
-                        .into_iter()
-                        .filter(|k| k.step.is_some())
-                        .map(|k| k.name)
-                        .collect()
-                })
-                .unwrap_or_default(),
-            sample_rate,
-            native_error,
             depth_cache,
         })
     }
@@ -185,7 +91,7 @@ impl TtsModel for MlxTts {
     }
 
     fn sample_rate(&self) -> u32 {
-        self.sample_rate
+        breeze::SAMPLE_RATE
     }
 
     fn synth(
@@ -193,117 +99,31 @@ impl TtsModel for MlxTts {
         text: &str,
         voice: &str,
         options: &SynthOptions,
-        mut sink: Sink,
+        sink: Sink,
     ) -> Result<(), TtsError> {
         check(text, options)?;
-        if let Engine::Native(model) = &self.engine {
-            return self.synth_native(model, text, voice, options, sink);
+        match &self.engine {
+            Engine::Breeze(model) => self.synth_breeze(model, text, voice, options, sink),
+            Engine::Qwen3(model) => self.synth_qwen3(model, text, voice, options, sink),
         }
-        if let Engine::NativeQwen3(model) = &self.engine {
-            return self.synth_qwen3(model, text, voice, options, sink);
-        }
-        let Engine::Sidecar { sidecar, .. } = &self.engine else {
-            unreachable!("not native");
-        };
-        let mut request = json!({"text": text, "speed": options.speed, "seed": options.seed});
-        if let Some((wav, ref_text)) = &options.reference {
-            // §2.6 `POST /api/voices/preview` (naru task 1458): an explicit
-            // reference clip wins over any named voice, including an empty
-            // one the preview endpoint passes since it has no saved voice.
-            request["reference"] = json!(wav);
-            request["reference_text"] = json!(ref_text);
-        } else if let Some(v) = self.voices.iter().find(|v| v.id == voice) {
-            request["voice"] = json!(v.id);
-            if let Some(reference) = &v.reference {
-                request["reference"] = json!(self.dir.join(reference));
-            }
-        } else if let Some(c) = self
-            .cloned
-            .as_deref()
-            .and_then(|home| voices::find(home, voice))
-        {
-            request["reference"] = json!(c.wav);
-            request["reference_text"] = json!(c.text);
-        } else if !(self.instructs && self.voices.is_empty()) {
-            return Err(TtsError::UnknownVoice {
-                model: self.name.clone(),
-                voice: voice.to_string(),
-            });
-        }
-        if self.instructs
-            && let Some(instructions) = &options.instructions
-        {
-            request["instruct"] = json!(instructions);
-        }
-        if self.exaggerates
-            && let Some(exaggeration) = options.exaggeration
-        {
-            request["exaggeration"] = json!(exaggeration);
-        }
-        // Every other manifest-declared knob (naru task 1458), already
-        // checked against its manifest by `apply_knobs`; the sidecar
-        // applies each as a `generate` kwarg, cast to a JSON integer here
-        // where the manifest says the kwarg takes one (`step` set), since
-        // mlx-audio's own arg handling for those (e.g. `range(num_steps)`)
-        // does not accept a float.
-        if !options.knobs.is_empty() {
-            let knobs: serde_json::Map<String, Value> = options
-                .knobs
-                .iter()
-                .map(|(name, value)| {
-                    let v = if self.integer_knobs.contains(name) {
-                        json!(*value as i64)
-                    } else {
-                        json!(*value)
-                    };
-                    (name.clone(), v)
-                })
-                .collect();
-            request["knobs"] = Value::Object(knobs);
-        }
-        let (tx, rx) = mpsc::channel::<Vec<f32>>();
-        std::thread::scope(|scope| {
-            // A cancel drops `rx`, so the next send fails and the sidecar
-            // is told to stop. A panic in the sink does the same, and
-            // resumes when the scope joins.
-            scope.spawn(move || {
-                for piece in rx {
-                    if !sink(&piece) {
-                        break;
-                    }
-                }
-            });
-            let result = sidecar
-                .synth(&self.name, request, &mut |samples: &[f32]| {
-                    tx.send(samples.to_vec()).is_ok()
-                })
-                .map_err(tts_error);
-            // Ends the feeding thread once the queue is empty.
-            drop(tx);
-            result
-        })
     }
 
     fn resident_bytes(&self) -> Option<u64> {
         Some(match &self.engine {
-            Engine::Sidecar { resident_bytes, .. } => *resident_bytes,
-            Engine::Native(model) => model.resident_bytes(),
-            Engine::NativeQwen3(model) => model.resident_bytes(),
+            Engine::Breeze(model) => model.resident_bytes(),
+            Engine::Qwen3(model) => model.resident_bytes(),
         })
     }
 
     fn engine(&self) -> Option<(&'static str, Option<&str>)> {
-        Some(match &self.engine {
-            Engine::Sidecar { .. } => ("sidecar", self.native_error.as_deref()),
-            Engine::Native(_) | Engine::NativeQwen3(_) => ("native", None),
-        })
+        Some(("native", None))
     }
 }
 
 impl MlxTts {
-    /// `synth` on the in-process engine: the same request the sidecar
-    /// would get, as [`breeze::Params`].
-    fn synth_native(
+    /// `synth` on Breeze: mlx-audio's `generate` arguments, as
+    /// [`breeze::Params`].
+    fn synth_breeze(
         &self,
         model: &Breeze,
         text: &str,
@@ -311,7 +131,7 @@ impl MlxTts {
         options: &SynthOptions,
         mut sink: Sink,
     ) -> Result<(), TtsError> {
-        // The sidecar shim's own check: Breeze has no `speed`.
+        // Breeze has no `speed`; an error rather than normal-speed audio.
         if options.speed != 1.0 {
             return Err(TtsError::Native(format!(
                 "{} does not support speed (got {}); only the default, 1.0, is accepted",
@@ -324,7 +144,7 @@ impl MlxTts {
         } else if let Some(v) = self.voices.iter().find(|v| v.id == voice) {
             params.speaker = v.id.clone();
             if let Some(reference) = &v.reference {
-                // No transcript: Breeze refuses this, as in the sidecar.
+                // No transcript: Breeze refuses this, as mlx-audio does.
                 params.reference = Some((self.dir.join(reference), String::new()));
             }
         } else if let Some(c) = self
@@ -363,8 +183,8 @@ impl MlxTts {
 }
 
 impl MlxTts {
-    /// `synth` on the in-process Qwen3-TTS: what the sidecar does for a
-    /// cloned voice, as [`qwen3_tts::Params`].
+    /// `synth` on Qwen3-TTS: a cloned voice (or a preview's clip) as the
+    /// reference, as [`qwen3_tts::Params`].
     fn synth_qwen3(
         &self,
         model: &Qwen3Tts,
@@ -388,7 +208,7 @@ impl MlxTts {
             });
         };
         let mut params = qwen3_tts::Params::new(reference);
-        // The sidecar's `CLONE_SAMPLING`.
+        // `CLONE_SAMPLING`, tighter than mlx-audio's own defaults.
         params.temperature = 0.55;
         params.top_p = 0.8;
         params.top_k = 20;
@@ -407,34 +227,5 @@ impl MlxTts {
         model
             .synth(text, &params, &mut |samples| sink(samples))
             .map_err(TtsError::Native)
-    }
-}
-
-/// Unloading a sidecar model unloads it from the sidecar, and the last MLX
-/// model out stops the sidecar. A native one frees itself.
-impl Drop for Engine {
-    fn drop(&mut self) {
-        if let Engine::Sidecar {
-            sidecar,
-            name,
-            instance,
-            ..
-        } = self
-        {
-            sidecar.unload(name, *instance);
-        }
-    }
-}
-
-/// The sidecar's errors are [`SttError`]s, which it was written for: a dead
-/// sidecar stays `BackendUnavailable`, which `/v1/audio/speech` answers
-/// with 503 before any audio, and an error answer is [`TtsError::Sidecar`].
-fn tts_error(e: SttError) -> TtsError {
-    match e {
-        SttError::BackendUnavailable { backend, reason } => {
-            TtsError::BackendUnavailable { backend, reason }
-        }
-        SttError::Sidecar(message) => TtsError::Sidecar(message),
-        other => TtsError::Sidecar(other.to_string()),
     }
 }

@@ -47,6 +47,9 @@ pub const DROPPED: &[(&str, &str)] = &[
     ("indextts-1.5-mlx", "qwen3-tts-1.7b-base-mlx"),
     ("omnivoice-bf16-mlx", "qwen3-tts-1.7b-base-mlx"),
     ("voxcpm2-8bit-mlx", "qwen3-tts-1.7b-base-mlx"),
+    // No native port: only the 8-bit checkpoint has one (naru task 2391).
+    ("breeze-tts-2-mlx", "breeze-tts-2-8bit-mlx"),
+    ("breeze-tts-2-4bit-mlx", "breeze-tts-2-8bit-mlx"),
 ];
 
 pub fn dropped_replacement(model: &str) -> Option<&'static str> {

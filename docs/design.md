@@ -369,7 +369,7 @@ Every non-2xx HTTP response uses OpenAI's envelope:
 | 404 | `pull_not_found` | `DELETE /api/pulls/{name}` with no pull of that model running (naru task 1458). |
 | 413 | `payload_too_large` | Input over 256 MiB or 10 minutes, or text over 16 384 chars. |
 | 415 | `unsupported_media_type` | The audio is not WAV, or a voice clip `afconvert` cannot read. |
-| 503 | `backend_unavailable` | For example mlx on Intel, or a crashed sidecar. `message` gives the reason. |
+| 503 | `backend_unavailable` | For example mlx on Intel, or an MLX model the native engine could not load. `message` gives the reason. |
 | 503 | `model_load_failed` | The files are present but the backend rejected them (bad sha after tampering, ORT error). |
 | 507 | `insufficient_memory` | The model cannot fit in the budget even after evicting idle models (§3.5). |
 | 500 | `internal` | A bug. The log has a request id, and the response carries `X-Request-Id`. |
@@ -410,10 +410,9 @@ value that is not a finite number, or falls outside its `min`/`max`, is 400
 `knobs` are equivalent to the top-level `exaggeration`/`speed` fields —
 they land in `SynthOptions`' own fields, checked the same way; every other
 knob lands in `SynthOptions.knobs`, a name-to-number map the `mlx` backend
-sends the sidecar as `request["knobs"]`, cast to a JSON integer first where
-the manifest's `step` says the kwarg takes one (`MlxTts::synth`), then
-merged straight into mlx-audio's `generate` kwargs
-(`naru_audio_mlx/__main__.py`). The `sherpa-onnx` backend has no knob
+reads its sampling knobs from (`MlxTts::synth`: `cfg_scale`, `temperature`,
+`top_p`, `top_k`, `repetition_penalty`, `max_tokens`; any other is
+ignored, as mlx-audio's `generate` swallows it). The `sherpa-onnx` backend has no knob
 beyond `speed` (its own field), so it never sees `SynthOptions.knobs`.
 
 ## 3. Model registry
@@ -434,7 +433,6 @@ $NARU_AUDIO_HOME            default ~/.naru-audio
 │                           lexicon-*.txt, dict/   (exact set pinned by task 10)
 ├── state/measured.json     measured resident bytes per model+backend
 ├── tmp/                    *.part downloads, per-model .lock files
-└── mlx/                    sidecar venv (arm64 only, §5.3)
 ```
 
 We use a per-model directory rather than Ollama's content-addressed blobs,
@@ -550,8 +548,8 @@ read from `sysctl hw.memsize`, and arch from `std::env::consts::ARCH` plus
   `insufficient_memory`. The daemon never loads past the budget and hopes.
 - After each load, the RSS delta (`task_info` on macOS) is written to
   `state/measured.json`, so estimates converge to what this machine actually uses.
-- MLX models are counted using the resident number the sidecar reports
-  (`mx.get_active_memory()`) **[assumption: API name in current MLX]**.
+- MLX models are counted using the resident number the native engine
+  reports (MLX's active memory after the load).
 - On Intel, parakeet (~1.5 GB) plus Kokoro (~0.5–1 GB **[assumption]**) fit
   within the 6 GiB cap together, so the normal Live session (listen plus speak)
   never evicts.
@@ -565,7 +563,7 @@ an `SttModel` (`decode(pcm16k, hotwords) -> Vec<Segment>`) or a `TtsModel`
 chunks and can return `false` to cancel).
 
 - `sherpa-onnx` is compiled in on every platform.
-- `mlx` is compiled in on `aarch64-apple-darwin` only. It is a client for the sidecar (§5.3).
+- `mlx` is compiled in on `aarch64-apple-darwin` only. It runs in-process through mlx-rs (§5.3).
 - A model whose backend is unavailable shows up in `/v1/models` with
   `x_available:false` and a reason. `pull` refuses it with 503
   `backend_unavailable` unless `--force` is passed.
@@ -583,7 +581,7 @@ naru-audio ps                    naru-audio verify [NAME…]
 naru-audio health                # GET /health, exit 0 ready / 3 daemon down / 4 default model not ready
 naru-audio transcribe FILE|- [-m M] [--format text|json]   # thin HTTP client
 naru-audio say TEXT|- [-v V] [-s S] [--instructions I] [-o FILE|-]   # thin HTTP client
-naru-audio mlx setup|status      # arm64 only
+naru-audio mlx check             # arm64 only: mlx.metallib found, GPU matmul ok
 ```
 
 `pull`, `list`, `rm` and `verify` work **without** a daemon, on
@@ -751,87 +749,64 @@ broke.
 
 ### 5.3 MLX on Apple Silicon
 
-MLX is for "bigger or experimental" models on the M5 Max. The realistic paths are:
+MLX is for "bigger or experimental" models on the M5 Max. The paths weighed
+in 2026-09 were:
 
 | Option | What it takes | Verdict |
 |---|---|---|
-| **mlx-rs** crate (oxideai) | Safe Rust over mlx-c. You must **reimplement every model architecture in Rust** (FastConformer + TDT decoder, StyleTTS2/iSTFTNet, and whatever comes next), plus the weight loading. The crate is pre-1.0 and follows MLX releases **[assumption: still pre-1.0, with no Parakeet or Kokoro ports available]**. | Rejected for now. A port per experimental model defeats the point of "experimental". |
-| **mlx-c FFI** directly | The same porting cost as mlx-rs, plus hand-written unsafe bindings. | Rejected. |
-| **Python mlx sidecar** | The daemon supervises a Python process that runs community implementations (`parakeet-mlx`, `mlx-audio`, which covers Kokoro and other TTS/STT models, and `mlx-whisper`) **[assumption: package names and model coverage as of 2026-09]**. New models arrive in Python first. | **Chosen.** |
+| **mlx-rs** crate (oxideai) | Safe Rust over mlx-c. You must **reimplement every model architecture in Rust**, plus the weight loading. | Rejected at first, **chosen 2026-10-27** once the model set was small and fixed. |
+| **mlx-c FFI** directly | The same porting cost as mlx-rs, plus hand-written unsafe bindings. | Rejected (used only where mlx-rs lacks an op: mxfp8 quantized matmul). |
+| **Python mlx process** | The daemon supervises a Python process running `parakeet-mlx`, `mlx-audio` and `mlx-whisper`. New models arrive in Python first. | Chosen first, **removed in naru task 2391**: it needed `uv`, a 1.3 GB venv and a second process. |
 
-Sidecar design:
-- **Install:** `naru-audio mlx setup` creates `~/.naru-audio/mlx/.venv` with
-  `uv` from a lock file embedded in the binary, and writes the absolute
-  interpreter path to `config.toml`. If `uv` is missing, setup fails with the
-  exact `brew install uv` command. The Homebrew formula has no dependency on
-  it, so Intel machines never see Python.
-- **Process:** `python -m naru_audio_mlx --socket ~/.naru-audio/mlx/sidecar.sock`
-  (the module is embedded and written out at setup). It starts on the first
-  `mlx` request and stops when the last MLX model unloads. A crash gives 503
-  `backend_unavailable` to requests in flight, restarts with backoff (1, 2,
-  4 s, then waits for the next request), and sets `/health` `backends[mlx].reason`.
-- **Protocol:** length-prefixed frames over the Unix socket (the idea behind
-  auris's daemon framing, docs/daemon.md). Each frame is a JSON header
-  `{op: load|unload|transcribe|synth|stats, model, …}`, optionally followed by
-  raw f32le samples (the full list is in `mlx/naru_audio_mlx/protocol.py`).
-  `load` names the model's kind; a TTS load answers with its `sample_rate`.
-  A `synth` answer is a stream of `{samples: S}` PCM frames, one per
-  mlx-audio chunk (0.32 s) as it is generated, terminated by an
-  `{end: true, ok, error?}` header. To cancel, the daemon sends
-  `{op: cancel}` once and reads on to the `end` header: the sidecar checks
-  for it after each frame and stops generating, and ignores a cancel that
-  arrives after the end, which has no answer. The connection is never
-  left mid-stream. `stats` returns resident bytes for §3.5.
-- **TTS models:** mlx-audio's `load_model` loads the pulled directory, so a
-  new mlx-audio model is a catalog entry (`backend = "mlx"`, `kind =
-  "tts"`, its `[[voice]]` ids passed as mlx-audio's `voice`, or a
-  `reference` recording as `ref_audio`). Qwen3-TTS 0.6B and 1.7B Base 8-bit
-  (`qwen3-tts-0.6b-base-mlx`, `qwen3-tts-1.7b-base-mlx`) have no preset
-  voices; each manifest sets `[backend.mlx] clone = true`, and each speaks in the cloned
-  voices under `$NARU_AUDIO_HOME/voices/<name>/` (`ref.wav`, 24 kHz mono,
-  and `ref.txt`, its transcript — required here, so both manifests also set
-  `clone_requires_transcript = true`: mlx-audio's `qwen3_tts.py` only takes
-  the in-context cloning path, `use_icl`, when both `ref_audio` and
-  `ref_text` are given), added with `naru-audio voice add <name>
-  <clip> --text <transcript>` or `POST /v1/audio/voices` (§2.5) and listed by `/v1/audio/voices?model=` after the
-  manifest's. Each goes to mlx-audio as `ref_audio` and `ref_text`. No gap or leveller: the chunks are cut mid-sentence, as
-  with Pocket. **Voices are keyed by model** (task 1454): alongside `ref.wav`
-  and `ref.txt`, a voice's directory holds `model.txt`, the model it was
-  cloned or designed for; `voices::of` (which every listing and `speech`
-  goes through) only offers a manifest the clones made for its own model, a
-  voice with no `model.txt` — everything added before this — is attributed
-  to `CLONE_MODEL` (`qwen3-tts-0.6b-base-mlx`), and `POST /v1/audio/speech`
-  with a cloned voice and an explicit `model` it was not made for is
-  refused (400 `voice_model_mismatch`) rather than silently using the wrong
-  model or answering `unknown_voice` as if the voice did not exist; with no
-  explicit `model`, the voice's own is used, generalising the CLI's
-  `say_model` (still `CLONE_MODEL` for a legacy voice).
+The `mlx` backend now runs in-process (`src/mlx/`, mlx-rs 0.32, no Python):
+
+- **Models:** exactly three engines, each a Rust port of the mlx-audio /
+  parakeet-mlx code it replaced: Parakeet TDT (`parakeet-tdt-0.6b-v2-mlx`,
+  `src/mlx/parakeet.rs`), Breeze TTS 2 8-bit (`breeze-tts-2-8bit-mlx`,
+  `src/mlx/breeze.rs`) and Qwen3-TTS Base 8-bit in two sizes
+  (`qwen3-tts-0.6b-base-mlx`, `qwen3-tts-1.7b-base-mlx`,
+  `src/mlx/qwen3_tts.rs`). Any other `mlx` manifest does not load (503
+  `backend_unavailable`, "no native MLX engine"). The whisper, Qwen3-ASR,
+  Chatterbox, IndexTTS, OmniVoice, VoxCPM2, VoiceDesign and non-8-bit Breeze
+  entries were dropped (naru tasks 2390, 2391).
+- **Runtime:** MLX loads its Metal kernels from `mlx.metallib` beside the
+  binary (built by `build.rs`, shipped in releases and the formula);
+  `naru-audio mlx check` verifies it. Each model owns an MLX thread; a
+  load's resident bytes are MLX's active memory (§3.5), and dropping the
+  model joins its thread and frees it.
+- **TTS models:** Qwen3-TTS Base has no preset voices; each manifest sets
+  `[backend.mlx] clone = true`, and each speaks in the cloned voices under
+  `$NARU_AUDIO_HOME/voices/<name>/` (`ref.wav`, 24 kHz mono, and `ref.txt`,
+  its transcript — required here, so both manifests also set
+  `clone_requires_transcript = true`: only the in-context cloning path,
+  `use_icl`, is ported), added with `naru-audio voice add <name> <clip>
+  --text <transcript>` or `POST /v1/audio/voices` (§2.5) and listed by
+  `/v1/audio/voices?model=` after the manifest's. Both engines stream
+  0.32 s chunks as they are generated; no gap or leveller: the chunks are
+  cut mid-sentence, as with Pocket. **Voices are keyed by model** (task
+  1454): alongside `ref.wav` and `ref.txt`, a voice's directory holds
+  `model.txt`, the model it was cloned or designed for; `voices::of` (which
+  every listing and `speech` goes through) only offers a manifest the
+  clones made for its own model, a voice with no `model.txt` — everything
+  added before this — is attributed to `CLONE_MODEL`
+  (`qwen3-tts-0.6b-base-mlx`), and `POST /v1/audio/speech` with a cloned
+  voice and an explicit `model` it was not made for is refused (400
+  `voice_model_mismatch`) rather than silently using the wrong model or
+  answering `unknown_voice` as if the voice did not exist; with no explicit
+  `model`, the voice's own is used, generalising the CLI's `say_model`
+  (still `CLONE_MODEL` for a legacy voice).
 - **Instructions:** a manifest that sets `[backend.mlx] instruct = true`
-  gets the request's `instructions` (§2.3) in the `synth` header as
-  `instruct`, which the sidecar passes to mlx-audio's `generate`; no other
+  gets the request's `instructions` (§2.3) as Breeze's `instruct`; no other
   model is sent it. Breeze is the only one; a named cloned voice wins over
   `instructions`, and `instructions` is required only when no voice matched
-  (`voice` in `src/server/speech.rs`). The flag is ours, not mlx-audio's: a
-  model without the flag must not be sent `instruct`.
-- **Breeze TTS 2** (`breeze-tts-2-mlx`, BreezeBlue Research and
+  (`voice` in `src/server/speech.rs`).
+- **Breeze TTS 2** (`breeze-tts-2-8bit-mlx`, BreezeBlue Research and
   Non-Commercial License, **non-commercial**) clones a reference and also
   designs a voice from a description: `[backend.mlx] clone = true` and
-  `instruct = true`, no preset voices, 24 kHz output. Its `generate` raises
-  outright without a transcript alongside the reference clip
-  (`breeze_tts.py`: `"Breeze voice cloning requires ref_text with
-  ref_audio."`), so its manifest also sets `clone_requires_transcript =
-  true`. It does not support `speed` (no `speed` parameter, swallowed
-  silently by its own `**kwargs`), so the sidecar shim rejects a non-1.0
-  `speed` for it. Its `generate` does declare a `streaming_interval`
-  parameter and accepts the sidecar's usual short cadence
-  (`STREAMING_INTERVAL = 0.32`) without error, so no sidecar shim is needed
-  for that. The catalog pins mlx-community's full-precision
-  `Breeze-TTS-2-mlx` conversion (~7.6 GB) plus 8-bit and 4-bit siblings.
-- **Cost:** about 150–400 ms extra first-request latency for the process start
-  **[assumption]**, then a per-request IPC overhead that is negligible
-  compared with decode time.
-- **Revisit** mlx-rs if one MLX model becomes a default on the `large`
-  profile. At that point the port is a one-time cost with a lasting benefit.
+  `instruct = true`, no preset voices, 24 kHz output. It refuses a
+  reference clip without a transcript, as mlx-audio's `breeze_tts.py` does,
+  so its manifest also sets `clone_requires_transcript = true`. It has no
+  `speed`: anything but 1.0 is an error rather than normal-speed audio.
 
 ### 5.4 License
 
@@ -852,7 +827,7 @@ question.
 | P4 | Released: Homebrew formula with a service block | 15 | unchanged |
 | P5 | Naru can use naru-audio behind `audio.engine`; default stays `legacy` | 16–21 | still the default |
 | P6 | WS dictation ships, then Naru's default flips after a week of daily use on both Macs | 22–24 | explicit opt-in only |
-| P7 | MLX sidecar on arm64 | 25 | — |
+| P7 | MLX on arm64 (first a Python process, in-process since task 2391) | 25 | — |
 | P8 | Legacy path removed; auris and kokoro-rs formulae deprecated | 26 | retired |
 
 Two explicit config keys, both shown in Settings, and neither is ever used
@@ -1042,13 +1017,13 @@ Each task names its phase and what it depends on ("Deps").
     Change the default and the config migration so existing configs without
     the key get `naru-audio`, with a release note on how to switch back.
     *Acceptance:* a fresh config uses naru-audio. An explicit `legacy` is kept.
-25. **MLX sidecar on Apple Silicon with one model.** (P7; Deps: 3, 7)
-    Implement §5.3: `mlx setup` (uv venv from an embedded lock), a supervisor
-    with backoff, the framed socket protocol, and `stats` feeding the budget.
-    Add one entry, `parakeet-tdt-0.6b-v2-mlx`.
+25. **MLX on Apple Silicon with one model.** (P7; Deps: 3, 7; the Python
+    process it built was replaced by the in-process engines, naru task 2391)
+    Implement §5.3 as it then stood: a supervised Python process with
+    backoff, and its resident bytes feeding the budget. Add one entry, `parakeet-tdt-0.6b-v2-mlx`.
     *Acceptance:* the M5 Max transcribes the task 5 fixtures (WER reported).
-    Intel lists the model with `x_available:false`. Killing the sidecar gives
-    503 and then a successful retry.
+    Intel lists the model with `x_available:false`. Killing the Python process
+    gives 503 and then a successful retry.
 26. **Retire auris and kokoro-rs.** (P8; Deps: 24, plus a week)
     Remove the legacy engine from Naru (the child-process code and
     `fix_wav_sizes`). Add deprecation caveats to `Formula/auris.rb` and
@@ -1083,7 +1058,6 @@ Each task names its phase and what it depends on ("Deps").
 - The Python packages `parakeet-mlx`, `mlx-audio` and `mlx-whisper` exist
   with the stated coverage, and `mx.get_active_memory()` is the current name
   of the memory API.
-- The sidecar's cold start costs about 150–400 ms.
 - A sherpa-onnx export of a ~110M Parakeet exists.
 - tokio-tungstenite is the right WS client crate for Naru's proxy (task 22 decides).
 - Homebrew's `process_type :interactive` meaningfully reduces latency jitter for this daemon.
@@ -1294,7 +1268,7 @@ reused rather than a new one) gets a `warnings` entry in the sample's
 response and `meta.json`, naming the model and its licence — not a
 refusal: naru-audio supports a non-commercial model, warned.
 
-### 8.4 Word timestamps: sherpa-onnx's tokens, and mlx-whisper on MLX
+### 8.4 Word timestamps: sherpa-onnx's tokens
 
 `POST /v1/audio/transcriptions` refuses `timestamp_granularities[]=word`
 (§2.2) because nothing in naru-audio produced word timestamps at all. This
@@ -1310,7 +1284,7 @@ TDT) report per-token timestamps from the transducer's own frame
 alignment, with nothing to enable. Only `sherpa-onnx`'s
 Parakeet implements word timestamps. The default
 is `Err(SttError::WordTimestampsUnsupported)`, so a request naming the MLX
-Parakeet (whose sidecar answer carries no words) still gets a clear 400
+Parakeet (which reports no words) still gets a clear 400
 naming a model to use instead.
 
 ### 8.5 Verbatim sample transcript (naru task 1569)
@@ -1334,17 +1308,12 @@ word whose spoken form is not its written one (case and punctuation
 ignored: "42." is "forty-two."), `filler` an um/uh/er/ah/hmm/mm-type
 word. The model must report word timestamps (§8.4), as for a clip.
 
-*Decoding.* The sidecar's `transcribe` takes `"verbatim": true`
-(`protocol.py`): `mlx-whisper` gets a filler-rich `initial_prompt` ("Um,
-uh, so, I- I mean, like, you know, hmm. Uh-huh."), which Whisper continues
-in the style of, and `condition_on_previous_text=False`, which stops a
-repetition loop feeding itself. No token suppression is touched, so
-fillers are not removed. `SttModel::decode_words_verbatim` (default: a
-normal decode, answered `false`) carries it; only the MLX Whisper
-overrides it. A model that cannot (sherpa Parakeet, which already emits
-what it hears, without the cleaning Whisper applies, but cannot be told to)
-answers `verbatim_supported: false` and the request is not refused. This
-is a bias, not a guarantee: Whisper may still drop a filler.
+*Decoding.* `SttModel::decode_words_verbatim` (default: a normal decode,
+answered `false`) is where a model that can be biased towards fillers
+hooks in. None does since the MLX Whisper, the only one that could, was
+dropped (naru task 2390): every model (sherpa Parakeet already emits what
+it hears, but cannot be told to) answers `verbatim_supported: false` and
+the request is not refused.
 
 *Spoken form.* `stt::spoken` converts per word, leaving leading and
 trailing punctuation outside: integers and `,`-grouped numbers to

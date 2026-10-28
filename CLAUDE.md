@@ -2,7 +2,7 @@
 
 These answer "where does X live". Check here first instead of running a filesystem-wide search (root-rooted `find /`, grep, or a python import-and-locate); the root-search guard hook denies those.
 
-- MLX python venv: `~/.naru-audio/mlx/.venv` (`/Users/simonspoon/.naru-audio/mlx/.venv`)
+- MLX python venv (reference source only: naru-audio no longer runs Python since task 2391, and the deploy step deletes it): `~/.naru-audio/mlx/.venv` (`/Users/simonspoon/.naru-audio/mlx/.venv`)
   - site-packages: `~/.naru-audio/mlx/.venv/lib/python3.12/site-packages` (glob: `python3*`)
   - `mlx_audio/` and `mlx_whisper/` sit directly in that site-packages dir
 - sherpa-onnx (Cargo.lock pins 1.13.6 for both crates):

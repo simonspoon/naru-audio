@@ -1,5 +1,5 @@
-# Qwen3-TTS 0.6B Base, mlx-community's 8-bit conversion, served by
-# mlx-audio in the MLX sidecar (§5.3). Base, not CustomVoice:
+# Qwen3-TTS 0.6B Base, mlx-community's 8-bit conversion, run in-process
+# by the native Qwen3-TTS engine (src/mlx/qwen3_tts.rs, §5.3). Base, not CustomVoice:
 # it has no preset speakers and clones a reference
 # recording instead, so its voices are the cloned ones under
 # $NARU_AUDIO_HOME/voices/ (`naru-audio voice add`), each passed to
@@ -31,8 +31,8 @@ clone_requires_transcript = true
 
 # No `instruct`; `temperature`/`top_p`/`top_k` are `Model.generate`'s own
 # sampling knobs (`qwen3_tts.py`), shared by every route including Base's.
-# The defaults here are the sidecar's for a cloned voice (`CLONE_SAMPLING`
-# in `naru_audio_mlx/__main__.py`), tighter than mlx-audio's own (0.9 / 1.0
+# The defaults here are naru-audio's for a cloned voice (`CLONE_SAMPLING`
+# in src/tts/mlx.rs), tighter than mlx-audio's own (0.9 / 1.0
 # / 50) because a loose draw drifts the timbre from one sentence to the
 # next; a request's `knobs` override them.
 [backend.mlx.prompt_format]

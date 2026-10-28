@@ -414,7 +414,7 @@ impl Loader for BackendLoader {
     fn load(&self, manifest: &Manifest, dir: &Path) -> Result<LoadedModel, LoadError> {
         let _one_at_a_time = LOADS.lock().unwrap_or_else(|e| e.into_inner());
         let before = crate::profile::rss();
-        // An MLX model's bytes are in the sidecar, not in this delta.
+        // An MLX model's bytes are Metal memory, not in this delta.
         let (model, reported) = if manifest.model.kind == Kind::Tts {
             let model = crate::backend::load_tts(manifest, dir)?;
             let reported = model.resident_bytes();
@@ -1042,7 +1042,7 @@ impl ModelManager {
     }
 
     /// Counts an unloaded or evicted model, then drops it outside the lock.
-    /// A drop can block (an MLX model waits for its sidecar), so on the
+    /// A drop can block (an MLX model joins its MLX thread), so on the
     /// runtime it runs on the blocking pool, and the task returned ends
     /// once the model is gone.
     fn dispose(

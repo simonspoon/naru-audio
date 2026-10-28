@@ -45,8 +45,7 @@ fi
 xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
 render() {
-  # The mlx sidecar's venv comes first so `python` resolves as it does in a shell.
-  local path="$HOME/.naru-audio/mlx/.venv/bin:$HOME/.cargo/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  local path="$HOME/.cargo/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   local out; out="$(cat "$here/launchd/$LABEL.plist.in")"
   out="${out//__BIN__/$(xml "$BIN")}"
   out="${out//__HOME__/$(xml "$HOME")}"

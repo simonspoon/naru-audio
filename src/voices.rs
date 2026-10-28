@@ -597,13 +597,16 @@ mod tests {
         voice(home.path(), "designed", &[REF_WAV, REF_TXT]);
         std::fs::write(
             dir(home.path()).join("designed").join(MODEL_TXT),
-            "breeze-tts-2-mlx",
+            "breeze-tts-2-8bit-mlx",
         )
         .unwrap();
         let h = Some(home.path());
         assert_eq!(say_model(h, None, Some("elise")), CLONE_MODEL);
         // A voice made for a specific model asks for that one.
-        assert_eq!(say_model(h, None, Some("designed")), "breeze-tts-2-mlx");
+        assert_eq!(
+            say_model(h, None, Some("designed")),
+            "breeze-tts-2-8bit-mlx"
+        );
         // A built-in or unknown voice, or none, is the daemon's default.
         assert_eq!(say_model(h, None, Some("af_heart")), "default");
         assert_eq!(say_model(h, None, None), "default");
@@ -651,7 +654,7 @@ mod tests {
             "amy",
             &ok,
             "  Hello there.\n",
-            "breeze-tts-2-mlx",
+            "breeze-tts-2-8bit-mlx",
             true,
             None,
         )
@@ -659,7 +662,7 @@ mod tests {
         assert!((secs - 6.0).abs() < 0.05, "{secs}");
         let found = find(home.path(), "amy").unwrap();
         assert_eq!(found.text, "Hello there.");
-        assert_eq!(found.model, "breeze-tts-2-mlx");
+        assert_eq!(found.model, "breeze-tts-2-8bit-mlx");
         let spec = hound::WavReader::open(&found.wav).unwrap().spec();
         assert_eq!((spec.channels, spec.sample_rate), (1, SAMPLE_RATE));
 

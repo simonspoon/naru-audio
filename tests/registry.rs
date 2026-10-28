@@ -406,7 +406,7 @@ fn every_builtin_model_has_a_non_empty_license_and_url() {
 
 /// Pocket TTS's package README says "It is for non-commercial" even though
 /// the model itself is CC-BY-4.0 (catalog/pocket-tts-int8.toml); Breeze TTS 2's own LICENSE is a
-/// research/non-commercial-only grant (catalog/breeze-tts-2-mlx.toml).
+/// research/non-commercial-only grant (catalog/breeze-tts-2-8bit-mlx.toml).
 /// Nothing else in the built-in catalog is restricted.
 #[test]
 fn only_known_models_are_flagged_non_commercial() {
@@ -420,9 +420,7 @@ fn only_known_models_are_flagged_non_commercial() {
     assert_eq!(
         nc,
         [
-            "breeze-tts-2-4bit-mlx",
             "breeze-tts-2-8bit-mlx",
-            "breeze-tts-2-mlx",
             "pocket-tts-int8",
             "speaker-diarization-reverb-titanet"
         ]
@@ -456,7 +454,7 @@ fn no_default_model_is_non_commercial() {
 #[test]
 fn pulled_manifest_overlays_catalog_prompt_format_and_design_voice_model() {
     let dir = home(&[]);
-    let name = "breeze-tts-2-mlx";
+    let name = "breeze-tts-2-8bit-mlx";
     let model_dir = dir.path().join("models").join(name);
     std::fs::create_dir_all(&model_dir).unwrap();
     let pinned = serde_json::json!({
@@ -506,7 +504,7 @@ fn pulled_manifest_overlays_catalog_prompt_format_and_design_voice_model() {
     );
     assert_eq!(
         manifest.design_voice_model(),
-        Some("breeze-tts-2-mlx".to_string())
+        Some("breeze-tts-2-8bit-mlx".to_string())
     );
 
     // Pinned: unaffected by the overlay.
