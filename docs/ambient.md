@@ -86,6 +86,35 @@ uses :7771). Every 2 s, while naru has a live session (`GET /api/live`):
 naru being down is a warning (logged once until it answers again), never a failure. Its poll of `GET /api/live`
 takes an untagged can-help offer as any page's poll does.
 
+## The audit (naru task 2416)
+
+To see afterwards why a wake word did or did not wake, start the daemon with `NARU_AUDIO_AMBIENT_AUDIT=1`. Every
+ambient segment, from a socket or the server's listener, then appends one `ambient_segment` line of JSON to
+`<home>/ambient-audit.log` (`~/.naru-audio`, the dev daemon's `~/.naru-audio-dev`), mode 0600, rotated at 10 MB to
+`.1` as the daemon log. It holds what was said, so it is **off by default**, never sent anywhere, and safe to delete.
+
+| Field | |
+|---|---|
+| `at_ms`, `start`, `end` | session clock; the segment's span in seconds |
+| `admitted`, `mode` | whether it reached the machine; the machine's mode after it |
+| `text` | the transcript |
+| `speaker` | `tag` (`him`, `other`, `untagged`), `score` (cosine, `null` unscored), `reason` (`scored`, `too_short`, `model_mismatch`, …), `person` |
+| `wake` | `woke`, `reason` and `nearest` (`word`, `distance`: the line's word closest to a wake spelling, matched by sound at ≤ 0.45 only for a bare greeting) |
+
+Wake reasons: `matched`; `in conversation` (already awake); `speaker other` (the wake was there but a tagged
+other voice said it); `agent audible` (untagged, while or just after the agent spoke); `not line-initial`;
+`no sound-alike match` (no wake spelling opens the line: see `nearest`); `not admitted` (echo, agent speaking or a
+hold; the machine never saw it).
+
+Reviewing it:
+
+```sh
+grep -o '{.*' ~/.naru-audio/ambient-audit.log | jq -c '{text, who: .speaker.tag, score: .speaker.score, wake: .wake.reason, near: .wake.nearest}'
+grep -o '{.*' ~/.naru-audio/ambient-audit.log | jq -r 'select(.wake.nearest.distance < 1) | [.text, .speaker.tag, .wake.reason] | @tsv'
+```
+
+The second lists lines with something wake-like in them that did not wake, and why.
+
 ## Tests
 
 `tests/live.rs` checks the socket: one `wake` for `wake.wav`, none for `plain.wav`, and the same `wake` on a

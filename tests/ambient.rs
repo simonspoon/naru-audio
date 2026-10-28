@@ -592,3 +592,37 @@ fn end_conversation_makes_the_next_bare_wake_fire() {
     );
     assert_eq!(t.m.end_conversation(t.now), AmbientOutput::default());
 }
+
+// The ambient audit's wake reason (naru task 2416): explained after `ingest`, never changing it.
+fn explain(m: &mut M, who: Speaker, text: &str) -> WakeAudit {
+    let was = m.m.mode();
+    let out = m.say(who, text);
+    m.adv(5 * S);
+    m.m.explain_wake(was, who, text, &out)
+}
+
+#[test]
+fn explain_wake_gives_the_reason_for_each_decision() {
+    let mut m = M::new();
+    let a = explain(&mut m, Speaker::Other, "Naru, what time is it");
+    assert_eq!((a.woke, a.reason), (false, "speaker other"));
+    assert_eq!(a.nearest, Some(("naru".to_string(), 0.0)));
+    let a = explain(&mut m, Speaker::Other, "hey naro");
+    assert_eq!((a.woke, a.reason), (false, "speaker other"));
+    let a = explain(&mut m, Speaker::Unknown, "so I told Naru about it");
+    assert_eq!((a.woke, a.reason), (false, "not line-initial"));
+    let a = explain(&mut m, Speaker::Unknown, "Nahroo, what time is it");
+    assert_eq!((a.woke, a.reason), (false, "no sound-alike match"));
+    assert_eq!(a.nearest.as_ref().map(|n| n.0.as_str()), Some("nahroo"));
+
+    m.m.set_agent_speaking(m.now, true);
+    let a = explain(&mut m, Speaker::Unknown, "Naru stop");
+    assert_eq!((a.woke, a.reason), (false, "agent audible"));
+    m.m.set_agent_speaking(m.now, false);
+    m.adv(2 * S);
+
+    let a = explain(&mut m, Speaker::Unknown, "Hey Naru, what's up");
+    assert_eq!((a.woke, a.reason), (true, "matched"));
+    let a = explain(&mut m, Speaker::Him, "Naru again");
+    assert_eq!((a.woke, a.reason), (false, "in conversation"));
+}

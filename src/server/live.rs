@@ -45,6 +45,7 @@ use crate::ambient::{self, AmbientGate};
 use crate::echo::EchoCanceller;
 use crate::error::ApiError;
 use crate::live_mode::{LiveState, Mode, SegmentFate};
+use crate::log::{Logger, MAX_LOG_BYTES};
 use crate::registry::manifest::Kind;
 use crate::speaker::{self, DEFAULT_MODEL, DEFAULT_THRESHOLD, Identity, Library, SpeakerVerifier};
 use crate::stt::vad::Vad;
@@ -1699,6 +1700,10 @@ async fn finish_segment(
     );
     if !admitted {
         st.log.info(None, &format!("live_segment_dropped {scored}"));
+        if mode == Mode::Ambient && audit_on() {
+            let wake = json!({"woke": false, "reason": "not admitted"});
+            ambient_audit(st, live, false, start, end, text, identity.as_ref(), wake);
+        }
         return vec![json!({"type": "partial", "segment": v["segment"], "text": ""})];
     }
     st.log
@@ -1717,7 +1722,12 @@ async fn finish_segment(
     }
     let mut sent = vec![event];
     if mode == Mode::Ambient {
-        let heard = ambient_line(live, text, identity.as_ref()).await;
+        let (heard, wake) = ambient_line(live, text, identity.as_ref()).await;
+        let wake = json!({
+            "woke": wake.woke, "reason": wake.reason,
+            "nearest": wake.nearest.map(|(word, distance)| json!({"word": word, "distance": distance})),
+        });
+        ambient_audit(st, live, true, start, end, text, identity.as_ref(), wake);
         // The sender sends its own, so it gets each exactly once and before
         // a `done`; the other members get it through the conversation.
         if let Some((key, id)) = conv {
@@ -1763,11 +1773,68 @@ fn context_json(context: &[LogLine]) -> Value {
     json!(lines)
 }
 
+/// The ambient audit (naru task 2416): with `NARU_AUDIO_AMBIENT_AUDIT=1`, one
+/// `ambient_segment` line of JSON per ambient segment in
+/// `<home>/ambient-audit.log` (rotated as the daemon log): its text, speaker
+/// tag and score, and the wake decision with its reason. Off by default, as it
+/// holds what was said; a local file only.
+#[allow(clippy::too_many_arguments)]
+fn ambient_audit(
+    st: &AppState,
+    live: &Live,
+    admitted: bool,
+    start: f64,
+    end: f64,
+    text: &str,
+    identity: Option<&Identity>,
+    wake: Value,
+) {
+    if !audit_on() {
+        return;
+    }
+    let tag = match ambient_speaker(identity) {
+        machine::Speaker::Him => "him",
+        machine::Speaker::Other => "other",
+        machine::Speaker::Unknown => "untagged",
+    };
+    let record = json!({
+        "at_ms": live.now_ms(), "start": start, "end": end, "admitted": admitted,
+        "mode": live.ambient.mode().as_str(), "text": text,
+        "speaker": {
+            "tag": tag,
+            "score": identity.and_then(|i| i.verdict.score),
+            "reason": identity.map(|i| i.verdict.reason),
+            "person": identity.and_then(|i| i.person.as_ref()).map(|p| p.name.clone()),
+        },
+        "wake": wake,
+    });
+    let path = st.registry.home().join("ambient-audit.log");
+    if let Ok(log) = Logger::file(&path, MAX_LOG_BYTES) {
+        log.info(None, &format!("ambient_segment {record}"));
+        // What was said is his alone to read.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+fn audit_on() -> bool {
+    std::env::var_os("NARU_AUDIO_AMBIENT_AUDIT").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// One ambient line through the machine, and the gate when it asks: the
-/// `wake` and `ambient_verdict` events it makes. `mode_changed` and the wake
-/// candidates are the machine's own bookkeeping and are not sent.
-async fn ambient_line(live: &mut Live, text: &str, identity: Option<&Identity>) -> Vec<Value> {
+/// `wake` and `ambient_verdict` events it makes, and why it did or did not
+/// wake (for the audit). `mode_changed` and the wake candidates are the
+/// machine's own bookkeeping and are not sent.
+async fn ambient_line(
+    live: &mut Live,
+    text: &str,
+    identity: Option<&Identity>,
+) -> (Vec<Value>, machine::WakeAudit) {
     let now = live.now_ms();
+    let was = live.ambient.mode();
     let similarity = identity.and_then(|i| i.verdict.score);
     // Only another person is named; the owner is "him".
     let name = identity
@@ -1778,6 +1845,15 @@ async fn ambient_line(live: &mut Live, text: &str, identity: Option<&Identity>) 
     let machine::Ingest { output, gate: req } =
         live.ambient
             .ingest(now, ambient_speaker(identity), text, similarity);
+    // `ingest` may first have timed the conversation out, then judged the line in ambient.
+    let was = if output.events.iter().any(|e| e.kind == EventKind::ModeChanged) {
+        machine::Mode::Ambient
+    } else {
+        was
+    };
+    let wake = live
+        .ambient
+        .explain_wake(was, ambient_speaker(identity), text.trim(), &output);
     let mut sent: Vec<Value> = output
         .events
         .iter()
@@ -1810,7 +1886,7 @@ async fn ambient_line(live: &mut Live, text: &str, identity: Option<&Identity>) 
             }));
         }
     }
-    sent
+    (sent, wake)
 }
 
 /// Who the speaker library says spoke the segment; `None` when the audio is

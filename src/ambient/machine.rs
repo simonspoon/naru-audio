@@ -84,6 +84,19 @@ pub struct WakeCandidate {
     pub reason: &'static str,
 }
 
+/// Why one ingested line did or did not wake the machine, for the ambient audit (naru task 2416).
+/// Diagnostics only: worked out after `ingest`, it never changes what the machine does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WakeAudit {
+    pub woke: bool,
+    /// `matched`, `in conversation`, `speaker other`, `agent audible`, `not line-initial` or
+    /// `no sound-alike match`. The server's audit adds `not admitted` for a segment that never
+    /// reached the machine (echo, the agent speaking, a hold).
+    pub reason: &'static str,
+    /// The line's word closest to a wake word, with its sound distance.
+    pub nearest: Option<(String, f64)>,
+}
+
 /// What one chunk produced: events for the server, and a line for the live agent (conversation mode,
 /// his voice only).
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -388,6 +401,31 @@ pub mod phrases {
         row[t.len()]
     }
 
+    /// True when a wake phrase appears anywhere in the line, line-initial or not. Diagnostics only.
+    pub fn wake_anywhere(text: &str, custom: &[Vec<String>]) -> bool {
+        let tokens = word_list(text);
+        all_phrases(custom)
+            .iter()
+            .any(|p| tokens.windows(p.len()).any(|w| w == &p[..]))
+    }
+
+    /// The line's word that sounds most like a one-word wake target (a built-in spelling or a
+    /// custom word), with its distance. Diagnostics only.
+    pub fn nearest_wake_word(text: &str, custom: &[Vec<String>]) -> Option<(String, f64)> {
+        let mut targets: Vec<String> = WAKE_SPELLINGS.iter().map(|w| w.to_string()).collect();
+        targets.extend(custom.iter().filter(|p| p.len() == 1).map(|p| p[0].clone()));
+        let mut best: Option<(String, f64)> = None;
+        for word in word_list(text) {
+            for t in &targets {
+                let d = sound_distance(&word, t);
+                if best.as_ref().is_none_or(|(_, b)| d < *b) {
+                    best = Some((word.clone(), d));
+                }
+            }
+        }
+        best
+    }
+
     pub fn is_end_phrase(text: &str) -> bool {
         let n = normalize(text);
         END_PHRASES.iter().any(|p| n.contains(p))
@@ -619,6 +657,42 @@ impl AmbientMachine {
             context: context.to_vec(),
             now_ms: now,
         })
+    }
+
+    /// Explains the wake decision `ingest` made for `text`, given the mode before it and its output.
+    pub fn explain_wake(
+        &self,
+        was: Mode,
+        speaker: Speaker,
+        text: &str,
+        output: &AmbientOutput,
+    ) -> WakeAudit {
+        let nearest = phrases::nearest_wake_word(text, &self.custom_wake);
+        let woke = output.events.iter().any(|e| e.kind == EventKind::Wake);
+        let reason = if woke {
+            "matched"
+        } else if was == Mode::Conversation {
+            "in conversation"
+        } else if phrases::wake_remainder(text, &self.custom_wake).is_some()
+            || !output.wake_candidates.is_empty()
+        {
+            // Line-initial or a sound-alike, yet no wake: only a tagged `Other` or the agent's
+            // voice still audible blocks one.
+            if speaker == Speaker::Other {
+                "speaker other"
+            } else {
+                "agent audible"
+            }
+        } else if phrases::wake_anywhere(text, &self.custom_wake) {
+            "not line-initial"
+        } else {
+            "no sound-alike match"
+        };
+        WakeAudit {
+            woke,
+            reason,
+            nearest,
+        }
     }
 
     fn return_to_ambient(&mut self, at_ms: u64, now_ms: u64) -> Event {
