@@ -315,7 +315,8 @@ async fn main() -> ExitCode {
         registry.home().to_path_buf(),
         log.clone(),
     ));
-    let app = server::router(Arc::new(AppState {
+    let naru_url = server::naru_url(registry.home());
+    let state = Arc::new(AppState {
         port: addr.port(),
         allow_remote,
         started: Instant::now(),
@@ -325,12 +326,54 @@ async fn main() -> ExitCode {
         pulls: Arc::new(naru_audio::server::PullTracker::new()),
         keep_recent,
         mic,
-    }));
-    if let Err(e) = axum::serve(listener, app).await {
-        eprintln!("naru-audio: server error: {e}");
-        return ExitCode::FAILURE;
+    });
+    // naru serve's ambient host (naru task 2373); fails open.
+    let checkin = match naru_url {
+        Ok(url) => Some(server::checkin(state.clone(), url)),
+        Err(e) => {
+            state.log.line("warn", None, &format!("naru_checkin_off {e}"));
+            None
+        }
+    };
+    let app = server::router(state);
+    tokio::select! {
+        served = axum::serve(listener, app) => {
+            if let Err(e) = served {
+                eprintln!("naru-audio: server error: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+        // Stopped: tell naru there is no host any more.
+        _ = shutdown_signal() => {
+            if let Some(checkin) = checkin {
+                checkin.shutdown().await;
+            }
+        }
     }
     ExitCode::SUCCESS
+}
+
+/// Ctrl-C, or SIGTERM (launchd and brew services stop with it).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = term.recv() => {}
+                    _ = tokio::signal::ctrl_c() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 fn open_registry() -> Result<Registry, ExitCode> {

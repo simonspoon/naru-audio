@@ -54,6 +54,9 @@ pub struct AmbientHost {
     switch: tokio::sync::Mutex<()>,
     running: Mutex<Option<Listener>>,
     log: Arc<Mutex<EventLog>>,
+    /// Where the listener's `wake` and `ambient_verdict` events also go:
+    /// the naru check-in (`super::checkin`), when it runs.
+    forward: Mutex<Option<UnboundedSender<Value>>>,
 }
 
 struct Listener {
@@ -96,7 +99,18 @@ impl AmbientHost {
             switch: tokio::sync::Mutex::new(()),
             running: Mutex::new(None),
             log: Arc::new(Mutex::new(EventLog::default())),
+            forward: Mutex::new(None),
         }
+    }
+
+    /// Sends each later listener's `wake` and `ambient_verdict` events to `tx`.
+    pub fn forward_to(&self, tx: UnboundedSender<Value>) {
+        *self.forward.lock().unwrap() = Some(tx);
+    }
+
+    /// Whether the listener is on.
+    pub fn on(&self) -> bool {
+        self.status()["on"] == true
     }
 
     /// The open microphone's status, while the listener is on.
@@ -201,15 +215,27 @@ pub(in crate::server) async fn switch(
         Some(_) => return Err(bad("\"conversation\" must be a string")),
     };
     check_id("conversation", &key).map_err(|f| bad(&f.message))?;
-    let host = host(&st)?;
+    set(&st, &req_id, on, key).await.map(Json)
+}
+
+/// Switches the listener on (joining conversation `key`) or off; answers as
+/// `GET /ambient`. `POST /ambient` and naru's `ambient_request` (the
+/// check-in) both come here.
+pub(in crate::server) async fn set(
+    st: &Arc<AppState>,
+    req_id: &str,
+    on: bool,
+    key: String,
+) -> Result<Value, ApiError> {
+    let host = host(st)?;
     let _one = host.switch.lock().await;
     if !on {
         host.stop().await;
-        st.log.info(Some(&req_id), "ambient_off");
-        return Ok(Json(host.status()));
+        st.log.info(Some(req_id), "ambient_off");
+        return Ok(host.status());
     }
-    if host.status()["on"] == true {
-        return Ok(Json(host.status()));
+    if host.on() {
+        return Ok(host.status());
     }
     // A listener that ended on its own.
     host.stop().await;
@@ -232,8 +258,8 @@ pub(in crate::server) async fn switch(
             e.to_string(),
         )
     })??;
-    let (model, vad) = acquire(&st, &req_id, manifest, &cfg).await.map_err(fail)?;
-    let (library, library_stamp) = load_library(&st, &req_id).await.map_err(fail)?;
+    let (model, vad) = acquire(st, req_id, manifest, &cfg).await.map_err(fail)?;
+    let (library, library_stamp) = load_library(st, req_id).await.map_err(fail)?;
     let capture = (host.open)()
         .map_err(|e| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "backend_unavailable", e))?;
     let (member, mode, seq) = join(&key, Some(Mode::Ambient)).map_err(fail)?;
@@ -244,7 +270,7 @@ pub(in crate::server) async fn switch(
         live.set_agent_speaking(true);
     }
     live.ambient.set_wake_words(&wake_words());
-    let (input, events, backlog) = super::workers(&st, &cfg, vad, model);
+    let (input, events, backlog) = super::workers(st, &cfg, vad, model);
     host.log.lock().unwrap().events.clear();
     let mic: SharedMic = Arc::new(Mutex::new(capture.mic));
     let task = tokio::spawn(listen(
@@ -257,6 +283,7 @@ pub(in crate::server) async fn switch(
         events,
         backlog,
         host.log.clone(),
+        host.forward.lock().unwrap().clone(),
     ));
     *host.running.lock().unwrap() = Some(Listener {
         conversation: key.clone(),
@@ -264,10 +291,10 @@ pub(in crate::server) async fn switch(
         task,
     });
     st.log.info(
-        Some(&req_id),
+        Some(req_id),
         &format!("ambient_on conversation={key} model={}", cfg.model),
     );
-    Ok(Json(host.status()))
+    Ok(host.status())
 }
 
 /// The events the listener publishes, and logs.
@@ -292,6 +319,7 @@ async fn listen(
     mut events: UnboundedReceiver<Event>,
     backlog: Arc<AtomicUsize>,
     log: Arc<Mutex<EventLog>>,
+    forward: Option<UnboundedSender<Value>>,
 ) {
     let key = member.key.clone();
     let mut behind = false;
@@ -320,6 +348,11 @@ async fn listen(
                 Some(Event::Send(v)) => {
                     for event in worker_event(&st, &mut live, None, v).await {
                         if heard(&event) {
+                            if let Some(tx) = forward.as_ref().filter(|_| {
+                                matches!(event["type"].as_str(), Some("wake" | "ambient_verdict"))
+                            }) {
+                                let _ = tx.send(event.clone());
+                            }
                             log.lock().unwrap().push(event.clone());
                             publish_event(&key, member.id, event);
                         }

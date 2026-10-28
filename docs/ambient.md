@@ -53,7 +53,8 @@ mode every admitted segment (the one that becomes an `ambient_flag`) is also ing
 The daemon can listen on the local mic (`src/mic.rs`) with no client attached: a server-owned member of a live
 conversation, its frames going through the same pipeline as an audio socket's (VAD, STT, speaker scoring, the
 machine, the gate, wake words from naru's config). It is **off by default** and never starts by itself: not at
-daemon launch, not after a restart (nothing is persisted). Only `POST /ambient` turns it on.
+daemon launch, not after a restart (nothing is persisted). Only `POST /ambient`, or naru's `ambient_request`
+(below), turns it on.
 
 | Route | |
 |---|---|
@@ -66,6 +67,24 @@ conversation's mode; while any audio socket of the conversation has `agent_speak
 mic is shut, as a socket's own is. When decoding falls more than the stream's backlog behind, mic frames are
 dropped (one `ambient_backlog` warning) rather than queued. A daemon without the route's microphone answers 503;
 off macOS, opening the device fails.
+
+## Checking in to naru serve (`server/live/checkin.rs`, naru task 2373)
+
+`serve` is naru's ambient host, the role the Naru Mac app's page played. naru serve is at `NARU_AUDIO_NARU_URL`,
+else `config.toml` `[naru] url`, else `http://127.0.0.1:7777` (the dev daemon of naru's `scripts/dev-audio.sh`
+uses :7771). Every 2 s, while naru has a live session (`GET /api/live`):
+
+- It reports whether the listener is on, `POST /api/live/route {"ambient":bool}` with no `route` (naru treats a
+  report older than 10 s as no host). On SIGTERM or Ctrl-C it reports `null` before exiting.
+- It obeys the session's `ambient_request` once per `ambient_request_seq` (`naru live ambient on|off`), switching
+  the listener as `POST /ambient` does in conversation `ambient`, on its own task so reports keep going during a
+  model load. A request already pending when it first sees a session (it just started, or the session is new)
+  is not obeyed: a restarted daemon stays off until asked again. Checking in never switches it on by itself.
+- The listener's `wake` and `ambient_verdict` events go to naru's ambient engine, `POST /api/workflows/events`
+  (`wake`, speaker `unknown`; `can_help` as `can-help` and `idea`, speaker `him`), as the Mac app sent them.
+
+naru being down is a warning (logged once until it answers again), never a failure. Its poll of `GET /api/live`
+takes an untagged can-help offer as any page's poll does.
 
 ## Tests
 

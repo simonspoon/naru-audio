@@ -6,6 +6,7 @@ mod admin;
 mod live;
 use live::host;
 pub use live::host::{AmbientHost, Capture};
+pub use live::checkin::{Checkin, naru_url, spawn as checkin};
 mod prep;
 mod pulls;
 mod sample_transcript;

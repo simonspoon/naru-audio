@@ -327,6 +327,9 @@ max_resident = "8GiB"               # budget for loaded models; idle ones are ev
 [mic]
 device = "BlackHole 2ch"            # the ambient listener's input device (POST /ambient), by exact name; default the built-in mic, not the system default
 
+[naru]
+url = "http://127.0.0.1:7777"       # naru serve, which serve checks in to as the ambient host (docs/ambient.md)
+
 [mlx]
 breeze_depth_cache = false          # Breeze only: true caches its depth decoder, ~30 % faster but different samples than mlx-audio's
 ```
@@ -340,6 +343,7 @@ Environment variables:
 | `NARU_AUDIO_LOG` | `serve`'s log file; same as `--log-file`. |
 | `NARU_AUDIO_KEEP_RECENT` | `1` turns on `serve --keep-recent`, a debugging aid for agents: each `/speech` reply is saved to `recent/<id>.wav` (newest 50). Off by default. |
 | `NARU_AUDIO_MIC_DEVICE` | The ambient listener's input device by exact name, read at each `POST /ambient {"on":true}` (macOS; `docs/ambient.md`); overrides `config.toml`. Capture runs on its own thread, reopening the device when it errors, disappears or changes rate. While it is on, `/health`'s `mic` shows the device, `running`, `level_dbfs` and `probably_denied` (3 s of exact zeros, as a denied mic gives). `naru-audio mic test --device NAME --seconds 5` prints the level. |
+| `NARU_AUDIO_NARU_URL` | naru serve's address for the ambient host check-in (default `http://127.0.0.1:7777`; `docs/ambient.md`); overrides `config.toml`. |
 | `NARU_AUDIO_STT_MODEL`, `NARU_AUDIO_TTS_MODEL` | Default models; override `config.toml`. |
 | `NARU_AUDIO_KEEP_ALIVE` | Default keep-alive; overrides `config.toml`. |
 | `NARU_AUDIO_URL` | Where the client commands find the daemon (default `http://127.0.0.1:7870`). |

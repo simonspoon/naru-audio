@@ -50,6 +50,7 @@ use crate::speaker::{self, DEFAULT_MODEL, DEFAULT_THRESHOLD, Identity, Library, 
 use crate::stt::vad::Vad;
 use crate::turn;
 
+pub mod checkin;
 pub mod host;
 
 /// Typed binary frames: the first byte.
