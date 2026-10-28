@@ -374,8 +374,8 @@ python = "…"                        # written by `naru-audio mlx setup`; do no
 native_stt = true                   # parakeet-*-mlx runs in-process (8-bit, no Python); false runs it in the sidecar
 native_tts = true                   # breeze-tts-2-8bit-mlx runs in-process (no Python, cloned voices too); false runs it in the sidecar
 breeze_depth_cache = false          # native Breeze only: true caches its depth decoder, ~30 % faster but different samples than the sidecar
-native_qwen3_tts = false            # true runs qwen3-tts-{0.6b,1.7b}-base-mlx in-process (same audio as the sidecar; for now a voice needs
-                                    # <voice>/<model>.xvector.safetensors exported from the sidecar, and audio comes once the utterance is done)
+native_qwen3_tts = false            # true runs qwen3-tts-{0.6b,1.7b}-base-mlx in-process (same audio as the sidecar, cloned voices too;
+                                    # for now audio comes once the utterance is done)
 ```
 
 Environment variables:

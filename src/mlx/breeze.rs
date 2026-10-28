@@ -97,7 +97,7 @@ const CE_HD: i32 = 64;
 const CE_RATIOS: [i32; 4] = [4, 5, 6, 8]; // reversed(upsampling_ratios)
 const CE_NQ: usize = 16; // encoder_valid_num_quantizers
 /// How many references' codes are kept (each is ~12 KB for a 15 s clip).
-const REF_CACHE: usize = 32;
+pub(super) const REF_CACHE: usize = 32;
 
 /// Of every sample produced.
 pub const SAMPLE_RATE: u32 = 24000;
@@ -1979,7 +1979,7 @@ fn load_encoder(raw: HashMap<String, Array>) -> R<(HashMap<String, Array>, Vec<C
 /// WAV (what naru-audio stores): s16 `/ 32768.0` as f32, and a higher rate
 /// through the same kaiser_best polyphase FIR. Anything else is an error
 /// rather than audio that differs from the sidecar's.
-fn load_ref_audio(wav: &[u8]) -> R<Vec<f32>> {
+pub(super) fn load_ref_audio(wav: &[u8]) -> R<Vec<f32>> {
     let mut r = hound::WavReader::new(std::io::Cursor::new(wav))?;
     let spec = r.spec();
     if (spec.sample_format, spec.bits_per_sample) != (hound::SampleFormat::Int, 16) {

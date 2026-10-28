@@ -15,15 +15,16 @@
 //! max shift under top-p; every projection run on the same shapes as Python
 //! (the quantized kernels differ by row count).
 //!
-//! Not yet ported (naru task 2387): the speaker encoder. A voice's x-vector is
-//! read from `<voice dir>/<model>.xvector.safetensors` (key `xvector`),
-//! exported from the sidecar; a voice without one (or a preview's clip) is an
-//! error, and one exported before its `ref.wav` was replaced clones the old
-//! recording's timbre. Not yet streamed (naru task 2388): the whole
-//! utterance is generated before its audio is decoded and handed on.
+//! The speaker encoder (naru task 2387, `speaker_encoder.py`'s ECAPA-TDNN on
+//! `mel_spectrogram`) turns the reference clip into the x-vector; it and the
+//! clip's codec codes are cached by the clip's SHA-256, so a voice is encoded
+//! once. Not yet streamed (naru task 2388): the whole utterance is generated
+//! before its audio is decoded and handed on.
 //!
 //! MLX runs on one thread that owns the model: [`Qwen3Tts`] sends it work.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -31,13 +32,15 @@ use std::thread::JoinHandle;
 
 use mlx_rs::fast::{self, ScaledDotProductAttentionMask};
 use mlx_rs::ops::indexing::{IndexOp, argmax_axis};
-use mlx_rs::ops::{self, argpartition_axis};
+use mlx_rs::ops::{self, LinspaceOptions, argpartition_axis};
 use mlx_rs::random::{self, RandomState};
 use mlx_rs::{Array, Dtype, nn};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::breeze::{
-    CACHE_LIMIT, CHUNK_FRAMES, Codec, CodecState, KvCache, Quant, R, Weights, caches, heads, s,
+    CACHE_LIMIT, CHUNK_FRAMES, Codec, CodecState, KvCache, Quant, R, REF_CACHE, Weights, caches,
+    heads, load_ref_audio, s,
 };
 
 pub use super::breeze::SAMPLE_RATE;
@@ -85,12 +88,6 @@ impl Params {
         }
         Ok(())
     }
-}
-
-/// Where a voice's x-vector for model `name` is read from until the speaker
-/// encoder is ported: next to its reference clip.
-pub fn xvector_path(reference: &Path, name: &str) -> PathBuf {
-    reference.with_file_name(format!("{name}.xvector.safetensors"))
 }
 
 enum Event {
@@ -547,12 +544,19 @@ fn causal_mask(l: i32, dtype: Dtype) -> R<Array> {
 
 struct Model {
     cfg: Config,
-    /// `talker.*` (the speaker encoder's weights are left out).
+    /// `talker.*`.
     w: Weights,
+    /// `speaker_encoder.*` (not quantized).
+    spk: Weights,
+    /// `mel_filters(24000, 1024, 128, 0, 12000, "slaney", "slaney")`,
+    /// `[n_fft/2 + 1, n_mels]`.
+    mel_fb: Array,
+    /// `hanning(1024)` (symmetric), as Python builds it.
+    window: Array,
+    /// Reference x-vectors by the clip's SHA-256.
+    xvectors: RefCell<HashMap<[u8; 32], Array>>,
     tok: tokenizers::Tokenizer,
     codec: Codec,
-    /// The model's directory name, for its x-vector files.
-    name: String,
     inv_freq: Array,
     cp_inv_freq: Array,
     /// Whether the code predictor projects the talker's hidden size down to
@@ -575,8 +579,24 @@ struct Stack<'a> {
 impl Model {
     fn load(dir: &Path, cfg: Config) -> R<Model> {
         let mut map = Array::load_safetensors(dir.join("model.safetensors"))?;
+        let spk = map
+            .iter()
+            .filter_map(|(k, v)| {
+                let k = k.strip_prefix("speaker_encoder.")?;
+                Some((k.to_string(), v.clone()))
+            })
+            .collect();
+        let spk = Weights::quantized(spk, cfg.quant);
         map.retain(|k, _| k.starts_with("talker."));
         let w = Weights::quantized(map, cfg.quant);
+        let mel_fb = mel_filters()?;
+        let window: Vec<f32> = (0..N_FFT)
+            .map(|n| {
+                (0.5 * (1.0 - (2.0 * std::f64::consts::PI * n as f64 / (N_FFT - 1) as f64).cos()))
+                    as f32
+            })
+            .collect();
+        let window = Array::from_slice(&window, &[N_FFT as i32]);
         let codec = Codec::load(&dir.join("speech_tokenizer/model.safetensors"))?;
         let tok = tokenizer(dir)?;
         // `1.0 / (base ** (mx.arange(0, dim, 2, dtype=f32) / dim))`, on device.
@@ -593,18 +613,23 @@ impl Model {
         };
         let inv_freq = inv(cfg.theta)?;
         let cp_inv_freq = inv(cfg.cp_theta)?;
-        mlx_rs::transforms::eval(w.values().chain([&inv_freq, &cp_inv_freq]))?;
+        mlx_rs::transforms::eval(w.values().chain(spk.values()).chain([
+            &inv_freq,
+            &cp_inv_freq,
+            &mel_fb,
+            &window,
+        ]))?;
         let mtp_projection = w
             .g("talker.code_predictor.small_to_mtp_projection.weight")
             .is_ok();
         Ok(Model {
             mtp_projection,
-            name: dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
             cfg,
             w,
+            spk,
+            mel_fb,
+            window,
+            xvectors: RefCell::new(HashMap::new()),
             tok,
             codec,
             inv_freq,
@@ -938,16 +963,7 @@ impl Model {
     fn synth(&self, text: &str, p: &Params, emit: &mut dyn FnMut(Vec<f32>) -> bool) -> R<()> {
         p.check()?;
         let (wav, ref_text) = &p.reference;
-        let xpath = xvector_path(wav, &self.name);
-        let xvector = Array::load_safetensors(&xpath)
-            .map_err(|e| {
-                format!(
-                    "{}: {e} (the native engine has no speaker encoder yet, naru task 2387)",
-                    xpath.display()
-                )
-            })?
-            .remove("xvector")
-            .ok_or_else(|| format!("{}: no `xvector`", xpath.display()))?;
+        let xvector = self.xvector(wav)?;
         let codes = self.codec.ref_codes(wav)?;
         let ref_frames: Vec<Vec<i32>> = {
             let c = codes.as_dtype(Dtype::Int32)?;
@@ -1036,6 +1052,222 @@ fn top_p(logprobs: &Array, top_p: f64) -> R<Array> {
     )?)
 }
 
+// ---------------------------------------------------------------------------
+// Speaker encoder (`speaker_encoder.py`, `mel_spectrogram`)
+// ---------------------------------------------------------------------------
+
+const N_FFT: usize = 1024;
+const HOP: usize = 256;
+const N_MELS: i32 = 128;
+const F_MAX: f64 = 12000.0;
+/// `enc_dilations` of the three SE-Res2Net blocks (`enc_kernel_sizes` 3).
+const SE_DILATIONS: [i32; 3] = [2, 3, 4];
+const RES2NET_SCALE: i32 = 8;
+const ASP_EPS: f32 = 1e-12;
+
+/// mlx-audio's `mel_filters(24000, 1024, 128, 0, 12000, norm="slaney",
+/// mel_scale="slaney")` in float32 on device, as Python runs it, but
+/// returned `[n_fft/2 + 1, n_mels]` (the `.T` `mel_spectrogram` takes).
+fn mel_filters() -> R<Array> {
+    let f_sp = 200.0 / 3.0;
+    let min_log_mel = 1000.0 / f_sp;
+    let logstep = 6.4f64.ln() / 27.0;
+    let m_max = min_log_mel + (F_MAX / 1000.0).ln() / logstep;
+    let n_freqs = (N_FFT / 2 + 1) as i32;
+    let all_freqs = ops::linspace::<f64, f32>(
+        0.0,
+        F_MAX,
+        LinspaceOptions {
+            count: n_freqs,
+            endpoint: true,
+        },
+    )?;
+    let m_pts = ops::linspace::<f64, f32>(
+        0.0,
+        m_max,
+        LinspaceOptions {
+            count: N_MELS + 2,
+            endpoint: true,
+        },
+    )?;
+    // mel_to_hz, slaney.
+    let lin = ops::multiply(Array::from_f32(f_sp as f32), &m_pts)?;
+    let log = ops::multiply(
+        Array::from_f32(1000.0),
+        ops::exp(ops::multiply(
+            Array::from_f32(logstep as f32),
+            ops::subtract(&m_pts, Array::from_f32(min_log_mel as f32))?,
+        )?)?,
+    )?;
+    let ge = ops::ge(&m_pts, Array::from_f32(min_log_mel as f32))?;
+    let f_pts = ops::select(&ge, &log, &lin)?;
+    let n = N_MELS + 2;
+    let f_diff = ops::subtract(f_pts.index(1..), f_pts.index(..n - 1))?;
+    let slopes = ops::subtract(f_pts.reshape(&[1, n])?, all_freqs.reshape(&[n_freqs, 1])?)?;
+    let down = ops::divide(
+        ops::negative(slopes.index((.., ..n - 2)))?,
+        f_diff.index(..n - 2),
+    )?;
+    let up = ops::divide(slopes.index((.., 2..)), f_diff.index(1..))?;
+    let fb = ops::maximum(ops::zeros_like(&down)?, ops::minimum(&down, &up)?)?;
+    let enorm = ops::divide(
+        Array::from_f32(2.0),
+        ops::subtract(f_pts.index(2..n), f_pts.index(..N_MELS))?,
+    )?;
+    Ok(ops::multiply(&fb, enorm.reshape(&[1, N_MELS])?)?)
+}
+
+/// `x[:, 1:pad+1][:, ::-1]`, x, `x[:, -(pad+1):-1][:, ::-1]` along axis 1.
+fn reflect_pad(x: &Array, pad: i32) -> R<Array> {
+    if pad <= 0 {
+        return Ok(x.clone());
+    }
+    let t = x.shape()[1];
+    if pad >= t {
+        return Err("the reference is too short".into());
+    }
+    let left: Vec<i32> = (1..=pad).rev().collect();
+    let right: Vec<i32> = (t - pad - 1..t - 1).rev().collect();
+    let take = |idx: &[i32]| x.take_axis(Array::from_slice(idx, &[idx.len() as i32]), 1);
+    Ok(ops::concatenate(
+        &[take(&left)?, x.clone(), take(&right)?],
+        1,
+    )?)
+}
+
+impl Model {
+    /// The reference's x-vector, cached by the clip's SHA-256.
+    fn xvector(&self, path: &Path) -> R<Array> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let key: [u8; 32] = Sha256::digest(&bytes).into();
+        if let Some(x) = self.xvectors.borrow().get(&key) {
+            eprintln!(
+                "naru-audio: qwen3-tts: reference cache hit, not re-encoding {}",
+                path.display()
+            );
+            return Ok(x.clone());
+        }
+        let audio = load_ref_audio(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mels = self.log_mel(&audio)?;
+        mels.eval()?;
+        let x = self.speaker_embedding(&mels)?;
+        x.eval()?;
+        let mut cache = self.xvectors.borrow_mut();
+        if cache.len() >= REF_CACHE {
+            cache.clear();
+        }
+        cache.insert(key, x.clone());
+        Ok(x)
+    }
+
+    /// `mel_spectrogram`: reflect-padded by (n_fft - hop) / 2, an uncentred
+    /// Hann STFT, `sqrt(|X|^2 + 1e-9)`, slaney mel, `log(clip(1e-5))`;
+    /// `[1, frames, n_mels]`.
+    fn log_mel(&self, audio: &[f32]) -> R<Array> {
+        let pad = (N_FFT - HOP) / 2;
+        if audio.len() <= pad + 1 {
+            return Err("the reference is too short".into());
+        }
+        let n = audio.len();
+        let mut x = Vec::with_capacity(n + 2 * pad);
+        x.extend(audio[1..=pad].iter().rev());
+        x.extend_from_slice(audio);
+        x.extend(audio[n - pad - 1..n - 1].iter().rev());
+        if x.len() < N_FFT {
+            return Err("the reference is too short".into());
+        }
+        let t = 1 + (x.len() - N_FFT) / HOP;
+        let mut frames = Vec::with_capacity(t * N_FFT);
+        for f in 0..t {
+            frames.extend_from_slice(&x[f * HOP..f * HOP + N_FFT]);
+        }
+        let frames = Array::from_slice(&frames, &[t as i32, N_FFT as i32]);
+        let spec = mlx_rs::fft::rfft(ops::multiply(&frames, &self.window)?, None, -1)?;
+        let mag = ops::abs(&spec)?;
+        let mag = ops::sqrt(ops::add(ops::power(&mag, s(2.0, &mag)?)?, s(1e-9, &mag)?)?)?;
+        let mel = ops::matmul(&mag, &self.mel_fb)?;
+        let mel = ops::log(ops::maximum(&mel, s(1e-5, &mel)?)?)?;
+        Ok(mel.reshape(&[1, t as i32, N_MELS])?)
+    }
+
+    /// nn.Conv1d on NLC.
+    fn spk_conv(&self, x: &Array, p: &str, dil: i32) -> R<Array> {
+        let y = ops::conv1d(x, self.spk.g(&format!("{p}.weight"))?, 1, 0, dil, 1)?;
+        Ok(ops::add(&y, self.spk.g(&format!("{p}.bias"))?)?)
+    }
+
+    /// TimeDelayNetBlock on NCL: reflect "same" padding, conv, ReLU.
+    fn tdnn(&self, x: &Array, p: &str, dil: i32) -> R<Array> {
+        let k = self.spk.g(&format!("{p}.conv.weight"))?.shape()[1];
+        let x = x.transpose_axes(&[0, 2, 1])?;
+        let x = reflect_pad(&x, (k - 1) * dil / 2)?;
+        let y = self.spk_conv(&x, &format!("{p}.conv"), dil)?;
+        Ok(nn::relu(y.transpose_axes(&[0, 2, 1])?)?)
+    }
+
+    /// SqueezeExcitationRes2NetBlock.
+    fn se_res2net(&self, x: &Array, p: &str, dil: i32) -> R<Array> {
+        let h = self.tdnn(x, &format!("{p}.tdnn1"), 1)?;
+        let chunks = h.split_equal(RES2NET_SCALE, 1)?;
+        let mut outs: Vec<Array> = Vec::with_capacity(chunks.len());
+        for (i, chunk) in chunks.iter().enumerate() {
+            let rb = |x: &Array| self.tdnn(x, &format!("{p}.res2net_block.blocks.{}", i - 1), dil);
+            let out = match i {
+                0 => chunk.clone(),
+                1 => rb(chunk)?,
+                _ => rb(&ops::add(chunk, outs.last().expect("i > 1"))?)?,
+            };
+            outs.push(out);
+        }
+        let h = ops::concatenate(&outs, 1)?;
+        let h = self.tdnn(&h, &format!("{p}.tdnn2"), 1)?;
+        // SqueezeExcitationBlock.
+        let m = h.mean_axis(2, true)?.transpose_axes(&[0, 2, 1])?;
+        let se = nn::relu(self.spk_conv(&m, &format!("{p}.se_block.conv1"), 1)?)?;
+        let se = ops::sigmoid(self.spk_conv(&se, &format!("{p}.se_block.conv2"), 1)?)?;
+        let h = ops::multiply(&h, se.transpose_axes(&[0, 2, 1])?)?;
+        Ok(ops::add(&h, x)?)
+    }
+
+    /// AttentiveStatisticsPooling: `[1, 2C, 1]`.
+    fn asp(&self, x: &Array) -> R<Array> {
+        let sh = x.shape().to_vec();
+        let eps = s(ASP_EPS, x)?;
+        let mean = x.mean_axis(2, true)?;
+        let std = ops::sqrt(ops::add(x.var_axis(2, true, 0)?, &eps)?)?;
+        let a = ops::concatenate(
+            &[
+                x.clone(),
+                ops::broadcast_to(&mean, &sh)?,
+                ops::broadcast_to(&std, &sh)?,
+            ],
+            1,
+        )?;
+        let a = ops::tanh(self.tdnn(&a, "asp.tdnn", 1)?)?;
+        let a = self.spk_conv(&a.transpose_axes(&[0, 2, 1])?, "asp.conv", 1)?;
+        let a = ops::softmax_axis(a.transpose_axes(&[0, 2, 1])?, 2, None)?;
+        let mean = ops::multiply(&a, x)?.sum_axis(2, true)?;
+        let d = ops::subtract(x, &mean)?;
+        let var = ops::multiply(&a, ops::power(&d, s(2.0, &d)?)?)?.sum_axis(2, true)?;
+        let std = ops::sqrt(ops::maximum(&var, &eps)?)?;
+        Ok(ops::concatenate(&[mean, std], 1)?)
+    }
+
+    /// Qwen3TTSSpeakerEncoder on `[1, frames, n_mels]`: `[1, enc_dim]`.
+    fn speaker_embedding(&self, mels: &Array) -> R<Array> {
+        let mut x = self.tdnn(&mels.transpose_axes(&[0, 2, 1])?, "blocks.0", 1)?;
+        let mut hidden = Vec::with_capacity(SE_DILATIONS.len());
+        for (i, dil) in SE_DILATIONS.into_iter().enumerate() {
+            x = self.se_res2net(&x, &format!("blocks.{}", i + 1), dil)?;
+            hidden.push(x.clone());
+        }
+        let x = self.tdnn(&ops::concatenate(&hidden, 1)?, "mfa", 1)?;
+        let x = self.asp(&x)?;
+        let x = self.spk_conv(&x.transpose_axes(&[0, 2, 1])?, "fc", 1)?;
+        Ok(x.transpose_axes(&[0, 2, 1])?.squeeze_axes(&[-1])?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,13 +1335,5 @@ mod tests {
         assert!(p.check().is_err());
         p.reference.1 = "Hello there.".into();
         assert_eq!(p.check(), Ok(()));
-    }
-
-    #[test]
-    fn xvectors_sit_next_to_the_reference() {
-        assert_eq!(
-            xvector_path(Path::new("/h/voices/Her3/ref.wav"), "qwen3-tts-0.6b-base-mlx"),
-            Path::new("/h/voices/Her3/qwen3-tts-0.6b-base-mlx.xvector.safetensors")
-        );
     }
 }
