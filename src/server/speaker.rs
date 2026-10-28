@@ -80,6 +80,14 @@ fn threshold(raw: Option<&str>) -> Result<f32, ApiError> {
     }
 }
 
+/// [`speaker::normalize_level`] with a too-faint clip as a 400 `clip_too_quiet`,
+/// whose message asks for a re-record.
+pub(super) fn normalize_level(pcm: &mut [f32]) -> Result<(), ApiError> {
+    speaker::normalize_level(pcm)
+        .map(|_| ())
+        .map_err(|e| bad_request("file", "clip_too_quiet", e.to_string()))
+}
+
 const NO_CLIPS: &str = "enrolling needs at least one \"file\" clip of 1 s or more";
 
 fn speaker_error(st: &AppState, req_id: &str, e: SpeakerError) -> ApiError {
@@ -236,10 +244,11 @@ pub(super) async fn add_clip(
         Library::load(home)
             .and_then(|l| l.person(id).map(|_| ()))
             .map_err(|e| speaker_error(st, req_id, e))?;
-        let pcm = decode(&wav)?;
+        let mut pcm = decode(&wav)?;
         if pcm.len() < speaker::MIN_SAMPLES {
             return Err(bad_request("file", "invalid_request", NO_CLIPS));
         }
+        normalize_level(&mut pcm)?;
         let verifier = load_verifier(st)?;
         let embedding = verifier
             .embed(&pcm)
@@ -355,6 +364,10 @@ pub(super) async fn enroll(
             .collect();
         if clips.is_empty() {
             return Err(bad_request("file", "invalid_request", NO_CLIPS));
+        }
+        let mut clips = clips;
+        for pcm in &mut clips {
+            normalize_level(pcm)?;
         }
         let verifier = load_verifier(st)?;
         let embedded = clips

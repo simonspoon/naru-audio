@@ -491,6 +491,81 @@ pub fn migrate(home: &Path, verifier: &SpeakerVerifier) -> Result<Library, Speak
     Library::load(home)
 }
 
+/// Speech level every enrolled clip is scaled to (naru task 2413): the loud
+/// blocks of the Mac app's clips, which sit near -21 dBFS.
+pub const TARGET_DBFS: f32 = -20.0;
+/// No sample of a normalized clip goes above this, so it never clips.
+pub const PEAK_CEILING_DBFS: f32 = -1.0;
+/// A clip needing more gain than this to reach [`TARGET_DBFS`] is refused.
+pub const MAX_GAIN_DB: f32 = 24.0;
+/// A clip whose speech is less than this above its noise floor is refused.
+pub const MIN_SPEECH_OVER_FLOOR_DB: f32 = 10.0;
+/// Level blocks are 50 ms.
+const LEVEL_BLOCK: usize = SAMPLE_RATE as usize / 20;
+
+/// A clip [`normalize_level`] refuses: too faint to bring up to the target cleanly.
+#[derive(Debug, PartialEq)]
+pub struct TooQuiet {
+    pub speech_dbfs: f32,
+    pub floor_dbfs: f32,
+}
+
+impl std::fmt::Display for TooQuiet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fix = if self.speech_dbfs - self.floor_dbfs < MIN_SPEECH_OVER_FLOOR_DB {
+            "record it again somewhere quieter, with pauses between sentences"
+        } else {
+            "move closer to the mic or raise its input level, then record it again"
+        };
+        write!(
+            f,
+            "the clip is too quiet to use (speech at {:.0} dBFS, noise floor at {:.0} dBFS); {fix}",
+            self.speech_dbfs, self.floor_dbfs
+        )
+    }
+}
+
+/// Scales an enrollment clip up or down so its speech (the 90th percentile of
+/// its 50 ms block levels, so pauses do not count) lands at [`TARGET_DBFS`],
+/// holding its peak at or below [`PEAK_CEILING_DBFS`]. Every ingest path calls
+/// this, so a quiet browser mic and a hot one enroll at the same level. Returns
+/// the gain applied in dB, or [`TooQuiet`] when the gain would exceed
+/// [`MAX_GAIN_DB`] or the speech sits too near the noise floor (the 10th
+/// percentile).
+pub fn normalize_level(pcm: &mut [f32]) -> Result<f32, TooQuiet> {
+    let mut levels: Vec<f32> = pcm
+        .as_chunks::<LEVEL_BLOCK>()
+        .0
+        .iter()
+        .map(|b| {
+            let ms = b.iter().map(|s| s * s).sum::<f32>() / b.len() as f32;
+            10.0 * ms.max(1e-12).log10()
+        })
+        .collect();
+    if levels.is_empty() {
+        levels.push(-120.0);
+    }
+    levels.sort_by(f32::total_cmp);
+    let at = |q: f32| levels[(q * (levels.len() - 1) as f32) as usize];
+    let (speech_dbfs, floor_dbfs) = (at(0.9), at(0.1));
+    if TARGET_DBFS - speech_dbfs > MAX_GAIN_DB
+        || speech_dbfs - floor_dbfs < MIN_SPEECH_OVER_FLOOR_DB
+    {
+        return Err(TooQuiet {
+            speech_dbfs,
+            floor_dbfs,
+        });
+    }
+    let peak = pcm.iter().fold(0f32, |m, s| m.max(s.abs()));
+    let peak_dbfs = 20.0 * peak.max(1e-12).log10();
+    let gain_db = (TARGET_DBFS - speech_dbfs).min(PEAK_CEILING_DBFS - peak_dbfs);
+    let gain = 10f32.powf(gain_db / 20.0);
+    for s in pcm.iter_mut() {
+        *s *= gain;
+    }
+    Ok(gain_db)
+}
+
 /// A clip WAV as [`write_wav`] wrote it.
 fn read_wav(path: &Path) -> Result<Vec<f32>, SpeakerError> {
     let mut reader = hound::WavReader::open(path).map_err(store_err)?;
@@ -737,6 +812,98 @@ mod tests {
             Some(emb),
             thr,
         )
+    }
+
+    /// 4 s of "speech": 250 ms bursts of a 220 Hz tone at `speech_dbfs` RMS
+    /// with 250 ms pauses of noise at `floor` amplitude between them.
+    fn speechlike(speech_dbfs: f32, floor: f32) -> Vec<f32> {
+        let amp = 10f32.powf(speech_dbfs / 20.0) * std::f32::consts::SQRT_2;
+        let mut seed = 1u32;
+        (0..4 * SAMPLE_RATE as usize)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = floor * ((seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0);
+                let on = (i / 4_000) % 2 == 0;
+                let t = i as f32 / SAMPLE_RATE as f32;
+                noise
+                    + if on {
+                        amp * (t * 220.0 * std::f32::consts::TAU).sin()
+                    } else {
+                        0.0
+                    }
+            })
+            .collect()
+    }
+
+    fn speech_and_peak(pcm: &[f32]) -> (f32, f32) {
+        let mut levels: Vec<f32> = pcm
+            .as_chunks::<LEVEL_BLOCK>()
+            .0
+            .iter()
+            .map(|b| 10.0 * (b.iter().map(|s| s * s).sum::<f32>() / b.len() as f32).log10())
+            .collect();
+        levels.sort_by(f32::total_cmp);
+        let peak = pcm.iter().fold(0f32, |m, s| m.max(s.abs()));
+        (
+            levels[(0.9 * (levels.len() - 1) as f32) as usize],
+            20.0 * peak.log10(),
+        )
+    }
+
+    #[test]
+    fn normalize_level_brings_a_quiet_clip_up() {
+        let mut pcm = speechlike(-37.0, 1e-4);
+        let gain = normalize_level(&mut pcm).unwrap();
+        let (speech, peak) = speech_and_peak(&pcm);
+        assert!((gain - 17.0).abs() < 0.5, "gain {gain}");
+        assert!((speech - TARGET_DBFS).abs() < 0.5, "speech {speech}");
+        assert!(peak <= PEAK_CEILING_DBFS + 1e-3, "peak {peak}");
+    }
+
+    #[test]
+    fn normalize_level_brings_a_loud_clip_down() {
+        let mut pcm = speechlike(-8.0, 1e-3);
+        let gain = normalize_level(&mut pcm).unwrap();
+        let (speech, _) = speech_and_peak(&pcm);
+        assert!((gain + 12.0).abs() < 0.5, "gain {gain}");
+        assert!((speech - TARGET_DBFS).abs() < 0.5, "speech {speech}");
+    }
+
+    #[test]
+    fn normalize_level_holds_the_peak_ceiling() {
+        // speech at -30 dBFS with one full-scale click: reaching -20 would
+        // put the click 10 dB over full scale, so the ceiling wins
+        let mut pcm = speechlike(-30.0, 1e-4);
+        pcm[1_000] = 1.0;
+        let gain = normalize_level(&mut pcm).unwrap();
+        let (_, peak) = speech_and_peak(&pcm);
+        assert!((gain - PEAK_CEILING_DBFS).abs() < 1e-3, "gain {gain}");
+        assert!(peak <= PEAK_CEILING_DBFS + 1e-3, "peak {peak}");
+        assert!(pcm.iter().all(|s| s.abs() < 1.0));
+    }
+
+    #[test]
+    fn normalize_level_refuses_a_too_faint_clip() {
+        let mut pcm = speechlike(-50.0, 1e-5);
+        let before = pcm.clone();
+        let e = normalize_level(&mut pcm).unwrap_err();
+        assert!((e.speech_dbfs + 50.0).abs() < 0.5, "{e:?}");
+        assert!(e.to_string().contains("record it again"));
+        assert_eq!(pcm, before, "a refused clip is left alone");
+        // digital silence too
+        assert!(normalize_level(&mut vec![0.0; 16_000]).is_err());
+    }
+
+    #[test]
+    fn normalize_level_refuses_speech_buried_in_noise() {
+        // loud enough, but the "pauses" are as loud as the speech
+        let mut pcm = speechlike(-30.0, 0.04);
+        let e = normalize_level(&mut pcm).unwrap_err();
+        assert!(
+            e.speech_dbfs - e.floor_dbfs < MIN_SPEECH_OVER_FLOOR_DB,
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("somewhere quieter"));
     }
 
     #[test]

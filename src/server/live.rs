@@ -1505,7 +1505,7 @@ async fn enroll(
             vec![live.state_event(None)]
         }
         "finish" => {
-            let Some(clip) = live.enrolling.take() else {
+            let Some(mut clip) = live.enrolling.take() else {
                 return vec![soft(
                     "invalid_request",
                     "no enrollment recording is running",
@@ -1522,6 +1522,7 @@ async fn enroll(
                         "an enrollment recording needs at least 1 s of audio",
                     ));
                 }
+                super::speaker::normalize_level(&mut clip)?;
                 let verifier = load_verifier(&st2)?;
                 let embedding = verifier
                     .embed(&clip)

@@ -153,7 +153,7 @@ like `/v1/audio/transcriptions`.
 | `POST /v1/audio/speaker/people` | `{name, owner?}` makes a person (the same shape as one list entry) |
 | `PATCH /v1/audio/speaker/people/{id}` | `{name?, owner?}`; `owner: true` clears it on the others |
 | `DELETE /v1/audio/speaker/people/{id}` | `{deleted: true}`; removes its clips' WAVs |
-| `POST /v1/audio/speaker/people/{id}/clips` | multipart `file` WAV; embeds and keeps it; answers the clip `{id, created_at, seconds, has_audio}`; 400 under 1 s |
+| `POST /v1/audio/speaker/people/{id}/clips` | multipart `file` WAV; normalizes its speech to -20 dBFS (peak held under -1 dBFS), then embeds and keeps it; answers the clip `{id, created_at, seconds, has_audio}`; 400 under 1 s; 400 `clip_too_quiet` (re-record) when it needs over +24 dB or its speech is under 10 dB above its noise floor (naru task 2413) |
 | `GET /v1/audio/speaker/people/{id}/clips/{clip}/audio` | `audio/wav`; 404 when the clip has no audio |
 | `DELETE /v1/audio/speaker/people/{id}/clips/{clip}` | `{deleted: true}` |
 | `GET` / `PUT /v1/audio/speaker/guard` | `{live: bool}` (PUT takes the same body) |
