@@ -17,8 +17,8 @@ use tokio::sync::{Notify, watch};
 
 use crate::log::Logger;
 use crate::profile::Profile;
-use crate::registry::Registry;
 use crate::registry::manifest::{Kind, Manifest};
+use crate::registry::{DROPPED, Registry, dropped_replacement};
 use crate::stt::{SttError, SttModel};
 use crate::tts::{TtsError, TtsModel};
 
@@ -87,6 +87,9 @@ pub struct Settings {
     /// `PUT /api/defaults` sets, for as long as this process runs.
     pub stt_env_override: bool,
     pub tts_env_override: bool,
+    /// One line per default that named a [`DROPPED`] model and was
+    /// replaced, for `serve` to log once its logger is up.
+    pub warnings: Vec<String>,
 }
 
 /// Live, `PUT`-able values behind `/api/defaults` (§2.5): the default
@@ -136,16 +139,43 @@ impl Settings {
                 .or_else(|| configured.clone())
                 .unwrap_or_else(|| profile.to_string())
         };
+        let mut warnings = Vec::new();
+        let mut migrate = |what: &str, model: String| match dropped_replacement(&model) {
+            Some(r) => {
+                warnings.push(format!(
+                    "dropped_model {what}={model} fallback={r} (model removed; set another in config.toml)"
+                ));
+                r.to_string()
+            }
+            None => model,
+        };
+        let stt_default = migrate(
+            "stt",
+            default("NARU_AUDIO_STT_MODEL", &config.stt, profile.default_stt()),
+        );
+        let tts_default = migrate(
+            "tts",
+            default("NARU_AUDIO_TTS_MODEL", &config.tts, profile.default_tts()),
+        );
+        // A dropped model's default voice carries over to its replacement,
+        // unless the replacement has its own.
+        let mut default_voices = config.voices.clone();
+        for (dropped, r) in DROPPED {
+            if let Some(voice) = default_voices.remove(*dropped) {
+                default_voices.entry(r.to_string()).or_insert(voice);
+            }
+        }
         Ok(Self {
             budget_bytes: config
                 .max_resident
                 .unwrap_or_else(|| profile.budget_bytes()),
             keep_alive,
-            stt_default: default("NARU_AUDIO_STT_MODEL", &config.stt, profile.default_stt()),
-            tts_default: default("NARU_AUDIO_TTS_MODEL", &config.tts, profile.default_tts()),
-            default_voices: config.voices.clone(),
+            stt_default,
+            tts_default,
+            default_voices,
             stt_env_override: env("NARU_AUDIO_STT_MODEL").is_some(),
             tts_env_override: env("NARU_AUDIO_TTS_MODEL").is_some(),
+            warnings,
             profile,
         })
     }
@@ -1169,6 +1199,31 @@ mod tests {
         assert_eq!(s.tts_default, s.profile.default_tts());
         assert_eq!(s.budget_bytes, 32 * GIB);
         assert_eq!(s.keep_alive, KeepAlive::For(DEFAULT_KEEP_ALIVE));
+    }
+
+    #[test]
+    fn a_dropped_default_falls_back_with_a_warning() {
+        let text = "[defaults]\nstt = \"whisper-large-v3-turbo-mlx\"\n\
+                    tts = \"chatterbox-tts-8bit-mlx\"\n\
+                    [defaults.voices]\n\"chatterbox-tts-8bit-mlx\" = \"Her\"\n";
+        let s = settings(&[], text);
+        assert_eq!(s.stt_default, "parakeet-tdt-0.6b-v2-mlx");
+        assert_eq!(s.tts_default, "qwen3-tts-1.7b-base-mlx");
+        assert_eq!(s.warnings.len(), 2, "{:?}", s.warnings);
+        assert!(s.warnings[0].contains("stt=whisper-large-v3-turbo-mlx"));
+        assert_eq!(
+            s.default_voices,
+            HashMap::from([("qwen3-tts-1.7b-base-mlx".to_string(), "Her".to_string())])
+        );
+        // The replacement's own voice wins over the carried-over one.
+        let text = "[defaults.voices]\n\"chatterbox-tts-8bit-mlx\" = \"Her\"\n\
+                    \"qwen3-tts-1.7b-base-mlx\" = \"Jarvis\"\n";
+        let s = settings(&[("NARU_AUDIO_STT_MODEL", "qwen3-asr-0.6b-8bit-mlx")], text);
+        assert_eq!(s.stt_default, "parakeet-tdt-0.6b-v2-mlx");
+        assert_eq!(s.default_voices["qwen3-tts-1.7b-base-mlx"], "Jarvis");
+        assert_eq!(s.default_voices.len(), 1);
+        // Kept models pass through without a warning.
+        assert!(settings(&[], "").warnings.is_empty());
     }
 
     #[test]

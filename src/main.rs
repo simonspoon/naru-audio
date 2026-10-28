@@ -93,24 +93,22 @@ enum Command {
     Say {
         /// Text, or `-` for stdin.
         text: String,
-        /// Voice id; the model's default voice if not given. VoiceDesign
-        /// models have no voices and ignore it: use --instructions.
+        /// Voice id; the model's default voice if not given.
         #[arg(short, long)]
         voice: Option<String>,
         /// Model name; if not given, qwen3-tts-0.6b-base-mlx for a cloned
         /// voice, else the daemon's default TTS model.
         #[arg(short, long)]
         model: Option<String>,
-        /// Speed, 0.5 to 2.0. Chatterbox does not support it: a non-1.0
-        /// value fails the request instead of coming out at normal speed.
+        /// Speed, 0.5 to 2.0.
         #[arg(short, long)]
         speed: Option<f64>,
-        /// Voice description, which a VoiceDesign model needs; other models
-        /// ignore it.
+        /// Voice description or direction, for a model that takes
+        /// instructions (Breeze); other models ignore it.
         #[arg(long)]
         instructions: Option<String>,
-        /// Emotion exaggeration, 0 to 1, for Chatterbox; other models
-        /// ignore it.
+        /// Emotion exaggeration, 0 to 1, for a model with an `exaggeration`
+        /// knob; other models ignore it.
         #[arg(long)]
         exaggeration: Option<f64>,
         /// WAV file, written with exact sizes once synthesis ends; or `-`
@@ -143,9 +141,7 @@ enum Command {
         action: MlxAction,
     },
     /// Cloned voices in $NARU_AUDIO_HOME/voices, spoken by any cloning model
-    /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx,
-    /// chatterbox-tts-8bit-mlx, chatterbox-turbo-8bit-mlx, indextts-1.5-mlx,
-    /// voxcpm2-8bit-mlx, omnivoice-bf16-mlx, breeze-tts-2-mlx,
+    /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx, breeze-tts-2-mlx,
     /// breeze-tts-2-8bit-mlx, breeze-tts-2-4bit-mlx).
     Voice {
         #[command(subcommand)]
@@ -291,6 +287,9 @@ async fn main() -> ExitCode {
     let addr = listener.local_addr().unwrap_or(listen);
     let log = Arc::new(log);
     log.info(None, &format!("listening addr={addr}"));
+    for w in &settings.warnings {
+        log.line("warn", None, w);
+    }
     // Before any model load can start the sidecar.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     naru_audio::mlx::refresh_scripts(registry.home(), &log);
@@ -1173,7 +1172,7 @@ mod tests {
     #[test]
     fn say_request_carries_instructions_when_given() {
         let request = speech_request(
-            "qwen3-tts-1.7b-voicedesign-mlx",
+            "breeze-tts-2-8bit-mlx",
             "hello",
             None,
             None,
@@ -1182,7 +1181,7 @@ mod tests {
             false,
         );
         assert_eq!(request["instructions"], "A warm calm man");
-        assert_eq!(request["model"], "qwen3-tts-1.7b-voicedesign-mlx");
+        assert_eq!(request["model"], "breeze-tts-2-8bit-mlx");
         assert_eq!(request["input"], "hello");
     }
 
@@ -1206,7 +1205,7 @@ mod tests {
     #[test]
     fn say_request_carries_exaggeration_when_given() {
         let request = speech_request(
-            "chatterbox-tts-8bit-mlx",
+            "some-tts-model",
             "hello",
             None,
             None,

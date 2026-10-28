@@ -26,7 +26,7 @@
 # the Model Materials free of charge. It does not grant any commercial
 # rights and is not an open source license. Commercial use requires a
 # separate written license from BreezeBlue." (LICENSE, pinned below) — so
-# `non_commercial` is set, same as pocket-tts-int8 and omnivoice-bf16-mlx.
+# `non_commercial` is set, same as pocket-tts-int8.
 #
 # Every [[file]] of the repo at the pinned commit but README.md and
 # .gitattributes; sizes and LFS hash from the HF API, the small files'

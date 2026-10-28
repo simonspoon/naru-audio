@@ -188,14 +188,14 @@ The request body is JSON.
 | `input` | **Supported.** Must be non-empty. The cap is 16 384 chars (OpenAI's is 4 096; we raise it because Naru reads whole turns). Over the cap returns 413. |
 | `voice` | **Supported.** A voice id from `/v1/audio/voices` (for example `af_heart`). OpenAI names (`alloy`, …) return 400 `unknown_voice` with the valid list in `message`. We do not map them, because mapping would silently pick a voice nobody chose. |
 | `response_format` | **Supported:** `wav` (default here; OpenAI's default is mp3) and `pcm`. `mp3/opus/aac/flac` return 400 `unsupported_value`. See the open question on mp3. |
-| `speed` | **Supported** in the range 0.5–2.0. Outside that range returns 400. Qwen3-TTS ignores it silently; Chatterbox, VoxCPM2, IndexTTS, OmniVoice and Breeze do not support it at all, so a non-1.0 `speed` on any of them fails the synthesis (500 `internal_error`) instead of coming out at normal speed unannounced. |
+| `speed` | **Supported** in the range 0.5–2.0. Outside that range returns 400. Qwen3-TTS ignores it silently; Breeze does not support it at all, so a non-1.0 `speed` on it fails the synthesis (500 `internal_error`) instead of coming out at normal speed unannounced. |
 | `stream_format` | `audio` is **supported**. `sse` returns 400 `unsupported_value`. |
-| `instructions` | **Supported** by a model whose manifest sets `instruct = true` (§3.2), passed to mlx-audio as `instruct`; **ignored** by every other model (Kokoro cannot be steered by a prompt). For Qwen3-TTS 1.7B VoiceDesign, which has no preset voices, it is the voice's description plus any style direction in one string (for example "A warm, husky woman in her thirties, a little amused. Speak slowly."); `voice` is accepted and ignored, and a request without `instructions` returns 400 before any load. VoxCPM2, OmniVoice and Breeze also clone (`clone = true` too): a named cloned voice wins over `instructions` if both are given, and only a request with no matching voice needs `instructions` (`voice` in `src/server/speech.rs`). |
+| `instructions` | **Supported** by a model whose manifest sets `instruct = true` (§3.2), passed to mlx-audio as `instruct`; **ignored** by every other model (Kokoro cannot be steered by a prompt). Breeze also clones (`clone = true` too): a named cloned voice wins over `instructions` if both are given, and only a request with no matching voice needs `instructions` (`voice` in `src/server/speech.rs`). |
 
 Extensions: `gap` (default 0.12 s), `level` (default `true`, the leveller),
 `exaggeration` (0–1, **supported** only by a model whose manifest sets
-`exaggeration = true`, passed to mlx-audio as `exaggeration`; Chatterbox's
-emotion-exaggeration dial. **Ignored** by every other model), `keep_alive`,
+`exaggeration = true`, passed to mlx-audio as `exaggeration`
+(an emotion-exaggeration dial). **Ignored** by every other model), `keep_alive`,
 `knobs` (§2.7, naru task 1458: every other manifest-declared generation
 knob, by name).
 There is **no per-request `lang`**. sherpa fixes `lang` in
@@ -324,7 +324,7 @@ decode FIFO per loaded model. Health and listing never wait on it (§2.5).
 | Route | Response |
 |---|---|
 | `GET /health` | `200 {"status":"ok","version":"0.1.0","api":1,"pid":123,"uptime_s":4410,"stt":{"default":"parakeet-tdt-0.6b-v2-int8","ready":true,"problem":null},"tts":{"default":"kokoro-v1.0","ready":false,"problem":{"code":"model_not_pulled","message":"run `naru-audio pull kokoro-v1.0`"}},"backends":[{"name":"sherpa-onnx","available":true},{"name":"mlx","available":false,"reason":"requires Apple Silicon"}]}`. It is served from in-memory state and **never blocks behind a decode**, which fixes auris's `status` problem. `ready` means pulled and loadable, not necessarily loaded. `stt`/`tts` `default` reads the live value `PUT /api/defaults` sets (or the env override, naru task 1458), not just what the daemon started with. |
-| `GET /v1/models` | OpenAI list: `{"object":"list","data":[{"id","object":"model","created","owned_by":"naru-audio","x_kind":"stt\|tts\|vad","x_backend","x_available","x_unavailable_reason","x_pulled","x_loaded","x_loaded_at","x_size_bytes","x_default","x_license","x_license_url","x_non_commercial","x_clone","x_clone_requires_transcript","x_instruct","x_design","x_design_voice_model","x_languages","x_source","x_voice_count",X. It lists pulled models plus catalog models that can run on this machine. `?pulled=true` filters the list. `x_clone`/`x_clone_requires_transcript`/`x_instruct` are `Manifest::clones`/`clone_requires_transcript`/`instructs` (§3.2, §5.3): whether the model speaks in a cloned reference recording, whether that clone needs the transcript alongside it, and whether it takes `instructions`. `x_design` is `instructs()` again, named for "can design a voice from a description"; `x_design_voice_model` is the model a voice designed with it becomes usable with — itself for a model that both clones and instructs (VoxCPM2), else `backend.<backend>.design_voice_model` (Qwen3-TTS VoiceDesign saves to its base model), else `null`. `x_languages` is `[model] languages`; `x_source` is `[model] source` or the Hugging Face `owner/repo` derived from the first file URL, else `null`. `x_voice_count`/`x_cloned_voice_count` count `voices::of`'s result and the cloned subset of it. `x_loaded_at` is when the model finished loading (RFC3339), `null` while not loaded. `x_hotwords` is `Manifest::hotwords`: true exactly for an STT model on the sherpa-onnx backend that derives `bpe.vocab`, the only models that decode per-request hotwords (the MLX STT models ignore them); false for every other row. `x_prompt_format` is `Manifest::prompt_format` (§3.2): `null` for a non-TTS model, else `{"style"?,"inline"?,"knobs":[{"name","default","min","max","step"?}],"hint"?}` documenting how the model reads `instructions` and what else it takes (§2.7). All meaningless fields are still sent, always `false`/`null`, for STT/VAD. |
+| `GET /v1/models` | OpenAI list: `{"object":"list","data":[{"id","object":"model","created","owned_by":"naru-audio","x_kind":"stt\|tts\|vad","x_backend","x_available","x_unavailable_reason","x_pulled","x_loaded","x_loaded_at","x_size_bytes","x_default","x_license","x_license_url","x_non_commercial","x_clone","x_clone_requires_transcript","x_instruct","x_design","x_design_voice_model","x_languages","x_source","x_voice_count",X. It lists pulled models plus catalog models that can run on this machine. `?pulled=true` filters the list. `x_clone`/`x_clone_requires_transcript`/`x_instruct` are `Manifest::clones`/`clone_requires_transcript`/`instructs` (§3.2, §5.3): whether the model speaks in a cloned reference recording, whether that clone needs the transcript alongside it, and whether it takes `instructions`. `x_design` is `instructs()` again, named for "can design a voice from a description"; `x_design_voice_model` is the model a voice designed with it becomes usable with — itself for a model that both clones and instructs (Breeze), else `backend.<backend>.design_voice_model`, else `null`. `x_languages` is `[model] languages`; `x_source` is `[model] source` or the Hugging Face `owner/repo` derived from the first file URL, else `null`. `x_voice_count`/`x_cloned_voice_count` count `voices::of`'s result and the cloned subset of it. `x_loaded_at` is when the model finished loading (RFC3339), `null` while not loaded. `x_hotwords` is `Manifest::hotwords`: true exactly for an STT model on the sherpa-onnx backend that derives `bpe.vocab`, the only models that decode per-request hotwords (the MLX STT models ignore them); false for every other row. `x_prompt_format` is `Manifest::prompt_format` (§3.2): `null` for a non-TTS model, else `{"style"?,"inline"?,"knobs":[{"name","default","min","max","step"?}],"hint"?}` documenting how the model reads `instructions` and what else it takes (§2.7). All meaningless fields are still sent, always `false`/`null`, for STT/VAD. |
 | `GET /v1/audio/voices?model=kokoro-v1.0` | `{"model":"kokoro-v1.0","voices":[{"id":"af_heart","accent":"us","gender":"f","default":true,"cloned":false,"origin":"builtin","description":null,"duration":null,"has_transcript":false},…]}`. It is read **from the manifest** and never loads the model, which fixes the kokoro-rs `--list-voices` mistake. `cloned` is true for a cloned voice (§5.3) from `$NARU_AUDIO_HOME/voices/<name>/` **made for this model**, false for the manifest's own; a clone made for a different model is not listed here at all. `origin` is `"builtin"`, `"designed"` (a cloned voice with a `design.txt`) or `"cloned"` (naru task 1458); `description` is `design.txt`, trimmed, or `null`; `duration` is the clip's length in seconds from `ref.wav` (`hound`), `null` for a built-in voice; `has_transcript` is whether `ref.txt` holds anything after trimming. `?model=clones` is not a real model: it lists every cloned voice regardless of the model it was made for, as every listing did before per-model voices, and each entry also carries its own `model` alongside the same `origin`/`description`/`duration`/`has_transcript`. |
 | `GET /v1/audio/voices/{name}` | Exports a cloned voice: `200 {"name":"amy","text":"Hello there.","model":"qwen3-tts-0.6b-base-mlx","description":null,"wav_base64":"UklGR…"}`, where `text` is its `ref.txt`, `model` is its `model.txt` (`CLONE_MODEL` for a voice that predates per-model voices), `description` is its `design.txt` if it has one (naru task 1458), and `wav_base64` is its `ref.wav`, byte for byte, in standard base64. Errors: 400 `invalid_request` for a bad `name` (as `POST`); 404 `voice_not_found` if there is no cloned voice of that name (a built-in voice is not one). |
 | `POST /v1/audio/voices` | Adds a cloned or designed voice (§5.3), the same code path as `naru-audio voice add`. `multipart/form-data` fields: `name` (the voice id: no path separators, no leading `.`), `file` (the clip, WAV or MP3 or anything else macOS `afconvert` reads; 3–30 s accepted, 5–15 s best), `text` (exactly what the clip says), `model` (which model it is for, a TTS model whose manifest sets `clone = true`; defaults to `CLONE_MODEL` if not given, same as every voice before per-model voices) and `description` (optional; written as `design.txt` when non-blank, naru task 1458 — its mere presence, not its content, is what makes the voice `"designed"` rather than `"cloned"`). The clip is converted to 24 kHz mono and written to `$NARU_AUDIO_HOME/voices/<name>/` as `ref.wav`, `ref.txt`, `model.txt` and, if given, `design.txt`, all or nothing. Returns `201 {"id":"amy","accent":null,"gender":null,"default":false,"cloned":true,"origin":"cloned","description":null,"model":"qwen3-tts-0.6b-base-mlx","duration":6.2}`: the entry `GET /v1/audio/voices?model=` lists for that model, plus the clip's length in seconds. Recreating an exported voice (`GET /v1/audio/voices/{name}` above) elsewhere is the same request with its `model` carried over. Errors: 400 `invalid_request` for a missing field, a bad `name`, an empty `text` or a clip outside 3–30 s (`param` is the field); 400 `model_does_not_clone` if `model` is a TTS model that never speaks in cloned voices; 404 `model_not_found` if `model` is not in the catalog; 409 `voice_exists` if the name is taken (an existing voice is never replaced); 415 `unsupported_media_type` if `afconvert` cannot read the clip; 413 over the 256 MiB body cap. |
@@ -393,10 +393,8 @@ strings inside `{"type":"error"}`.
 in `GET /v1/models`) name a model's generation controls beyond `speed` and
 `exaggeration`, each declared with a `min`, `max` and `default` a client can
 build a slider from, and a `step` only where the underlying kwarg takes an
-integer (mlx-audio's `num_steps`, `inference_timesteps`): Qwen3-TTS's
-`temperature`/`top_p`/`top_k`, Chatterbox's `cfg_weight` (alongside `exaggeration`,
-which is also a declared knob), Breeze's `cfg_scale`, OmniVoice's
-`num_steps`/`guidance_scale`, VoxCPM2's `cfg_value`/`inference_timesteps`,
+integer: Qwen3-TTS's
+`temperature`/`top_p`/`top_k`, Breeze's `cfg_scale`,
 and Kokoro's `speed` (documented here too, even though it travels as the
 request's own top-level `speed` field, not through `knobs`). Every catalog
 kwarg name was checked against the installed mlx-audio's `generate` (naru
@@ -593,8 +591,8 @@ naru-audio mlx setup|status      # arm64 only
 the service starts. `transcribe` and `say` need the daemon and never start
 one; if it is down they exit 3 with the §4.4 message.
 `say --instructions` sends the request's `instructions`: the voice description
-a VoiceDesign model needs (it has no voices and ignores `-v`); other models
-ignore it.
+Breeze designs a voice from (used only when no cloned voice is named); other
+models ignore it.
 
 ## 4. Service lifecycle on macOS
 
@@ -787,8 +785,7 @@ Sidecar design:
 - **TTS models:** mlx-audio's `load_model` loads the pulled directory, so a
   new mlx-audio model is a catalog entry (`backend = "mlx"`, `kind =
   "tts"`, its `[[voice]]` ids passed as mlx-audio's `voice`, or a
-  `reference` recording as `ref_audio`). Qwen3-TTS 0.6B CustomVoice 8-bit
-  is the first. Qwen3-TTS 0.6B and 1.7B Base 8-bit
+  `reference` recording as `ref_audio`). Qwen3-TTS 0.6B and 1.7B Base 8-bit
   (`qwen3-tts-0.6b-base-mlx`, `qwen3-tts-1.7b-base-mlx`) have no preset
   voices; each manifest sets `[backend.mlx] clone = true`, and each speaks in the cloned
   voices under `$NARU_AUDIO_HOME/voices/<name>/` (`ref.wav`, 24 kHz mono,
@@ -812,105 +809,24 @@ Sidecar design:
 - **Instructions:** a manifest that sets `[backend.mlx] instruct = true`
   gets the request's `instructions` (§2.3) in the `synth` header as
   `instruct`, which the sidecar passes to mlx-audio's `generate`; no other
-  model is sent it. Qwen3-TTS 1.7B VoiceDesign 8-bit
-  (`qwen3-tts-1.7b-voicedesign-mlx`) is the only one: it has no preset or
-  cloned voices and makes its voice up from `instructions`, so it needs
-  them, and the `voice` asked for is ignored. The flag is ours, not
-  mlx-audio's: its guard that drops `instruct` for the 0.6B models is
-  dead code, so a model without the flag must not be sent it.
-- **Chatterbox** (`chatterbox-tts-8bit-mlx`, MIT) is a third cloning model:
-  like the Qwen3-TTS Base pair it sets `[backend.mlx] clone = true` and has
-  no preset voices, but it needs no transcript (mlx-audio's Chatterbox
-  ignores `ref_text`, sent anyway for a uniform request; `clone_requires_transcript` is unset, so `false`). It does not
-  support `speed` at all; the sidecar shim rejects a non-1.0 `speed` for it
-  rather than silently generating at normal speed. It takes the request's
-  `exaggeration` (0–1, an emotion-exaggeration dial), gated by
-  `[backend.mlx] exaggeration = true` the same way `instruct` gates
-  `instructions`. Its loader also fetches a small shared dependency,
-  `mlx-community/S3TokenizerV2`, straight from the Hub rather than from the
-  manifest's own files; the sidecar shim lifts `HF_HUB_OFFLINE` for that one
-  call, so it downloads once and is cached under `~/.cache/huggingface`
-  like any other `huggingface_hub` download.
-- **VoxCPM2** (`voxcpm2-8bit-mlx`, Apache-2.0) is a fourth cloning model,
-  and the first to set both `[backend.mlx] clone = true` and `instruct =
-  true`: it clones a reference the same way as the Qwen3-TTS Base pair and
-  Chatterbox (no preset voices, no transcript needed — mlx-audio's VoxCPM2
-  takes `ref_text` but never reads it in that mode), and separately makes a
-  voice up from `instructions` (mlx-audio's `instruct`, prepended to the
-  text as `(instruct)text`) when no cloned voice is named. `voice` in
-  `src/server/speech.rs` resolves a named, existing cloned voice first,
-  even if `instructions` is also given, and only falls back to the design
-  path — and only then requires `instructions` — once no voice matched;
-  every other model with `instruct = true` has no voices at all, so this
-  ordering was never exercised before. VoxCPM2 does not support `speed`
-  either — mlx-audio's `generate` for it has no `speed` parameter, so
-  it would otherwise be silently swallowed by `**kwargs` — and the sidecar
-  shim rejects a non-1.0 `speed` for it the same way it does for
-  Chatterbox. It is also the first model above 24 kHz: it reports
-  `sample_rate: 48000` at `load`, which `MlxTts::load` reads into
-  `TtsModel::sample_rate`, used end to end for the WAV header,
-  `x-audio-sample-rate` and `/v1/models` — nothing downstream assumes
-  24 kHz.
-- **IndexTTS** (`indextts-1.5-mlx`, Apache-2.0) is a fifth cloning model:
-  like Chatterbox and VoxCPM2 it sets `[backend.mlx] clone = true`, has no
-  preset voices and needs no transcript (mlx-audio's IndexTTS has no
-  `ref_text` parameter, swallowed by `**kwargs`), and does not support
-  `speed` either, rejected the same way. It is the first model whose
-  mlx-audio `generate` never streams: it yields exactly one chunk, after
-  the whole utterance has decoded, regardless of `stream` or
-  `streaming_interval`; `say -o -` still works (the WAV header's RIFF sizes
-  already handle a stream of unknown length, §2.4), but the first and only
-  audio is out only once generation finishes, not progressively like every
-  other MLX TTS model. mlx-community's `config.json` for it also has no
-  `tokenizer_name`, which mlx-audio's `ModelArgs` requires to find
-  `tokenizer.model`; since the manifest's `config.json` is hash-pinned and
-  re-hashed by `naru-audio verify`, the sidecar never edits it in place.
-  On `load` it instead builds a scratch directory with every file
-  symlinked in and its own patched `config.json` (`tokenizer_name`
-  pointing at the scratch directory itself), loads from there, and
-  removes it once `load_model` has read everything it needs
-  (`naru_audio_mlx/__main__.py`, `_indextts_load_dir`).
-- **OmniVoice** (`omnivoice-bf16-mlx`, CC-BY-NC-4.0, **non-commercial**) is
-  a sixth cloning model, and the second (after VoxCPM2) that also designs
-  a voice from a description: `[backend.mlx] clone = true` and `instruct =
-  true`, no preset voices, 646 languages (k2-fsa/OmniVoice's card).
-  Unlike VoxCPM2's cloning path, its cloned voice's transcript is not
-  ignored — mlx-audio's OmniVoice `generate` takes `ref_text` and prepends
-  it to the spoken text before tokenizing — so `--text` is used, not just
-  accepted and dropped. It is still optional, though (`ref_text: Optional[str]
-  = None`, cloning gated on `ref_audio` alone), so `clone_requires_transcript`
-  is unset, `false`. It does not support `speed` either (no `speed`
-  parameter, only `**kwargs`), rejected the same way as Chatterbox,
-  VoxCPM2 and IndexTTS, and does not stream: like IndexTTS, mlx-audio's
-  `generate` yields exactly one chunk after the whole utterance has
-  decoded. The catalog pins mlx-community/OmniVoice-**bf16**, not their
-  8-bit conversion: mlx-audio's OmniVoice `sanitize()` splits the
-  checkpoint's combined `audio_embeddings.weight` / `audio_heads.weight`
-  tensors into 8 per-codebook tensors by exact key match, but does not do
-  the same for their quantized `.scales` / `.biases` siblings, so loading
-  the 8-bit repo fails with mlx's `load_weights` rejecting those keys as
-  "not in model" — confirmed against mlx-audio as pinned in
-  `mlx/pyproject.toml` (2026-09-26); bf16 has no `quantization` key in its
-  config, so `apply_quantization` never runs and the mismatch does not
-  arise.
+  model is sent it. Breeze is the only one; a named cloned voice wins over
+  `instructions`, and `instructions` is required only when no voice matched
+  (`voice` in `src/server/speech.rs`). The flag is ours, not mlx-audio's: a
+  model without the flag must not be sent `instruct`.
 - **Breeze TTS 2** (`breeze-tts-2-mlx`, BreezeBlue Research and
-  Non-Commercial License, **non-commercial**) is a seventh cloning model,
-  and the third (after VoxCPM2 and OmniVoice) that also designs a voice
-  from a description: `[backend.mlx] clone = true` and `instruct = true`,
-  no preset voices, 24 kHz output. Unlike the five cloning models above,
-  its `generate` raises outright without a transcript alongside the
-  reference clip (`breeze_tts.py`: `"Breeze voice cloning requires ref_text
-  with ref_audio."`), so its manifest also sets `clone_requires_transcript
-  = true`. It does not support `speed` either (no
-  `speed` parameter, swallowed silently by its own `**kwargs`, same
-  mechanism as Chatterbox/VoxCPM2/IndexTTS/OmniVoice), rejected the same
-  way as those four. Unlike those four, its `generate` does declare a
-  `streaming_interval` parameter and accepts the sidecar's usual short
-  cadence (`STREAMING_INTERVAL = 0.32`) without error — confirmed by
-  pulling the model and running `say` end to end (2026-09-26) — so, unlike
-  `speed`, no sidecar shim is needed for it. The catalog pins
-  mlx-community's full-precision `Breeze-TTS-2-mlx` conversion (~7.6 GB),
-  not their 4-bit or 8-bit ones, per task 1446.
+  Non-Commercial License, **non-commercial**) clones a reference and also
+  designs a voice from a description: `[backend.mlx] clone = true` and
+  `instruct = true`, no preset voices, 24 kHz output. Its `generate` raises
+  outright without a transcript alongside the reference clip
+  (`breeze_tts.py`: `"Breeze voice cloning requires ref_text with
+  ref_audio."`), so its manifest also sets `clone_requires_transcript =
+  true`. It does not support `speed` (no `speed` parameter, swallowed
+  silently by its own `**kwargs`), so the sidecar shim rejects a non-1.0
+  `speed` for it. Its `generate` does declare a `streaming_interval`
+  parameter and accepts the sidecar's usual short cadence
+  (`STREAMING_INTERVAL = 0.32`) without error, so no sidecar shim is needed
+  for that. The catalog pins mlx-community's full-precision
+  `Breeze-TTS-2-mlx` conversion (~7.6 GB) plus 8-bit and 4-bit siblings.
 - **Cost:** about 150–400 ms extra first-request latency for the process start
   **[assumption]**, then a per-request IPC overhead that is negligible
   compared with decode time.
@@ -1391,30 +1307,11 @@ marker (`stt::sherpa::merge_words`). `OfflineWhisperModelConfig::
 enable_token_timestamps` does not apply here — that field exists only for
 Whisper's attention-based timestamps; NeMo transducer models (Parakeet
 TDT) report per-token timestamps from the transducer's own frame
-alignment, with nothing to enable. Two backends implement
-word timestamps: `sherpa-onnx`'s Parakeet, and the MLX sidecar's
-`mlx-whisper` (naru task 1466, `whisper-large-v3-turbo-mlx`). The default
+alignment, with nothing to enable. Only `sherpa-onnx`'s
+Parakeet implements word timestamps. The default
 is `Err(SttError::WordTimestampsUnsupported)`, so a request naming the MLX
 Parakeet (whose sidecar answer carries no words) still gets a clear 400
 naming a model to use instead.
-
-The Whisper path extends the sidecar protocol additively (§5.3,
-`protocol.py`): `transcribe` takes an optional `language` hint and
-`words: true`; the answer's segments then carry `words`, and it carries
-`language`, the one decoded in. The sidecar picks `mlx-whisper` for a model
-named `whisper*` (as it picks IndexTTS by name) and loads the pulled
-directory with `mlx_whisper.load_models.load_model`. The daemon still gates
-with Silero and decodes per utterance; each utterance's word times are
-offset by its slice's start. Without a `language` hint the first
-utterance's detected language is the hint for the rest. The trait grew two
-defaulted methods, `decode_each_in` and `decode_words_in`, taking that hint
-and returning the language used, so no other `SttModel` changes. The
-response's `language` (`/v1/audio/transcriptions` `verbose_json`, prep's
-`Transcript.language`) is the request's, else the detected one, else the
-manifest's first entry for a model with no notion of language. Prep's
-transcribe body takes an optional `language` to pass through. The cost is
-`mlx-whisper`'s dependency on `torch` (its tokenizer and timing code
-import it), which enlarges the sidecar's venv.
 
 ### 8.5 Verbatim sample transcript (naru task 1569)
 

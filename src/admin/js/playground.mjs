@@ -4,9 +4,9 @@
 // documents how a model reads style guidance (fmt.md, manifest.rs
 // `PromptFormat`): `style` is `"free_text"`/`"attributes"` (a separate
 // `instructions` field) or `"inline_prefix"` (the description rides
-// inside the spoken text itself, e.g. VoxCPM2's `(cheerful)Hello`); a
+// inside the spoken text itself, e.g. `(cheerful)Hello`); a
 // model may additionally take inline tags placed within the text
-// (`inline.tags`, e.g. OmniVoice's `[laughter]`), independent of `style`.
+// (`inline.tags`, e.g. Breeze's `(laugh)`), independent of `style`.
 // Declared `knobs` (including `speed`, when a model declares it) go under
 // the request's `knobs` object — the top-level `speed`/`exaggeration`
 // fields are for the models that predate the knob API.

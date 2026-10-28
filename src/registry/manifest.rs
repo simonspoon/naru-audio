@@ -31,24 +31,8 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/campplus-sv-en.toml"),
     ),
     (
-        "chatterbox-tts-8bit-mlx.toml",
-        include_str!("../../catalog/chatterbox-tts-8bit-mlx.toml"),
-    ),
-    (
-        "chatterbox-turbo-8bit-mlx.toml",
-        include_str!("../../catalog/chatterbox-turbo-8bit-mlx.toml"),
-    ),
-    (
-        "indextts-1.5-mlx.toml",
-        include_str!("../../catalog/indextts-1.5-mlx.toml"),
-    ),
-    (
         "kokoro-v1.0.toml",
         include_str!("../../catalog/kokoro-v1.0.toml"),
-    ),
-    (
-        "omnivoice-bf16-mlx.toml",
-        include_str!("../../catalog/omnivoice-bf16-mlx.toml"),
     ),
     (
         "parakeet-tdt-0.6b-v2-int8.toml",
@@ -63,28 +47,12 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/pocket-tts-int8.toml"),
     ),
     (
-        "qwen3-asr-0.6b-8bit-mlx.toml",
-        include_str!("../../catalog/qwen3-asr-0.6b-8bit-mlx.toml"),
-    ),
-    (
-        "qwen3-asr-1.7b-4bit-mlx.toml",
-        include_str!("../../catalog/qwen3-asr-1.7b-4bit-mlx.toml"),
-    ),
-    (
         "qwen3-tts-0.6b-base-mlx.toml",
         include_str!("../../catalog/qwen3-tts-0.6b-base-mlx.toml"),
     ),
     (
-        "qwen3-tts-0.6b-mlx.toml",
-        include_str!("../../catalog/qwen3-tts-0.6b-mlx.toml"),
-    ),
-    (
         "qwen3-tts-1.7b-base-mlx.toml",
         include_str!("../../catalog/qwen3-tts-1.7b-base-mlx.toml"),
-    ),
-    (
-        "qwen3-tts-1.7b-voicedesign-mlx.toml",
-        include_str!("../../catalog/qwen3-tts-1.7b-voicedesign-mlx.toml"),
     ),
     (
         "silero-vad.toml",
@@ -111,16 +79,8 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../catalog/source-separation-spleeter-2stems-int8.toml"),
     ),
     (
-        "voxcpm2-8bit-mlx.toml",
-        include_str!("../../catalog/voxcpm2-8bit-mlx.toml"),
-    ),
-    (
         "wespeaker-sv-en.toml",
         include_str!("../../catalog/wespeaker-sv-en.toml"),
-    ),
-    (
-        "whisper-large-v3-turbo-mlx.toml",
-        include_str!("../../catalog/whisper-large-v3-turbo-mlx.toml"),
     ),
 ];
 
@@ -703,29 +663,19 @@ mod tests {
                 "breeze-tts-2-8bit-mlx",
                 "breeze-tts-2-mlx",
                 "campplus-sv-en",
-                "chatterbox-tts-8bit-mlx",
-                "chatterbox-turbo-8bit-mlx",
-                "indextts-1.5-mlx",
                 "kokoro-v1.0",
-                "omnivoice-bf16-mlx",
                 "parakeet-tdt-0.6b-v2-int8",
                 "parakeet-tdt-0.6b-v2-mlx",
                 "pocket-tts-int8",
-                "qwen3-asr-0.6b-8bit-mlx",
-                "qwen3-asr-1.7b-4bit-mlx",
                 "qwen3-tts-0.6b-base-mlx",
-                "qwen3-tts-0.6b-mlx",
                 "qwen3-tts-1.7b-base-mlx",
-                "qwen3-tts-1.7b-voicedesign-mlx",
                 "silero-vad",
                 "smart-turn-v3.2",
                 "source-separation-spleeter-2stems-int8",
                 "speaker-diarization-en",
                 "speaker-diarization-reverb-titanet",
                 "speech-denoiser-gtcrn",
-                "voxcpm2-8bit-mlx",
-                "wespeaker-sv-en",
-                "whisper-large-v3-turbo-mlx"
+                "wespeaker-sv-en"
             ]
         );
         for m in cat.models.values() {
@@ -756,17 +706,6 @@ mod tests {
         assert_eq!(mlx.model.backend, "mlx");
         assert_eq!(mlx.model.requires, ["silero-vad", "audio-tagging-ced-tiny"]);
         assert_eq!(mlx.files.len(), 2);
-        let whisper = &cat.models["whisper-large-v3-turbo-mlx"];
-        assert_eq!(whisper.model.kind, Kind::Stt);
-        assert_eq!(whisper.model.backend, "mlx");
-        assert_eq!(
-            whisper.model.requires,
-            ["silero-vad", "audio-tagging-ced-tiny"]
-        );
-        assert_eq!(whisper.model.platforms, mlx.model.platforms);
-        assert_eq!(whisper.languages().unwrap().len(), 99);
-        assert_eq!(whisper.languages().unwrap()[0], "en");
-        assert_eq!(whisper.files.len(), 2);
         assert_eq!(cat.models["silero-vad"].model.kind, Kind::Vad);
     }
 
@@ -853,38 +792,6 @@ mod tests {
     }
 
     #[test]
-    fn builtin_qwen3_tts_is_mlx_with_ryan_default() {
-        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
-        let m = &cat.models["qwen3-tts-0.6b-mlx"];
-        assert_eq!(m.model.kind, Kind::Tts);
-        assert_eq!(m.model.backend, "mlx");
-        assert!(m.runs_on("macos", "aarch64"));
-        assert!(!m.runs_on("linux", "aarch64"));
-        for p in ["model.safetensors", "speech_tokenizer/model.safetensors"] {
-            assert!(m.files.iter().any(|f| f.path == p), "{p}");
-        }
-        for f in &m.files {
-            let url = f.url.as_deref().unwrap();
-            assert!(url.ends_with(&format!("/{}", f.path)), "{url}");
-        }
-        let ids: Vec<&str> = m.voices.iter().map(|v| v.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            [
-                "serena", "vivian", "uncle_fu", "ryan", "aiden", "ono_anna", "sohee", "eric",
-                "dylan"
-            ]
-        );
-        let defaults: Vec<&str> = m
-            .voices
-            .iter()
-            .filter(|v| v.default)
-            .map(|v| v.id.as_str())
-            .collect();
-        assert_eq!(defaults, ["ryan"]);
-    }
-
-    #[test]
     fn builtin_qwen3_tts_base_clones_and_has_no_preset_voices() {
         let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
         let m = &cat.models["qwen3-tts-0.6b-base-mlx"];
@@ -893,11 +800,6 @@ mod tests {
         assert!(m.clones());
         assert!(m.clone_requires_transcript());
         assert!(m.voices.is_empty());
-        // The same files as CustomVoice's, from the Base repo.
-        let custom = &cat.models["qwen3-tts-0.6b-mlx"];
-        assert!(!custom.clones());
-        let paths = |m: &Manifest| m.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
-        assert_eq!(paths(m), paths(custom));
         for f in &m.files {
             let url = f.url.as_deref().unwrap();
             assert!(
@@ -928,146 +830,6 @@ mod tests {
                 url.starts_with(
                     "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit/resolve/"
                 ) && url.ends_with(&format!("/{}", f.path)),
-                "{url}"
-            );
-        }
-    }
-
-    #[test]
-    fn builtin_chatterbox_clones_and_takes_exaggeration_but_not_instructions() {
-        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
-        let m = &cat.models["chatterbox-tts-8bit-mlx"];
-        assert_eq!(m.model.kind, Kind::Tts);
-        assert_eq!(m.model.backend, "mlx");
-        assert_eq!(m.model.license.as_deref(), Some("MIT"));
-        assert!(!m.model.non_commercial);
-        assert!(m.clones());
-        assert!(!m.clone_requires_transcript());
-        assert!(m.exaggerates());
-        assert!(!m.instructs());
-        assert!(m.voices.is_empty());
-        for f in &m.files {
-            let url = f.url.as_deref().unwrap();
-            assert!(
-                url.starts_with(
-                    "https://huggingface.co/mlx-community/Chatterbox-TTS-8bit/resolve/"
-                ) && url.ends_with(&format!("/{}", f.path)),
-                "{url}"
-            );
-        }
-        for other in [
-            "qwen3-tts-0.6b-base-mlx",
-            "qwen3-tts-0.6b-mlx",
-            "qwen3-tts-1.7b-base-mlx",
-            "qwen3-tts-1.7b-voicedesign-mlx",
-            "kokoro-v1.0",
-        ] {
-            assert!(!cat.models[other].exaggerates(), "{other}");
-        }
-    }
-
-    #[test]
-    fn builtin_indextts_clones_and_has_no_extras() {
-        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
-        let m = &cat.models["indextts-1.5-mlx"];
-        assert_eq!(m.model.kind, Kind::Tts);
-        assert_eq!(m.model.backend, "mlx");
-        assert_eq!(m.model.license.as_deref(), Some("Apache-2.0"));
-        assert!(!m.model.non_commercial);
-        assert!(m.clones());
-        assert!(!m.clone_requires_transcript());
-        assert!(!m.exaggerates());
-        assert!(!m.instructs());
-        assert!(m.voices.is_empty());
-        for f in &m.files {
-            let url = f.url.as_deref().unwrap();
-            assert!(
-                url.starts_with("https://huggingface.co/mlx-community/IndexTTS-1.5/resolve/")
-                    && url.ends_with(&format!("/{}", f.path)),
-                "{url}"
-            );
-        }
-    }
-
-    #[test]
-    fn builtin_qwen3_tts_voicedesign_instructs_and_has_no_voices() {
-        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
-        let m = &cat.models["qwen3-tts-1.7b-voicedesign-mlx"];
-        assert_eq!(m.model.kind, Kind::Tts);
-        assert_eq!(m.model.backend, "mlx");
-        assert!(m.instructs());
-        assert!(!m.clones());
-        assert!(m.voices.is_empty());
-        // Only VoiceDesign takes `instructions`.
-        for other in [
-            "qwen3-tts-0.6b-mlx",
-            "qwen3-tts-0.6b-base-mlx",
-            "qwen3-tts-1.7b-base-mlx",
-            "kokoro-v1.0",
-        ] {
-            assert!(!cat.models[other].instructs(), "{other}");
-        }
-        // The same files as the 0.6B models', from the VoiceDesign repo.
-        let paths = |m: &Manifest| m.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
-        assert_eq!(paths(m), paths(&cat.models["qwen3-tts-0.6b-mlx"]));
-        for f in &m.files {
-            let url = f.url.as_deref().unwrap();
-            assert!(
-                url.starts_with(
-                    "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit/resolve/"
-                ) && url.ends_with(&format!("/{}", f.path)),
-                "{url}"
-            );
-        }
-    }
-
-    #[test]
-    fn builtin_voxcpm2_clones_and_instructs() {
-        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
-        let m = &cat.models["voxcpm2-8bit-mlx"];
-        assert_eq!(m.model.kind, Kind::Tts);
-        assert_eq!(m.model.backend, "mlx");
-        assert_eq!(m.model.license.as_deref(), Some("Apache-2.0"));
-        assert!(!m.model.non_commercial);
-        // The first model that both clones and designs a voice.
-        assert!(m.clones());
-        assert!(!m.clone_requires_transcript());
-        assert!(m.instructs());
-        assert!(!m.exaggerates());
-        assert!(m.voices.is_empty());
-        for f in &m.files {
-            let url = f.url.as_deref().unwrap();
-            assert!(
-                url.starts_with("https://huggingface.co/mlx-community/VoxCPM2-8bit/resolve/")
-                    && url.ends_with(&format!("/{}", f.path)),
-                "{url}"
-            );
-        }
-    }
-
-    #[test]
-    fn builtin_omnivoice_clones_and_instructs_and_is_non_commercial() {
-        let cat = Catalog::load(Path::new("/nonexistent/catalog.d")).unwrap();
-        let m = &cat.models["omnivoice-bf16-mlx"];
-        assert_eq!(m.model.kind, Kind::Tts);
-        assert_eq!(m.model.backend, "mlx");
-        assert_eq!(m.model.license.as_deref(), Some("CC-BY-NC-4.0"));
-        assert_eq!(
-            m.model.license_url.as_deref(),
-            Some("https://creativecommons.org/licenses/by-nc/4.0/")
-        );
-        // Naru 1445: k2-fsa/OmniVoice's pre-trained weights are CC-BY-NC.
-        assert!(m.model.non_commercial);
-        assert!(m.clones());
-        assert!(!m.clone_requires_transcript());
-        assert!(m.instructs());
-        assert!(!m.exaggerates());
-        assert!(m.voices.is_empty());
-        for f in &m.files {
-            let url = f.url.as_deref().unwrap();
-            assert!(
-                url.starts_with("https://huggingface.co/mlx-community/OmniVoice-bf16/resolve/")
-                    && url.ends_with(&format!("/{}", f.path)),
                 "{url}"
             );
         }
@@ -1142,10 +904,7 @@ mod tests {
         for name in [
             "parakeet-tdt-0.6b-v2-int8",
             "parakeet-tdt-0.6b-v2-mlx",
-            "qwen3-asr-0.6b-8bit-mlx",
-            "qwen3-asr-1.7b-4bit-mlx",
             "silero-vad",
-            "whisper-large-v3-turbo-mlx",
         ] {
             assert!(
                 cat.models[name].prompt_format().is_none(),
@@ -1180,35 +939,6 @@ mod tests {
             );
         }
 
-        let voicedesign = cat.models["qwen3-tts-1.7b-voicedesign-mlx"]
-            .prompt_format()
-            .unwrap();
-        assert_eq!(voicedesign.style.as_deref(), Some("free_text"));
-        assert!(voicedesign.inline.is_none());
-        assert_eq!(
-            voicedesign
-                .knobs
-                .iter()
-                .map(|k| k.name.as_str())
-                .collect::<Vec<_>>(),
-            ["temperature", "top_p"]
-        );
-
-        // No `instruct`, but its own knobs are still declared.
-        let chatterbox = cat.models["chatterbox-tts-8bit-mlx"]
-            .prompt_format()
-            .unwrap();
-        assert!(chatterbox.style.is_none());
-        assert_eq!(chatterbox.knobs[0].name, "exaggeration");
-        assert_eq!(chatterbox.knobs[0].default, Some(0.1));
-
-        // Style rides inline in the text, not a separate field.
-        let voxcpm2 = cat.models["voxcpm2-8bit-mlx"].prompt_format().unwrap();
-        assert_eq!(voxcpm2.style.as_deref(), Some("inline_prefix"));
-        assert_eq!(
-            voxcpm2.inline.unwrap().syntax.as_deref(),
-            Some("(description)text")
-        );
         // The `[[file]]` table right after `prompt_format` in the same
         // manifest is still intact: this regressed once (naru_1457),
         // deleting Breeze's LICENSE `[[file]]` when its prompt_format was
@@ -1218,16 +948,6 @@ mod tests {
             breeze.files.iter().any(|f| f.path == "LICENSE"),
             "{:?}",
             breeze.files
-        );
-
-        let omnivoice = cat.models["omnivoice-bf16-mlx"].prompt_format().unwrap();
-        assert_eq!(omnivoice.style.as_deref(), Some("attributes"));
-        assert!(
-            omnivoice
-                .inline
-                .unwrap()
-                .tags
-                .contains(&"laughter".to_string())
         );
 
         let breeze_pf = breeze.prompt_format().unwrap();
@@ -1247,13 +967,9 @@ mod tests {
             }]
         );
 
-        // The Qwen3-TTS Base pair and CustomVoice take no `instruct`, but
-        // still expose `Model.generate`'s own temperature/top_p.
-        for name in [
-            "qwen3-tts-0.6b-mlx",
-            "qwen3-tts-0.6b-base-mlx",
-            "qwen3-tts-1.7b-base-mlx",
-        ] {
+        // The Qwen3-TTS Base pair takes no `instruct`, but still exposes
+        // `Model.generate`'s own temperature/top_p/top_k.
+        for name in ["qwen3-tts-0.6b-base-mlx", "qwen3-tts-1.7b-base-mlx"] {
             let pf = cat.models[name].prompt_format().unwrap();
             assert!(pf.style.is_none(), "{name}");
             assert_eq!(
@@ -1264,7 +980,7 @@ mod tests {
         }
 
         // The Base pair's defaults are the tighter sampling the sidecar
-        // applies to a cloned voice; CustomVoice keeps mlx-audio's own.
+        // applies to a cloned voice.
         for name in ["qwen3-tts-0.6b-base-mlx", "qwen3-tts-1.7b-base-mlx"] {
             let pf = cat.models[name].prompt_format().unwrap();
             assert_eq!(
@@ -1275,11 +991,11 @@ mod tests {
             assert_eq!(pf.knobs[2].step, Some(1.0), "{name}");
         }
 
-        // IndexTTS and Pocket TTS have no style control at all, but
+        // Pocket TTS has no style control at all, but
         // declare that explicitly as an empty table — `Some(default())`,
         // not `None` — so a client can tell "TTS, nothing to declare"
         // apart from "not a TTS model".
-        for name in ["indextts-1.5-mlx", "pocket-tts-int8"] {
+        for name in ["pocket-tts-int8"] {
             let pf = cat.models[name].prompt_format().unwrap();
             assert_eq!(pf.style, None, "{name}");
             assert!(pf.inline.is_none(), "{name}");
@@ -1318,14 +1034,14 @@ mod tests {
 
     #[test]
     fn a_knob_named_after_a_reserved_kwarg_is_rejected_naru_1460() {
-        let text = include_str!("../../catalog/chatterbox-tts-8bit-mlx.toml").replace("\r\n", "\n");
-        assert!(Manifest::parse(&text, "chatterbox").is_ok());
+        let text = include_str!("../../catalog/qwen3-tts-1.7b-base-mlx.toml").replace("\r\n", "\n");
+        assert!(Manifest::parse(&text, "qwen3-tts").is_ok());
         for reserved in ["ref_audio", "speed"] {
-            let bad = text.replace("name = \"cfg_weight\"", &format!("name = \"{reserved}\""));
+            let bad = text.replace("name = \"top_p\"", &format!("name = \"{reserved}\""));
             assert_ne!(bad, text);
-            let err = Manifest::parse(&bad, "chatterbox").unwrap_err().to_string();
+            let err = Manifest::parse(&bad, "qwen3-tts").unwrap_err().to_string();
             assert!(
-                err.contains(&format!("knob `{reserved}`")) && err.contains("chatterbox-tts"),
+                err.contains(&format!("knob `{reserved}`")) && err.contains("qwen3-tts-1.7b-base"),
                 "{err}"
             );
         }

@@ -77,8 +77,7 @@ curl http://127.0.0.1:7870/v1/audio/transcriptions -F file=@speech.wav -F model=
   built-in sherpa-onnx backend (ONNX Runtime, statically linked), on every
   platform, with no Python and no GPU.
 - **Apple Silicon, for the MLX models only.** Models whose backend is `mlx`
-  (Parakeet and Whisper on MLX, the Qwen3-TTS family and the other cloning
-  models) run in a Python sidecar on arm64 macOS. They need
+  (Parakeet on MLX, the Qwen3-TTS Base models and Breeze) run in a Python sidecar on arm64 macOS. They need
   [`uv`](https://docs.astral.sh/uv/) and a one-time `naru-audio mlx setup`.
   On other machines they are listed as unavailable.
 - **macOS for `voice add`**: clips are converted with the system `afconvert`.
@@ -126,18 +125,8 @@ request.
 | `kokoro-v1.0` | TTS, **default** | sherpa-onnx | 0.40 GB |
 | `pocket-tts-int8` | TTS (English), **non-commercial** | sherpa-onnx | 0.20 GB |
 | `parakeet-tdt-0.6b-v2-mlx` | STT (English) | mlx | 2.5 GB |
-| `whisper-large-v3-turbo-mlx` | STT, 99 languages, word timestamps | mlx | 1.6 GB |
-| `qwen3-asr-1.7b-4bit-mlx` | STT, 30 languages | mlx | 1.6 GB |
-| `qwen3-asr-0.6b-8bit-mlx` | STT, 30 languages | mlx | 1.0 GB |
-| `qwen3-tts-0.6b-mlx` | TTS, preset voices | mlx | 2.0 GB |
 | `qwen3-tts-0.6b-base-mlx` | TTS, speaks cloned voices | mlx | 2.0 GB |
 | `qwen3-tts-1.7b-base-mlx` | TTS, speaks cloned voices | mlx | 3.1 GB |
-| `qwen3-tts-1.7b-voicedesign-mlx` | TTS, voice from a text description | mlx | 3.1 GB |
-| `chatterbox-tts-8bit-mlx` | TTS, speaks cloned voices | mlx | 1.3 GB |
-| `chatterbox-turbo-8bit-mlx` | TTS, speaks cloned voices, inline `[laugh]`-style tags, English | mlx | 1.0 GB |
-| `indextts-1.5-mlx` | TTS, speaks cloned voices, does not stream | mlx | 1.4 GB |
-| `voxcpm2-8bit-mlx` | TTS, clones or designs a voice, 48 kHz | mlx | 3.2 GB |
-| `omnivoice-bf16-mlx` | TTS, clones or designs a voice, 646 languages, does not stream, **non-commercial** | mlx | 1.6 GB |
 | `breeze-tts-2-mlx` | TTS, clones or designs a voice, **non-commercial** | mlx | 7.6 GB |
 | `breeze-tts-2-8bit-mlx` | `breeze-tts-2-mlx` quantized to 8 bit (mxfp8), **non-commercial** | mlx | 4.6 GB |
 | `breeze-tts-2-4bit-mlx` | `breeze-tts-2-mlx` quantized to 4 bit (mxfp4), **non-commercial** | mlx | 3.0 GB |
@@ -156,7 +145,7 @@ Supporting models, pulled automatically or on demand:
 Each model's license is in its catalog file (`license = …`); check it before
 you use a model's output. `naru-audio list` and `GET /v1/models` show it
 (`x_license`, `x_license_url`). Pulling a non-commercial model
-(`pocket-tts-int8`, `omnivoice-bf16-mlx` CC-BY-NC-4.0, `breeze-tts-2-mlx`
+(`pocket-tts-int8`, `breeze-tts-2-mlx`
 BreezeBlue's research/non-commercial license, `speaker-diarization-reverb-titanet`
 Rev's non-production license) prints a warning; `x_non_commercial` marks it
 in the API. None of them is a default.
@@ -247,7 +236,7 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   - `--text` is the exact transcript of the clip, word for word, with the
     punctuation as spoken, numbers written the way they were said, and
     nothing added or left out. A wrong transcript misaligns the in-context
-    clone; Qwen3-TTS Base reads it, Chatterbox ignores it.
+    clone; Qwen3-TTS Base reads it.
   - Record mono at 24 kHz or more (any rate is converted); the stored
     `ref.wav` is 24 kHz mono 16-bit, so there is nothing to gain from
     more. Prefer WAV or another lossless source over a re-encoded MP3.
@@ -257,9 +246,7 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   request, so a new one works without restarting the daemon.
 - `voice add` (the CLI) always records `qwen3-tts-0.6b-base-mlx`; it has no
   `--model`. `POST /v1/audio/voices` (and the admin UI) take one, for
-  `qwen3-tts-1.7b-base-mlx`, `chatterbox-tts-8bit-mlx`,
-  `chatterbox-turbo-8bit-mlx`, `indextts-1.5-mlx`, `voxcpm2-8bit-mlx`,
-  `omnivoice-bf16-mlx` or `breeze-tts-2-mlx` instead. `say` with a cloned
+  `qwen3-tts-1.7b-base-mlx` or `breeze-tts-2-mlx` instead. `say` with a cloned
   voice and no `-m` picks `qwen3-tts-0.6b-base-mlx`; an explicit `-m` that
   voice was not made for is refused rather than silently ignored.
 - `GET /v1/models` names each model's cloning and voice-design capability
@@ -272,8 +259,7 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
   `GET /v1/audio/voices/{name}` ([docs/design.md §2.5](docs/design.md)).
 - `GET /v1/models`' `x_prompt_format.knobs` names each model's own
   generation knobs beyond `speed`/`exaggeration` (Qwen3-TTS's
-  `temperature`/`top_p`/`top_k`, Chatterbox's `cfg_weight`, VoxCPM2's
-  `cfg_value`/`inference_timesteps`, and so on), each with `min`, `max`,
+  `temperature`/`top_p`/`top_k`, Breeze's `cfg_scale`, and so on), each with `min`, `max`,
   `default` and, for one that takes an integer, `step`. `POST
   /v1/audio/speech` and `POST /api/voices/preview` take them as
   `"knobs":{"<name>":<number>}`; a name not in `x_prompt_format.knobs` or a
@@ -292,50 +278,28 @@ naru-audio say "This is my cloned voice." -v myvoice -o cloned.wav
 
 Per-model notes:
 
-- `chatterbox-tts-8bit-mlx` (MIT) needs no transcript and ignores `speed`
-  entirely: a non-1.0 `--speed` with it fails the request instead of
-  quietly synthesising at normal speed. It takes `--exaggeration` (0-1, an
-  emotion-exaggeration dial); every other model ignores it. Its first load
-  fetches a small shared tokenizer from Hugging Face, so it needs network
-  access once even though every other model runs fully offline after
-  `pull`.
-- `chatterbox-turbo-8bit-mlx` (MIT, English) clones from the reference alone
-  and reads tags in the text itself, passed through untouched: `[laugh]`,
-  `[chuckle]`, `[sigh]`, `[cough]`, `[clear throat]`, `[gasp]`, `[groan]`,
-  `[sniff]`, `[shush]`. It has no `exaggeration` or `cfg_weight`, ignores
-  `speed` as Chatterbox does, and needs the same one-time tokenizer fetch.
-- `voxcpm2-8bit-mlx` (Apache-2.0) needs no transcript and does not support
-  `speed` (a non-1.0 `--speed` fails the request). It speaks at 48 kHz, not
-  the 24 kHz every other model here uses.
-- `indextts-1.5-mlx` (Apache-2.0) needs no transcript and does not support
-  `speed`. It does not stream: all the audio arrives in one piece at the
-  end, so `-o -` still works but nothing plays until synthesis finishes.
-- `omnivoice-bf16-mlx` (**CC-BY-NC-4.0, non-commercial only**, per k2-fsa's
-  README: "The pre-trained model is licensed under the CC-BY-NC due to
-  constraints from its training data") clones or designs a voice like
-  VoxCPM2, speaks 646 languages, does not support `speed`, and does not
-  stream. Its transcript (`--text`) is not ignored: mlx-audio prepends it to
-  the spoken text, so it should be the clip's exact words.
 - `breeze-tts-2-mlx` (**BreezeBlue Research and Non-Commercial License,
   non-commercial only**: "it does not grant any commercial rights") clones
   or designs a voice, does not support `speed`, and streams normally.
 
-**Voice design**: `qwen3-tts-1.7b-voicedesign-mlx` has no voices; it makes
-one up from `--instructions`, which it requires (the admin UI's **Design**
-tab does this with chips):
+**Voice design**: `breeze-tts-2-mlx` can also make a voice up from
+`--instructions` (the admin UI's **Design** tab does this with chips), with no
+voice named. The two are mutually exclusive per request, and a named cloned
+voice always wins if both are given:
 
 ```sh
-naru-audio pull qwen3-tts-1.7b-voicedesign-mlx
-naru-audio say "Good evening." -m qwen3-tts-1.7b-voicedesign-mlx \
+naru-audio say "Good evening." -m breeze-tts-2-mlx \
   --instructions "A warm, husky woman in her thirties. Speak slowly." -o designed.wav
 ```
 
-`voxcpm2-8bit-mlx`, `omnivoice-bf16-mlx` and `breeze-tts-2-mlx` do both:
-`say -v myvoice -m voxcpm2-8bit-mlx` (or `-m omnivoice-bf16-mlx` / `-m
-breeze-tts-2-mlx`) clones a voice added the same way as above, and `say -m
-voxcpm2-8bit-mlx --instructions "..."` designs one instead, with no voice
-named. The two are mutually exclusive per request, and a named cloned voice
-always wins if both are given.
+**Dropped models**: the MLX catalog keeps `parakeet-tdt-0.6b-v2-mlx`, the
+Breeze trio and the two Qwen3-TTS Base models. A config that still names a
+dropped model (the Whisper, Qwen3-ASR, Chatterbox, IndexTTS, OmniVoice and
+VoxCPM2 entries, `qwen3-tts-0.6b-mlx` or the Qwen3-TTS VoiceDesign model)
+falls back with a warning: STT to `parakeet-tdt-0.6b-v2-mlx`,
+`qwen3-tts-0.6b-mlx` to `qwen3-tts-0.6b-base-mlx`, any other dropped TTS model
+to `qwen3-tts-1.7b-base-mlx`. Its `[defaults.voices]` entry carries over to
+the replacement.
 
 ## Configuration
 

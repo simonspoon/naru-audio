@@ -30,19 +30,9 @@ const MLX: &[&str] = &[
     "breeze-tts-2-4bit-mlx",
     "breeze-tts-2-8bit-mlx",
     "breeze-tts-2-mlx",
-    "chatterbox-tts-8bit-mlx",
-    "chatterbox-turbo-8bit-mlx",
-    "indextts-1.5-mlx",
-    "omnivoice-bf16-mlx",
     "parakeet-tdt-0.6b-v2-mlx",
-    "qwen3-asr-0.6b-8bit-mlx",
-    "qwen3-asr-1.7b-4bit-mlx",
     "qwen3-tts-0.6b-base-mlx",
-    "qwen3-tts-0.6b-mlx",
     "qwen3-tts-1.7b-base-mlx",
-    "qwen3-tts-1.7b-voicedesign-mlx",
-    "voxcpm2-8bit-mlx",
-    "whisper-large-v3-turbo-mlx",
 ];
 
 fn app(home: &Path) -> Router {
@@ -956,29 +946,12 @@ async fn v1_models_names_cloning_and_voice_design_capability() {
         json!({"knobs": [{"name": "speed", "default": 1.0, "min": 0.5, "max": 2.0}]})
     );
 
-    // Chatterbox, Qwen3-TTS Base, VoxCPM2 and IndexTTS are all
-    // `platforms = ["macos-arm64", "macos-x86_64"]` in their catalog
-    // entries (mlx-audio only runs on Apple silicon or macOS x86_64), so
-    // `Registry::list`'s `runs_here()` filter (registry.rs) drops them from
+    // Qwen3-TTS Base is `platforms = ["macos-arm64", "macos-x86_64"]` in
+    // its catalog entry (mlx-audio only runs on Apple silicon or macOS x86_64), so
+    // `Registry::list`'s `runs_here()` filter (registry.rs) drops it from
     // an unpulled `/v1/models` off macOS — e.g. on the Linux CI runner.
-    // Gate on the same condition so macOS still asserts them.
+    // Gate on the same condition so macOS still asserts it.
     if cfg!(target_os = "macos") {
-        // Chatterbox: clones, but its transcript is ignored, so no
-        // `x_clone_requires_transcript`. No `instruct`, but it still
-        // declares its own knobs.
-        let chatterbox = get("chatterbox-tts-8bit-mlx");
-        assert_eq!(chatterbox["x_clone"], true);
-        assert_eq!(chatterbox["x_clone_requires_transcript"], false);
-        assert_eq!(chatterbox["x_instruct"], false);
-        assert_eq!(chatterbox["x_prompt_format"]["style"], Value::Null);
-        assert_eq!(
-            chatterbox["x_prompt_format"]["knobs"],
-            json!([
-                {"name": "exaggeration", "default": 0.1, "min": 0.0, "max": 1.0},
-                {"name": "cfg_weight", "default": 0.5, "min": 0.0, "max": 1.0},
-            ])
-        );
-
         // Qwen3-TTS Base: clones, and needs the transcript for in-context
         // cloning. No `instruct`, but `Model.generate`'s own sampling knobs
         // are still declared.
@@ -995,28 +968,12 @@ async fn v1_models_names_cloning_and_voice_design_capability() {
                 {"name": "top_k", "default": 20.0, "min": 0.0, "max": 200.0, "step": 1.0},
             ])
         );
-
-        // VoxCPM2: clones (no transcript needed) and also designs a voice —
-        // inline, as a `(description)` prefix mlx-audio's own `generate`
-        // prepends onto the text (naru_1457).
-        let voxcpm2 = get("voxcpm2-8bit-mlx");
-        assert_eq!(voxcpm2["x_clone"], true);
-        assert_eq!(voxcpm2["x_clone_requires_transcript"], false);
-        assert_eq!(voxcpm2["x_instruct"], true);
-        assert_eq!(voxcpm2["x_prompt_format"]["style"], "inline_prefix");
-        assert_eq!(
-            voxcpm2["x_prompt_format"]["inline"],
-            json!({"syntax": "(description)text"})
-        );
-
-        // IndexTTS has no style control at all, but declares that
-        // explicitly as an empty object — distinct from `null`, which is
-        // reserved for a non-TTS model (asserted below).
-        assert_eq!(get("indextts-1.5-mlx")["x_prompt_format"], json!({}));
     }
 
     // Pocket TTS runs on Linux too (`platforms` includes `linux-*`), so it
-    // stays unconditional. Same "no style control" shape as IndexTTS, above.
+    // stays unconditional. It has no style control at all, but declares
+    // that explicitly as an empty object — distinct from `null`, which is
+    // reserved for a non-TTS model (asserted below).
     assert_eq!(get("pocket-tts-int8")["x_prompt_format"], json!({}));
 
     // A non-TTS model has no `prompt_format` table at all: `null`.
@@ -1306,4 +1263,37 @@ async fn api_pulls_lists_an_in_flight_pull() {
 
     let (_, list) = get_json_router(router.clone(), "/api/pulls").await;
     assert_eq!(list, json!([]), "{list}");
+}
+
+/// naru task 2390: a pulled copy of a dropped model is unknown to the API,
+/// so it can be neither a default nor a request's model.
+#[tokio::test]
+async fn a_pulled_dropped_model_is_unknown() {
+    let dir = home(&[]);
+    let name = "whisper-large-v3-turbo-mlx";
+    let model_dir = dir.path().join("models").join(name);
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let pinned = json!({
+        "model": { "name": name, "kind": "stt", "backend": "mlx", "requires": [] },
+        "file": [],
+    });
+    std::fs::write(
+        model_dir.join("manifest.json"),
+        serde_json::to_vec(&pinned).unwrap(),
+    )
+    .unwrap();
+    let app = app(dir.path());
+    let (status, body) =
+        send_json_router(app.clone(), "PUT", "/api/defaults", json!({"stt": name})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = get_json_router(app, "/v1/models").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["id"] != name),
+        "{body}"
+    );
 }

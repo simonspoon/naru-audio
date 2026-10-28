@@ -682,7 +682,7 @@ pub(super) async fn transcribe_clip(
             "stt_model",
             "word_timestamps_unsupported",
             format!(
-                "\"{stt_model}\" does not report word timestamps; use a sherpa-onnx Parakeet model, e.g. \"parakeet-tdt-0.6b-v2-int8\", or \"whisper-large-v3-turbo-mlx\" on Apple Silicon"
+                "\"{stt_model}\" does not report word timestamps; use a sherpa-onnx Parakeet model, e.g. \"parakeet-tdt-0.6b-v2-int8\""
             ),
         ),
         other => super::transcriptions::decode_error(&st, &req_id, other),

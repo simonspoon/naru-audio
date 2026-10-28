@@ -92,3 +92,46 @@ real config's defaults today.
 - `native_qwen3_tts = false` with the venv: both sizes load in the sidecar
   (`engine=sidecar`, python child running), same bytes.
 - `cargo test --lib`: 339 passed.
+
+# Deploying the dropped-model removal (naru task 2390)
+
+From this build on the catalog no longer has `whisper-large-v3-turbo-mlx`,
+the Qwen3-ASR pair, both Chatterbox models, IndexTTS, OmniVoice, VoxCPM2,
+`qwen3-tts-0.6b-mlx` or the Qwen3-TTS VoiceDesign model. A default naming one
+still starts the daemon: `serve` logs one line per replaced default,
+
+```
+… warn - dropped_model stt=whisper-large-v3-turbo-mlx fallback=parakeet-tdt-0.6b-v2-mlx (model removed; set another in config.toml)
+```
+
+and uses the fallback (STT: `parakeet-tdt-0.6b-v2-mlx`; `qwen3-tts-0.6b-mlx`:
+`qwen3-tts-0.6b-base-mlx`; any other dropped TTS model:
+`qwen3-tts-1.7b-base-mlx`). A `[defaults.voices]` entry for a dropped model
+carries over to its fallback. A request that names a dropped model itself
+gets the usual unknown-model error. Weights already pulled under
+`~/.naru-audio/models/` stay on disk until `naru-audio rm <name>`.
+
+## The real install
+
+Its `stt = "whisper-large-v3-turbo-mlx"` is dropped, so STT moves to native
+Parakeet MLX; `tts = "qwen3-tts-1.7b-base-mlx"` is kept. The config is
+changed only as a deploy step by the live main thread, never by an agent:
+
+1. Pull the replacement first, so the first transcription does not wait on a
+   download: `naru-audio pull parakeet-tdt-0.6b-v2-mlx`.
+2. Install the binary as above (Install), then set `~/.naru-audio/config.toml`:
+
+   ```toml
+   [defaults]
+   stt = "parakeet-tdt-0.6b-v2-mlx"
+   tts = "qwen3-tts-1.7b-base-mlx"
+   ```
+
+   Without the edit the daemon still uses Parakeet, but logs the
+   `dropped_model` warning on every start.
+3. Restart the LaunchAgent as above, then check that the newest start in
+   `~/.naru-audio/serve.log` has no `dropped_model` line and that
+   `load model=parakeet-tdt-0.6b-v2-mlx` ends `engine=native`.
+
+Roll back: restore the previous binary as above and put
+`stt = "whisper-large-v3-turbo-mlx"` back.

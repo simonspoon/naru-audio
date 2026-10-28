@@ -4,8 +4,7 @@
 // string), generate takes of a shared test line (how many is picked, each
 // on its own seed so they differ),
 // pick one, name it, and save it as a voice on `x_design_voice_model` (the
-// model that can actually hold the voice — VoiceDesign models can't clone
-// themselves).
+// model that can actually hold the voice).
 
 import { getJson, request } from './api.mjs';
 import { el, toast, playButton, waveformSvg, peaks, decodeWav } from './ui.mjs';
@@ -158,18 +157,12 @@ export function mount(view, params) {
     const text = descBox.value.trim();
     descBox.placeholder = dm.placeholder ?? '';
     const lines = [`instructions: ${JSON.stringify(text)}`];
-    if (selectedModel?.startsWith('voxcpm2')) {
-      lines.push(`spoken as:    (${text})${testLineInput.value}`);
-    }
     previewBox.textContent = lines.join('\n');
     const warnings = [...(dm.check ? dm.check(text) : [])];
     if (dm.charLimit) {
       const note = `${text.length}/${dm.charLimit} characters`;
       if (text.length > dm.charLimit) warnings.push(`${note}: over the ${dm.charLimit}-character guideline.`);
       else previewBox.textContent += `\n${note}`;
-    }
-    if (selectedModel?.startsWith('voxcpm2') && /^\(.*\)$/.test(text)) {
-      warnings.push('Remove the outer parentheses: the server adds them.');
     }
     warnBox.replaceChildren(...warnings.map((w) => el('div', {}, [`⚠ ${w}`])));
   }

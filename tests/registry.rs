@@ -405,9 +405,7 @@ fn every_builtin_model_has_a_non_empty_license_and_url() {
 }
 
 /// Pocket TTS's package README says "It is for non-commercial" even though
-/// the model itself is CC-BY-4.0 (catalog/pocket-tts-int8.toml); OmniVoice's
-/// README says its pre-trained weights are CC-BY-NC outright
-/// (catalog/omnivoice-bf16-mlx.toml); Breeze TTS 2's own LICENSE is a
+/// the model itself is CC-BY-4.0 (catalog/pocket-tts-int8.toml); Breeze TTS 2's own LICENSE is a
 /// research/non-commercial-only grant (catalog/breeze-tts-2-mlx.toml).
 /// Nothing else in the built-in catalog is restricted.
 #[test]
@@ -425,7 +423,6 @@ fn only_known_models_are_flagged_non_commercial() {
             "breeze-tts-2-4bit-mlx",
             "breeze-tts-2-8bit-mlx",
             "breeze-tts-2-mlx",
-            "omnivoice-bf16-mlx",
             "pocket-tts-int8",
             "speaker-diarization-reverb-titanet"
         ]
@@ -459,7 +456,7 @@ fn no_default_model_is_non_commercial() {
 #[test]
 fn pulled_manifest_overlays_catalog_prompt_format_and_design_voice_model() {
     let dir = home(&[]);
-    let name = "qwen3-tts-1.7b-voicedesign-mlx";
+    let name = "breeze-tts-2-mlx";
     let model_dir = dir.path().join("models").join(name);
     std::fs::create_dir_all(&model_dir).unwrap();
     let pinned = serde_json::json!({
@@ -477,7 +474,10 @@ fn pulled_manifest_overlays_catalog_prompt_format_and_design_voice_model() {
         "backend": {
             // Predates `prompt_format` and `design_voice_model`: only the
             // fields that already existed when this model was pulled.
-            "mlx": { "instruct": true },
+            // Breeze clones, so it is its own design target; no built-in
+            // model declares a separate `design_voice_model` since the
+            // VoiceDesign checkpoint was dropped (naru task 2390).
+            "mlx": { "instruct": true, "clone": true },
         },
         "file": [
             {
@@ -506,7 +506,7 @@ fn pulled_manifest_overlays_catalog_prompt_format_and_design_voice_model() {
     );
     assert_eq!(
         manifest.design_voice_model(),
-        Some("qwen3-tts-1.7b-base-mlx".to_string())
+        Some("breeze-tts-2-mlx".to_string())
     );
 
     // Pinned: unaffected by the overlay.
@@ -516,4 +516,35 @@ fn pulled_manifest_overlays_catalog_prompt_format_and_design_voice_model() {
         manifest.raw["model"]["resident_bytes"].as_integer(),
         Some(123_456)
     );
+}
+
+/// naru task 2390: a pulled copy of a dropped model stays on disk, but is
+/// no longer listed (so no picker offers it); `rm` still removes it.
+#[test]
+fn a_pulled_dropped_model_is_not_listed_but_can_be_removed() {
+    let dir = home(&[]);
+    let name = "whisper-large-v3-turbo-mlx";
+    let model_dir = dir.path().join("models").join(name);
+    std::fs::create_dir_all(&model_dir).unwrap();
+    let pinned = serde_json::json!({
+        "model": { "name": name, "kind": "stt", "backend": "mlx", "requires": [] },
+        "file": [],
+        "pulled_at": "2020-01-01T00:00:00Z",
+    });
+    std::fs::write(
+        model_dir.join("manifest.json"),
+        serde_json::to_vec(&pinned).unwrap(),
+    )
+    .unwrap();
+
+    let reg = Registry::open(dir.path()).unwrap();
+    assert_eq!(reg.pulled().unwrap(), [name]);
+    assert!(
+        reg.list()
+            .unwrap()
+            .iter()
+            .all(|e| e.manifest.model.name != name)
+    );
+    reg.remove(name, false, &[]).unwrap();
+    assert!(!model_dir.exists());
 }

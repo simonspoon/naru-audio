@@ -353,14 +353,16 @@ pub(super) fn stt_manifest(st: &AppState, name: &str) -> Result<Manifest, ApiErr
 /// pulled, 400 another kind. Blocking.
 pub(super) fn kind_manifest(st: &AppState, name: &str, kind: Kind) -> Result<Manifest, ApiError> {
     // Only a catalog name or a pulled one reaches the filesystem, so a name
-    // like `../x` or `/tmp/x` is 404, as in `Registry::lock_pulled`.
+    // like `../x` or `/tmp/x` is 404, as in `Registry::lock_pulled`. A
+    // pulled copy of a dropped model is 404 too (naru task 2390).
     let known = st.registry.catalog().models.contains_key(name)
-        || st
-            .registry
-            .pulled()
-            .map_err(registry_error)?
-            .iter()
-            .any(|n| n == name);
+        || crate::registry::dropped_replacement(name).is_none()
+            && st
+                .registry
+                .pulled()
+                .map_err(registry_error)?
+                .iter()
+                .any(|n| n == name);
     if !known {
         return Err(registry_error(RegistryError::UnknownModel(
             name.to_string(),

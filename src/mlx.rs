@@ -269,7 +269,7 @@ mod tests {
     fn native_stt_is_the_default_and_parakeet_only() {
         let home = tempfile::tempdir().unwrap();
         let pk = "parakeet-tdt-0.6b-v2-mlx";
-        let whisper = "whisper-large-v3-turbo-mlx";
+        let other = "some-other-stt-mlx";
         // No config.toml, and no key: native.
         assert_eq!(native_stt(home.path(), pk), Ok(true));
         std::fs::write(config_path(home.path()), "[mlx]\npython = \"/p\"\n").unwrap();
@@ -277,7 +277,7 @@ mod tests {
         std::fs::write(config_path(home.path()), "[mlx]\nnative_stt = true\n").unwrap();
         assert_eq!(native_stt(home.path(), pk), Ok(true));
         // Only Parakeet has a native port.
-        assert_eq!(native_stt(home.path(), whisper), Ok(false));
+        assert_eq!(native_stt(home.path(), other), Ok(false));
         // Switched off: the sidecar.
         std::fs::write(config_path(home.path()), "[mlx]\nnative_stt = false\n").unwrap();
         assert_eq!(native_stt(home.path(), pk), Ok(false));
@@ -322,8 +322,6 @@ mod tests {
         assert_eq!(native_qwen3_tts(home.path(), small), Ok(true));
         assert_eq!(native_qwen3_tts(home.path(), large), Ok(true));
         // Only the two Base checkpoints have a native port.
-        assert_eq!(native_qwen3_tts(home.path(), "qwen3-tts-0.6b-mlx"), Ok(false));
-        assert_eq!(native_qwen3_tts(home.path(), "qwen3-tts-1.7b-voicedesign-mlx"), Ok(false));
         assert_eq!(native_qwen3_tts(home.path(), "breeze-tts-2-8bit-mlx"), Ok(false));
         // Switched off: the sidecar.
         std::fs::write(config_path(home.path()), "[mlx]\nnative_qwen3_tts = false\n").unwrap();

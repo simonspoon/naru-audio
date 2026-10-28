@@ -1,8 +1,7 @@
 // Per-model data for the Design tab wizard, keyed by model id: which fields
 // the model understands, how the form becomes the `instructions` string,
 // starter presets, inline tags for the spoken text, tips and pitfalls.
-// Unknown design models get GENERIC. Prompting notes behind this live in
-// docs/voice-design-prompting.md.
+// Unknown design models get GENERIC.
 //
 // Field shapes:
 //   { key, label, type: 'chips', options: [...], hint? }   one value, toggle
@@ -69,24 +68,6 @@ const FIELD_EXTRA = {
   placeholder: 'anything else, e.g. like a fashion product presenter',
 };
 
-const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
-
-/** "Female, young adult, slightly high pitch, ..." (Qwen3-TTS style). */
-function buildList(v) {
-  const parts = [
-    v.gender,
-    v.age,
-    v.pitch,
-    v.pace,
-    v.emotion && (v.emotion === 'cheerful' ? 'cheerful and lively' : `${v.emotion} tone`),
-    v.timbre && `${v.timbre} timbre`,
-    v.accent,
-    v.scene && `suited to ${v.scene}`,
-    v.extra && v.extra.trim(),
-  ].filter(Boolean);
-  return parts.length ? cap(parts.join(', ')) : '';
-}
-
 /** "A young adult female voice with a high pitch, ... tone." (open sentence). */
 function buildSentence(v) {
   const subject = [v.age, v.gender].filter(Boolean).join(' ');
@@ -122,160 +103,6 @@ const OPEN_PRESETS = [
 ];
 
 const ZH_LINE = '今天天气真好，我们一起出去走走吧。';
-
-// OmniVoice's closed vocabulary (k2-fsa): one value per category.
-const OV = {
-  gender: ['male', 'female'],
-  age: ['child', 'teenager', 'young adult', 'middle-aged', 'elderly'],
-  pitch: ['very low pitch', 'low pitch', 'moderate pitch', 'high pitch', 'very high pitch'],
-  style: ['whisper'],
-  accent: [
-    'american accent', 'british accent', 'australian accent', 'canadian accent',
-    'indian accent', 'chinese accent', 'korean accent', 'japanese accent',
-    'portuguese accent', 'russian accent',
-  ],
-  dialect: [
-    '河南话', '陕西话', '四川话', '贵州话', '云南话', '桂林话',
-    '济南话', '石家庄话', '甘肃话', '宁夏话', '青岛话', '东北话',
-  ],
-};
-// Order the categories appear in the built string.
-const OV_ORDER = ['gender', 'age', 'pitch', 'accent', 'dialect', 'style'];
-
-/** Maps each lowercased OmniVoice term to its category. */
-const OV_CATEGORY = new Map(
-  Object.entries(OV).flatMap(([cat, list]) => list.map((t) => [t.toLowerCase(), cat])),
-);
-
-function buildOmni(v) {
-  const parts = OV_ORDER.map((k) => v[k]).filter(Boolean);
-  // Half-width comma for English, full-width when a Chinese dialect is used.
-  return parts.join(v.dialect ? '，' : ', ');
-}
-
-function checkOmni(text) {
-  const warnings = [];
-  const seen = new Map();
-  for (const raw of text.split(/[,，]/)) {
-    const term = raw.trim().toLowerCase();
-    if (!term) continue;
-    const cat = OV_CATEGORY.get(term);
-    if (!cat) {
-      warnings.push(`"${raw.trim()}" is not in OmniVoice's vocabulary and may be ignored or rejected.`);
-      continue;
-    }
-    if (seen.has(cat)) warnings.push(`Two ${cat} values ("${seen.get(cat)}", "${term}"): use at most one per category.`);
-    seen.set(cat, term);
-  }
-  if (seen.has('accent') && seen.has('dialect')) {
-    warnings.push('Accent only affects English text and dialect only Chinese text; pick the one that matches your test line.');
-  }
-  return warnings;
-}
-
-const omniPreset = (name, values, line) => ({ name, values, ...(line ? { line } : {}) });
-
-const OMNI = {
-  label: 'OmniVoice',
-  summary:
-    'Closed vocabulary: pick at most one value per category. Anything outside the list is ignored or rejected, so there is no free text here.',
-  license:
-    'OmniVoice is released under CC-BY-NC: non-commercial use only. Do not use voices designed here in commercial products.',
-  fields: [
-    { key: 'gender', label: 'Gender', type: 'select', options: OV.gender },
-    { key: 'age', label: 'Age', type: 'select', options: OV.age },
-    { key: 'pitch', label: 'Pitch', type: 'select', options: OV.pitch },
-    { key: 'accent', label: 'English accent', type: 'select', options: OV.accent, hint: 'English text only; no effect on Chinese.' },
-    { key: 'dialect', label: 'Chinese dialect', type: 'select', options: OV.dialect, hint: 'Chinese text only; no effect on English.' },
-    { key: 'style', label: 'Style', type: 'select', options: OV.style },
-  ],
-  build: buildOmni,
-  check: checkOmni,
-  placeholder: 'female, young adult, high pitch, british accent',
-  tips: [
-    'Comma-separated terms, case-insensitive, at most one per category. Partial strings like "female" are fine.',
-    'Use a half-width comma for English and a full-width one (，) for Chinese.',
-    'Voice design was trained on Chinese and English only.',
-    'Insert tags such as [laughter] or [sigh] into the spoken text (the test line), not the voice description.',
-  ],
-  pitfalls: [
-    'Accent has no effect on Chinese text; dialect has none on English text.',
-    'Do not invent words ("raspy", "warm"): they are not in the vocabulary.',
-  ],
-  presets: [
-    omniPreset('Documentary narrator', { gender: 'male', age: 'middle-aged', pitch: 'low pitch', accent: 'british accent' }),
-    omniPreset('Cheerful teen', { gender: 'female', age: 'teenager', pitch: 'high pitch', accent: 'american accent' }),
-    omniPreset('Wise elder', { gender: 'male', age: 'elderly', pitch: 'low pitch' }),
-    omniPreset('Whisper ASMR', { gender: 'female', age: 'young adult', pitch: 'low pitch', style: 'whisper' }),
-    omniPreset('News anchor', { gender: 'female', age: 'middle-aged', pitch: 'moderate pitch', accent: 'american accent' }),
-    omniPreset('Villain', { gender: 'male', age: 'middle-aged', pitch: 'very low pitch', accent: 'british accent' }),
-    omniPreset('Bedtime storyteller', { gender: 'female', age: 'middle-aged', pitch: 'low pitch', accent: 'canadian accent' }),
-    omniPreset('Excited kid', { gender: 'female', age: 'child', pitch: 'very high pitch', accent: 'american accent' }),
-    omniPreset('Sichuan chef', { gender: 'male', age: 'middle-aged', pitch: 'moderate pitch', dialect: '四川话' }, ZH_LINE),
-    omniPreset('Northeastern uncle', { gender: 'male', age: 'middle-aged', pitch: 'low pitch', dialect: '东北话' }, ZH_LINE),
-  ],
-  tagLabel: 'Insert a tag into the test line',
-  tags: [
-    '[laughter]', '[sigh]', '[confirmation-en]', '[question-en]', '[question-ah]',
-    '[question-oh]', '[question-ei]', '[question-yi]', '[surprise-ah]', '[surprise-oh]',
-    '[surprise-wa]', '[surprise-yo]', '[dissatisfaction-hnn]',
-  ].map((t) => ({ label: t, insert: t })),
-};
-
-const QWEN = {
-  label: 'Qwen3-TTS VoiceDesign',
-  summary:
-    'Free-form natural language, kept separate from the spoken text. Combine several dimensions with concrete words.',
-  charLimit: 500,
-  fields: [
-    FIELD_GENDER, FIELD_AGE, FIELD_PITCH, FIELD_PACE, FIELD_EMOTION, FIELD_TIMBRE,
-    FIELD_ACCENT, FIELD_SCENE, FIELD_EXTRA,
-  ],
-  build: buildList,
-  placeholder: 'Female, young adult, slightly high pitch, fast pace, cheerful and lively, like a fashion product presenter',
-  tips: [
-    'Combine gender, age, pitch, speed, emotion, timbre and scene in one line.',
-    'Concrete words work best (resonant, crisp, husky, mellow); the Extra box takes full phrases such as "like a fashion product presenter".',
-    'It can also take a direction, e.g. "Speak in an incredulous tone, but with a hint of panic beginning to creep into your voice."',
-    'Chinese and English are the benchmarked languages.',
-  ],
-  pitfalls: [
-    'Keep it under about 500 characters (the hosted API limit; a soft guide for the open model).',
-    'Avoid vague words ("nice", "normal"), "female voice" alone, and celebrity imitation.',
-    'Accents are weak. Results vary run to run: generate a few takes and compare.',
-    'Keep voice description out of the spoken text.',
-  ],
-  presets: OPEN_PRESETS,
-  tags: [],
-};
-
-const VOX = {
-  label: 'VoxCPM2',
-  summary:
-    'Open vocabulary. The server prepends your description to the text as "(description)text" itself, so write the bare description with no parentheses.',
-  fields: [
-    FIELD_GENDER, FIELD_AGE,
-    { key: 'dialect', label: 'Dialect', type: 'chips', options: ['广东话', '四川话', '东北话', '河南话', '陕西话', '山东话', '上海话', '天津话', '闽南话'], hint: 'Also write the test line in that dialect wording.' },
-    FIELD_PITCH, FIELD_PACE, FIELD_EMOTION, FIELD_TIMBRE, FIELD_SCENE, FIELD_EXTRA,
-  ],
-  build: buildSentence,
-  placeholder: 'A warm, gentle female voice in her 30s with a calm and soothing tone',
-  tips: [
-    'Age, gender, pitch, pace, emotional tone and vocal texture all work; Chinese or English description.',
-    'Supports 30 languages and several Chinese dialects: name the dialect in the description and write the text in dialect wording.',
-    'Try 1 to 3 takes; results vary.',
-  ],
-  pitfalls: [
-    'Do not type the parentheses yourself: they would be doubled on the wire.',
-    'Very short test lines (under about 1 second of speech) sound weak.',
-    'Very long text drifts: split it into shorter pieces.',
-  ],
-  presets: [
-    ...OPEN_PRESETS,
-    { name: 'Cantonese neighbour', values: { gender: 'female', age: 'middle-aged', emotion: 'warm', dialect: '广东话' }, line: '今日天气好好，不如出去饮杯茶啦。' },
-  ],
-  tags: [],
-};
 
 const BREEZE = {
   label: 'Breeze-TTS-2',
@@ -332,9 +159,6 @@ const GENERIC = {
 };
 
 export const DESIGN_MODELS = {
-  'qwen3-tts-1.7b-voicedesign-mlx': QWEN,
-  'voxcpm2-8bit-mlx': VOX,
-  'omnivoice-bf16-mlx': OMNI,
   'breeze-tts-2-mlx': BREEZE,
   'breeze-tts-2-8bit-mlx': BREEZE,
   'breeze-tts-2-4bit-mlx': BREEZE,

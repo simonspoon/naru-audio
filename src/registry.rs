@@ -32,6 +32,27 @@ use manifest::{BPE_VOCAB, Catalog, Manifest};
 
 /// Written last into a staged model; its presence under `models/` means installed.
 pub const MANIFEST_JSON: &str = "manifest.json";
+
+/// Models removed from the catalog (naru task 2390), each with the kept
+/// model a default naming it falls back to. A pulled copy is left out of
+/// [`Registry::list`]; `rm` still removes it.
+pub const DROPPED: &[(&str, &str)] = &[
+    ("whisper-large-v3-turbo-mlx", "parakeet-tdt-0.6b-v2-mlx"),
+    ("qwen3-asr-0.6b-8bit-mlx", "parakeet-tdt-0.6b-v2-mlx"),
+    ("qwen3-asr-1.7b-4bit-mlx", "parakeet-tdt-0.6b-v2-mlx"),
+    ("qwen3-tts-0.6b-mlx", "qwen3-tts-0.6b-base-mlx"),
+    ("qwen3-tts-1.7b-voicedesign-mlx", "qwen3-tts-1.7b-base-mlx"),
+    ("chatterbox-tts-8bit-mlx", "qwen3-tts-1.7b-base-mlx"),
+    ("chatterbox-turbo-8bit-mlx", "qwen3-tts-1.7b-base-mlx"),
+    ("indextts-1.5-mlx", "qwen3-tts-1.7b-base-mlx"),
+    ("omnivoice-bf16-mlx", "qwen3-tts-1.7b-base-mlx"),
+    ("voxcpm2-8bit-mlx", "qwen3-tts-1.7b-base-mlx"),
+];
+
+pub fn dropped_replacement(model: &str) -> Option<&'static str> {
+    DROPPED.iter().find(|(d, _)| *d == model).map(|(_, r)| *r)
+}
+
 const CHUNK_SIZE: usize = 64 * 1024;
 
 #[derive(Debug)]
@@ -403,6 +424,9 @@ impl Registry {
         let mut entries = std::collections::BTreeMap::new();
         let mut unreadable = std::collections::BTreeSet::new();
         for name in self.pulled()? {
+            if dropped_replacement(&name).is_some() {
+                continue;
+            }
             let manifest = match self.pulled_manifest(&name) {
                 Ok(m) => m,
                 // Removed since `pulled()` looked.
