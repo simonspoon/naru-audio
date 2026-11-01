@@ -367,6 +367,13 @@ async fn listen(
             shared = member.changed() => {
                 if let Shared::State(seq, mode) = shared {
                     if mode != live.mode() {
+                        // The frames captured before the change are the old
+                        // mode's: heard as it would, then cut.
+                        while let Ok(samples) = frames.try_recv() {
+                            let fed = live.hear(samples);
+                            backlog.fetch_add(fed.len(), Ordering::SeqCst);
+                            let _ = input.send(Input::Audio(fed));
+                        }
                         let _ = input.send(Input::Flush);
                         live.set_mode(mode);
                     }

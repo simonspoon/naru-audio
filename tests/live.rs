@@ -1079,6 +1079,62 @@ async fn every_conversation_socket_gets_the_wake() {
     eprintln!("ran: control wake {on_ctl}");
 }
 
+// A mute keeps what was said before it (naru task 2508).
+
+/// `plain.wav`'s speech ends at ~2.7 s of its 2.82 s.
+const PLAIN_SPEECH_END: f64 = 2.7;
+
+/// The one utterance a live session makes of `before`, then a `muted`
+/// mode, then 1 s of silence.
+async fn muted_after(addr: &str, before: &[f32]) -> Vec<Value> {
+    let (mut ws, _) = ready(addr, json!({})).await;
+    send_audio(&mut ws, before).await;
+    ws.send(text(json!({"type": "mode", "mode": "muted"})))
+        .await
+        .unwrap();
+    send_audio(&mut ws, &[0.0f32; 16_000]).await;
+    let events = stop(&mut ws).await;
+    events
+        .into_iter()
+        .filter(|e| e["type"] == "utterance")
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mute_mid_utterance_keeps_what_was_said() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    // Muted at 2.0 s, in the middle of the second phrase.
+    let speech = samples("plain.wav");
+    let utterances = muted_after(&addr, &speech[..32_000]).await;
+    assert_eq!(utterances.len(), 1, "{utterances:?}");
+    let u = &utterances[0];
+    assert!(u["text"].as_str().is_some_and(|t| !t.is_empty()), "{u}");
+    assert!(u["end"].as_f64().unwrap() >= 1.9, "cut at the mute: {u}");
+    eprintln!("ran: mute mid-utterance {u}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mute_just_after_speech_keeps_the_whole_utterance() {
+    let Some(home) = model_home() else { return };
+    let addr = serve(home.path()).await;
+    let mut pcm = samples("plain.wav");
+    pcm.extend(vec![0.0f32; 16_000]);
+    let (mut ws, _) = ready(&addr, json!({})).await;
+    send_audio(&mut ws, &pcm).await;
+    let unmuted = next_of(&mut ws, "utterance").await;
+    stop(&mut ws).await;
+
+    // Muted ~200 ms after the speech ended, before the VAD closed it.
+    let mut speech = samples("plain.wav");
+    let upto = ((PLAIN_SPEECH_END + 0.2) * 16_000.0) as usize;
+    speech.resize(upto, 0.0);
+    let utterances = muted_after(&addr, &speech).await;
+    assert_eq!(utterances.len(), 1, "{utterances:?}");
+    assert_eq!(utterances[0]["text"], unmuted["text"], "{utterances:?}");
+    eprintln!("ran: mute after speech {}", utterances[0]);
+}
+
 // ---- the server's own listener (naru task 2372) ---------------------------
 // `POST /ambient` with the capture channel fed from wav fixtures, not a mic.
 
@@ -1263,6 +1319,41 @@ async fn a_member_playing_a_reply_shuts_the_server_listener() {
     let wake = next_of(&mut audio, "wake").await;
     eprintln!("ran: wake after playback {wake}");
     stop(&mut audio).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mute_keeps_the_server_listeners_buffered_speech() {
+    let Some(home) = model_home() else { return };
+    let (host, frames) = injected();
+    let addr = serve_with(home.path(), Some(host)).await;
+    let conv = "c-host-mute";
+    let (status, on) = http(
+        &addr,
+        "POST",
+        "/ambient",
+        Some(json!({"on": true, "conversation": conv})),
+    )
+    .await;
+    assert_eq!(status, 200, "{on}");
+    let (mut ctl, _) = control(&addr, conv, "live").await;
+    ctl.send(text(json!({"type": "mode", "mode": "live"})))
+        .await
+        .unwrap();
+    assert_eq!(next_of(&mut ctl, "state").await["mode"], "live");
+    // Let the listener take the state before the frames.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Muted the moment the mic has captured the line: its frames are still
+    // queued for the listener.
+    inject(&frames, &samples("plain.wav")).await;
+    ctl.send(text(json!({"type": "mode", "mode": "muted"})))
+        .await
+        .unwrap();
+    assert_eq!(next_of(&mut ctl, "state").await["mode"], "muted");
+    inject(&frames, &[0.0f32; 16_000]).await;
+    let u = next_of(&mut ctl, "utterance").await;
+    assert!(u["text"].as_str().is_some_and(|t| !t.is_empty()), "{u}");
+    assert!(u["end"].as_f64().unwrap() >= 2.5, "the whole line: {u}");
+    eprintln!("ran: host mute {u}");
 }
 
 // ---- voice library (naru task 2260) --------------------------------------

@@ -491,6 +491,10 @@ struct Live {
     ring: VecDeque<f32>,
     ring_start: usize,
     received: usize,
+    /// `received` when the mode went from live to muted: a segment ending by
+    /// then (the one the mute cut) is still the live conversation's (naru
+    /// task 2508).
+    live_until: Option<usize>,
     peak: f32,
     last_level: Instant,
     utterance: u64,
@@ -520,6 +524,7 @@ impl Live {
             ring: VecDeque::new(),
             ring_start: 0,
             received: 0,
+            live_until: None,
             peak: 0.0,
             last_level: Instant::now(),
             utterance: 0,
@@ -563,6 +568,11 @@ impl Live {
             // Back in ambient, the next wake word wakes again.
             let now = self.now_ms();
             self.ambient.end_conversation(now);
+        }
+        if mode != Mode::Muted {
+            self.live_until = None;
+        } else if self.mode() == Mode::Live {
+            self.live_until = Some(self.received);
         }
         let s = &mut self.state;
         s.live = mode != Mode::Idle;
@@ -1658,7 +1668,12 @@ async fn finish_segment(
         // Closes the partials the segment had.
         return vec![json!({"type": "partial", "segment": v["segment"], "text": ""})];
     }
-    let mode = live.mode();
+    // A segment heard live and finished by a mute is still live speech.
+    let muted_live = live.mode() == Mode::Muted
+        && live
+            .live_until
+            .is_some_and(|until| (end * RATE as f64).round() as usize <= until);
+    let mode = if muted_live { Mode::Live } else { live.mode() };
     // Backstop behind the frame-level check: a segment that is the
     // reference heard back, whatever its first 100 ms looked like.
     let echo = mode != Mode::Idle
@@ -1681,6 +1696,9 @@ async fn finish_segment(
         && end - start >= GUARD_MIN_SECONDS;
     let admitted = match mode {
         _ if echo => false,
+        Mode::Live if muted_live => {
+            live.state.segment_admitted(false) && (!guard || verdict.is_none_or(|d| d.is_him))
+        }
         Mode::Live => {
             live.state
                 .segment_fate(false, !guard || verdict.is_none_or(|d| d.is_him))
