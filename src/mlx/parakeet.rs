@@ -27,6 +27,8 @@ const BITS: i32 = 8;
 const CACHE_LIMIT: usize = 64 << 20;
 
 type Job = (Vec<f32>, mpsc::Sender<Result<String, String>>);
+/// The prediction net's LSTM state: per layer, `h` and `c`.
+type LstmState = (Vec<Array>, Vec<Array>);
 
 /// A loaded model on its MLX thread; dropping it stops the thread and frees
 /// the weights.
@@ -463,11 +465,7 @@ impl Model {
 
     /// One prediction-net step: the token (`None` before the first) and
     /// the LSTM state in, `[1, pred_hidden]` and the new state out.
-    fn predict(
-        &self,
-        token: Option<usize>,
-        state: Option<&(Vec<Array>, Vec<Array>)>,
-    ) -> R<(Array, (Vec<Array>, Vec<Array>))> {
+    fn predict(&self, token: Option<usize>, state: Option<&LstmState>) -> R<(Array, LstmState)> {
         let mut x = match token {
             Some(tk) => {
                 let idx = Array::from_slice(&[tk as i32], &[1]);

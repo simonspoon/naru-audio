@@ -961,7 +961,8 @@ mod tests {
         // declare that explicitly as an empty table — `Some(default())`,
         // not `None` — so a client can tell "TTS, nothing to declare"
         // apart from "not a TTS model".
-        for name in ["pocket-tts-int8"] {
+        {
+            let name = "pocket-tts-int8";
             let pf = cat.models[name].prompt_format().unwrap();
             assert_eq!(pf.style, None, "{name}");
             assert!(pf.inline.is_none(), "{name}");

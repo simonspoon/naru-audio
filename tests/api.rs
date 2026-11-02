@@ -32,6 +32,8 @@ const MLX: &[&str] = &[
     "qwen3-tts-0.6b-base-mlx",
     "qwen3-tts-1.7b-base-mlx",
 ];
+/// Built in, and listed on macOS only (its `platforms`), but not MLX.
+const SMART_TURN: &str = "smart-turn-v3.2";
 
 fn app(home: &Path) -> Router {
     let log = Arc::new(Logger::stderr());
@@ -160,7 +162,7 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
     let ids: Vec<&str> = data
         .iter()
         .map(|m| m["id"].as_str().unwrap())
-        .filter(|id| !MLX.contains(id))
+        .filter(|id| !MLX.contains(id) && *id != SMART_TURN)
         .collect();
     assert_eq!(
         ids,
@@ -172,7 +174,6 @@ async fn v1_models_entries_have_exactly_the_2_5_fields() {
             "parakeet-tdt-0.6b-v2-int8",
             "pocket-tts-int8",
             "silero-vad",
-            "smart-turn-v3.2",
             "source-separation-spleeter-2stems-int8",
             "speaker-diarization-en",
             "speaker-diarization-reverb-titanet",
@@ -431,7 +432,7 @@ async fn unreadable_manifest_json_is_skipped() {
         .unwrap()
         .iter()
         .map(|m| m["id"].as_str().unwrap())
-        .filter(|id| !MLX.contains(id))
+        .filter(|id| !MLX.contains(id) && *id != SMART_TURN)
         .collect();
     assert_eq!(
         ids,
@@ -442,7 +443,6 @@ async fn unreadable_manifest_json_is_skipped() {
             "parakeet-tdt-0.6b-v2-int8",
             "pocket-tts-int8",
             "silero-vad",
-            "smart-turn-v3.2",
             "source-separation-spleeter-2stems-int8",
             "speaker-diarization-en",
             "speaker-diarization-reverb-titanet",
