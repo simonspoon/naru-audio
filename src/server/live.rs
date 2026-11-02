@@ -1864,7 +1864,11 @@ async fn ambient_line(
         live.ambient
             .ingest(now, ambient_speaker(identity), text, similarity);
     // `ingest` may first have timed the conversation out, then judged the line in ambient.
-    let was = if output.events.iter().any(|e| e.kind == EventKind::ModeChanged) {
+    let was = if output
+        .events
+        .iter()
+        .any(|e| e.kind == EventKind::ModeChanged)
+    {
         machine::Mode::Ambient
     } else {
         was

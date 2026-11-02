@@ -140,34 +140,46 @@ struct Model {
 }
 
 fn int(v: &Value, what: &str) -> R<i64> {
-    v.as_i64().ok_or_else(|| format!("config.json: {what} is not an integer").into())
+    v.as_i64()
+        .ok_or_else(|| format!("config.json: {what} is not an integer").into())
 }
 
 impl Model {
     fn load(dir: &Path) -> R<Self> {
-        let cfg: Value =
-            serde_json::from_reader(std::fs::File::open(dir.join("config.json"))?)?;
+        let cfg: Value = serde_json::from_reader(std::fs::File::open(dir.join("config.json"))?)?;
         let pre = &cfg["preprocessor"];
         let enc = &cfg["encoder"];
         let pred = &cfg["decoder"]["prednet"];
         let sr = int(&pre["sample_rate"], "preprocessor.sample_rate")? as f64;
         let n_fft = int(&pre["n_fft"], "preprocessor.n_fft")? as usize;
         let n_mels = int(&pre["features"], "preprocessor.features")? as usize;
-        let win_s = pre["window_size"].as_f64().ok_or("config.json: preprocessor.window_size")?;
-        let hop_s = pre["window_stride"].as_f64().ok_or("config.json: preprocessor.window_stride")?;
+        let win_s = pre["window_size"]
+            .as_f64()
+            .ok_or("config.json: preprocessor.window_size")?;
+        let hop_s = pre["window_stride"]
+            .as_f64()
+            .ok_or("config.json: preprocessor.window_stride")?;
         let win = (win_s * sr).round() as usize;
         let hop = (hop_s * sr).round() as usize;
         let vocab: Vec<String> = cfg["joint"]["vocabulary"]
             .as_array()
             .ok_or("config.json: joint.vocabulary")?
             .iter()
-            .map(|v| v.as_str().map(str::to_string).ok_or("config.json: joint.vocabulary"))
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or("config.json: joint.vocabulary")
+            })
             .collect::<Result<_, _>>()?;
         let durations: Vec<usize> = cfg["decoding"]["durations"]
             .as_array()
             .ok_or("config.json: decoding.durations")?
             .iter()
-            .map(|v| v.as_u64().map(|d| d as usize).ok_or("config.json: decoding.durations"))
+            .map(|v| {
+                v.as_u64()
+                    .map(|d| d as usize)
+                    .ok_or("config.json: decoding.durations")
+            })
             .collect::<Result<_, _>>()?;
 
         // fp32 file -> bf16, Linear/Embedding (every 2-D `.weight`) quantized.
@@ -189,7 +201,9 @@ impl Model {
         mlx_rs::transforms::eval(w.values())?;
 
         let mut window: Vec<f32> = (0..win)
-            .map(|n| (0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / win as f64).cos()) as f32)
+            .map(|n| {
+                (0.5 - 0.5 * (2.0 * std::f64::consts::PI * n as f64 / win as f64).cos()) as f32
+            })
             .collect();
         window.resize(n_fft, 0.0);
         let fb = Array::from_slice(
@@ -200,12 +214,18 @@ impl Model {
             w,
             vocab,
             durations,
-            max_symbols: int(&cfg["decoding"]["greedy"]["max_symbols"], "decoding.greedy.max_symbols")? as usize,
+            max_symbols: int(
+                &cfg["decoding"]["greedy"]["max_symbols"],
+                "decoding.greedy.max_symbols",
+            )? as usize,
             d_model: int(&enc["d_model"], "encoder.d_model")? as i32,
             heads: int(&enc["n_heads"], "encoder.n_heads")? as i32,
             layers: int(&enc["n_layers"], "encoder.n_layers")? as usize,
             conv_pad: (int(&enc["conv_kernel_size"], "encoder.conv_kernel_size")? as i32 - 1) / 2,
-            sub_channels: int(&enc["subsampling_conv_channels"], "encoder.subsampling_conv_channels")? as i32,
+            sub_channels: int(
+                &enc["subsampling_conv_channels"],
+                "encoder.subsampling_conv_channels",
+            )? as i32,
             pred_hidden: int(&pred["pred_hidden"], "decoder.prednet.pred_hidden")? as i32,
             pred_layers: int(&pred["pred_rnn_layers"], "decoder.prednet.pred_rnn_layers")? as usize,
             hop,
@@ -217,7 +237,9 @@ impl Model {
     }
 
     fn g(&self, k: &str) -> R<&Array> {
-        self.w.get(k).ok_or_else(|| format!("missing weight {k}").into())
+        self.w
+            .get(k)
+            .ok_or_else(|| format!("missing weight {k}").into())
     }
 
     /// nn.QuantizedLinear with an optional bias.
@@ -301,7 +323,10 @@ impl Model {
                 None,
                 groups,
             )?;
-            Ok(ops::add(&y, self.g(&format!("encoder.pre_encode.conv.{i}.bias"))?)?)
+            Ok(ops::add(
+                &y,
+                self.g(&format!("encoder.pre_encode.conv.{i}.bias"))?,
+            )?)
         };
         let c = self.sub_channels;
         let x = nn::relu(conv(&x, 0, 2, 1, 1)?)?;
@@ -340,13 +365,17 @@ impl Model {
         let heads = |y: Array, len: i32| -> R<Array> {
             Ok(y.reshape(&[1, len, h, hd])?.transpose_axes(&[0, 2, 1, 3])?)
         };
-        let q = self.linear(x, &format!("{p}.linear_q"))?.reshape(&[1, t, h, hd])?;
+        let q = self
+            .linear(x, &format!("{p}.linear_q"))?
+            .reshape(&[1, t, h, hd])?;
         let k = heads(self.linear(x, &format!("{p}.linear_k"))?, t)?;
         let v = heads(self.linear(x, &format!("{p}.linear_v"))?, t)?;
         let pl = pos.shape()[1];
         let pp = heads(self.linear(pos, &format!("{p}.linear_pos"))?, pl)?;
-        let q_u = ops::add(&q, self.g(&format!("{p}.pos_bias_u"))?)?.transpose_axes(&[0, 2, 1, 3])?;
-        let q_v = ops::add(&q, self.g(&format!("{p}.pos_bias_v"))?)?.transpose_axes(&[0, 2, 1, 3])?;
+        let q_u =
+            ops::add(&q, self.g(&format!("{p}.pos_bias_u"))?)?.transpose_axes(&[0, 2, 1, 3])?;
+        let q_v =
+            ops::add(&q, self.g(&format!("{p}.pos_bias_v"))?)?.transpose_axes(&[0, 2, 1, 3])?;
         let scale = (hd as f32).powf(-0.5);
         let bd = ops::matmul(&q_v, pp.swap_axes(-2, -1)?)?; // [1, h, t, 2t-1]
         // rel_shift
@@ -368,17 +397,38 @@ impl Model {
 
     fn conv_module(&self, x: &Array, p: &str) -> R<Array> {
         let pad = self.conv_pad;
-        let x = ops::conv1d(x, self.g(&format!("{p}.pointwise_conv1.weight"))?, None, None, None, None)?;
+        let x = ops::conv1d(
+            x,
+            self.g(&format!("{p}.pointwise_conv1.weight"))?,
+            None,
+            None,
+            None,
+            None,
+        )?;
         let x = nn::glu(&x, 2)?;
         let x = ops::pad(&x, &[(0, 0), (pad, pad), (0, 0)][..], None, None)?;
-        let x = ops::conv1d(&x, self.g(&format!("{p}.depthwise_conv.weight"))?, None, None, None, self.d_model)?;
+        let x = ops::conv1d(
+            &x,
+            self.g(&format!("{p}.depthwise_conv.weight"))?,
+            None,
+            None,
+            None,
+            self.d_model,
+        )?;
         // BatchNorm, eval mode.
         let bn = |n: &str| self.g(&format!("{p}.batch_norm.{n}"));
         let inv = ops::rsqrt(ops::add(bn("running_var")?, Array::from_f32(1e-5))?)?;
         let x = ops::multiply(ops::subtract(&x, bn("running_mean")?)?, &inv)?;
         let x = ops::add(ops::multiply(&x, bn("weight")?)?, bn("bias")?)?;
         let x = nn::silu(&x)?;
-        Ok(ops::conv1d(&x, self.g(&format!("{p}.pointwise_conv2.weight"))?, None, None, None, None)?)
+        Ok(ops::conv1d(
+            &x,
+            self.g(&format!("{p}.pointwise_conv2.weight"))?,
+            None,
+            None,
+            None,
+            None,
+        )?)
     }
 
     fn encode(&self, mel: &Array) -> R<Array> {
@@ -387,12 +437,24 @@ impl Model {
         let half = Array::from_f32(0.5);
         for l in 0..self.layers {
             let p = format!("encoder.layers.{l}");
-            let h = self.ff(&self.layer_norm(&x, &format!("{p}.norm_feed_forward1"))?, &format!("{p}.feed_forward1"))?;
+            let h = self.ff(
+                &self.layer_norm(&x, &format!("{p}.norm_feed_forward1"))?,
+                &format!("{p}.feed_forward1"),
+            )?;
             x = ops::add(&x, ops::multiply(&h, &half)?)?;
             let xn = self.layer_norm(&x, &format!("{p}.norm_self_att"))?;
             x = ops::add(&x, self.attention(&xn, &pos, &format!("{p}.self_attn"))?)?;
-            x = ops::add(&x, self.conv_module(&self.layer_norm(&x, &format!("{p}.norm_conv"))?, &format!("{p}.conv"))?)?;
-            let h = self.ff(&self.layer_norm(&x, &format!("{p}.norm_feed_forward2"))?, &format!("{p}.feed_forward2"))?;
+            x = ops::add(
+                &x,
+                self.conv_module(
+                    &self.layer_norm(&x, &format!("{p}.norm_conv"))?,
+                    &format!("{p}.conv"),
+                )?,
+            )?;
+            let h = self.ff(
+                &self.layer_norm(&x, &format!("{p}.norm_feed_forward2"))?,
+                &format!("{p}.feed_forward2"),
+            )?;
             x = ops::add(&x, ops::multiply(&h, &half)?)?;
             x = self.layer_norm(&x, &format!("{p}.norm_out"))?;
         }
@@ -401,13 +463,23 @@ impl Model {
 
     /// One prediction-net step: the token (`None` before the first) and
     /// the LSTM state in, `[1, pred_hidden]` and the new state out.
-    fn predict(&self, token: Option<usize>, state: Option<&(Vec<Array>, Vec<Array>)>) -> R<(Array, (Vec<Array>, Vec<Array>))> {
+    fn predict(
+        &self,
+        token: Option<usize>,
+        state: Option<&(Vec<Array>, Vec<Array>)>,
+    ) -> R<(Array, (Vec<Array>, Vec<Array>))> {
         let mut x = match token {
             Some(tk) => {
                 let idx = Array::from_slice(&[tk as i32], &[1]);
-                let wq = self.g("decoder.prediction.embed.weight")?.take_axis(&idx, 0)?;
-                let s = self.g("decoder.prediction.embed.scales")?.take_axis(&idx, 0)?;
-                let b = self.g("decoder.prediction.embed.biases")?.take_axis(&idx, 0)?;
+                let wq = self
+                    .g("decoder.prediction.embed.weight")?
+                    .take_axis(&idx, 0)?;
+                let s = self
+                    .g("decoder.prediction.embed.scales")?
+                    .take_axis(&idx, 0)?;
+                let b = self
+                    .g("decoder.prediction.embed.biases")?
+                    .take_axis(&idx, 0)?;
                 dequantize(&wq, &s, &b, GROUP_SIZE, BITS)?
                     .as_dtype(Dtype::Float32)?
                     .reshape(&[1, self.pred_hidden])?
@@ -417,7 +489,13 @@ impl Model {
         let (mut hs, mut cs) = (vec![], vec![]);
         for l in 0..self.pred_layers {
             let p = format!("decoder.prediction.dec_rnn.lstm.{l}");
-            let mut g = ops::addmm(self.g(&format!("{p}.bias"))?, &x, self.g(&format!("{p}.Wx"))?.t(), None, None)?;
+            let mut g = ops::addmm(
+                self.g(&format!("{p}.bias"))?,
+                &x,
+                self.g(&format!("{p}.Wx"))?.t(),
+                None,
+                None,
+            )?;
             if let Some((h, _)) = state {
                 g = ops::addmm(&g, &h[l], self.g(&format!("{p}.Wh"))?.t(), None, None)?;
             }
@@ -498,12 +576,28 @@ fn slaney_mel_fb(sr: f64, n_fft: usize, n_mels: usize) -> Vec<f32> {
     let min_log_hz = 1000.0;
     let min_log_mel = min_log_hz / f_sp;
     let logstep = (6.4f64).ln() / 27.0;
-    let hz_to_mel = |f: f64| if f >= min_log_hz { min_log_mel + (f / min_log_hz).ln() / logstep } else { f / f_sp };
-    let mel_to_hz = |m: f64| if m >= min_log_mel { min_log_hz * ((m - min_log_mel) * logstep).exp() } else { f_sp * m };
+    let hz_to_mel = |f: f64| {
+        if f >= min_log_hz {
+            min_log_mel + (f / min_log_hz).ln() / logstep
+        } else {
+            f / f_sp
+        }
+    };
+    let mel_to_hz = |m: f64| {
+        if m >= min_log_mel {
+            min_log_hz * ((m - min_log_mel) * logstep).exp()
+        } else {
+            f_sp * m
+        }
+    };
     let n_bins = n_fft / 2 + 1;
-    let fft_f: Vec<f64> = (0..n_bins).map(|i| i as f64 * (sr / 2.0) / (n_bins - 1) as f64).collect();
+    let fft_f: Vec<f64> = (0..n_bins)
+        .map(|i| i as f64 * (sr / 2.0) / (n_bins - 1) as f64)
+        .collect();
     let (lo, hi) = (hz_to_mel(0.0), hz_to_mel(sr / 2.0));
-    let mel_f: Vec<f64> = (0..n_mels + 2).map(|i| mel_to_hz(lo + (hi - lo) * i as f64 / (n_mels + 1) as f64)).collect();
+    let mel_f: Vec<f64> = (0..n_mels + 2)
+        .map(|i| mel_to_hz(lo + (hi - lo) * i as f64 / (n_mels + 1) as f64))
+        .collect();
     let mut w = vec![0f32; n_mels * n_bins];
     for m in 0..n_mels {
         let enorm = 2.0 / (mel_f[m + 2] - mel_f[m]);
@@ -515,4 +609,3 @@ fn slaney_mel_fb(sr: f64, n_fft: usize, n_mels: usize) -> Vec<f32> {
     }
     w
 }
-

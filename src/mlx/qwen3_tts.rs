@@ -486,7 +486,10 @@ fn rope(q: &Array, k: &Array, cos: &Array, sin: &Array) -> R<(Array, Array)> {
         let x1 = x.index((.., .., .., ..half));
         let x2 = x.index((.., .., .., half..));
         let rh = ops::concatenate(&[ops::negative(&x2)?, x1], -1)?;
-        Ok(ops::add(ops::multiply(x, &cos)?, ops::multiply(&rh, &sin)?)?)
+        Ok(ops::add(
+            ops::multiply(x, &cos)?,
+            ops::multiply(&rh, &sin)?,
+        )?)
     };
     Ok((rot(q)?, rot(k)?))
 }
@@ -509,9 +512,7 @@ fn rope_cos_sin(
         let half = inv_freq.shape()[0];
         let inv = ops::broadcast_to(inv_freq.reshape(&[1, 1, half, 1])?, &[3, 1, half, 1])?;
         let pos = ops::broadcast_to(Array::from_slice(&pos, &[1, 1, 1, l]), &[3, 1, 1, l])?;
-        ops::matmul(&inv, &pos)?
-            .swap_axes(2, 3)?
-            .index((0, 0))
+        ops::matmul(&inv, &pos)?.swap_axes(2, 3)?.index((0, 0))
     } else {
         ops::multiply(Array::from_slice(&pos, &[l, 1]), inv_freq)?
     };
@@ -684,20 +685,38 @@ impl Model {
             let xn = w.rms(&h, &format!("{p}.input_layernorm"), st.eps)?;
             let q = w
                 .rms(
-                    &heads(&w.qlin(&xn, &format!("{p}.self_attn.q_proj"))?, 1, l, st.heads, HEAD_DIM)?,
+                    &heads(
+                        &w.qlin(&xn, &format!("{p}.self_attn.q_proj"))?,
+                        1,
+                        l,
+                        st.heads,
+                        HEAD_DIM,
+                    )?,
                     &format!("{p}.self_attn.q_norm"),
                     st.eps,
                 )?
                 .transpose_axes(&[0, 2, 1, 3])?;
             let k = w
                 .rms(
-                    &heads(&w.qlin(&xn, &format!("{p}.self_attn.k_proj"))?, 1, l, st.kv_heads, HEAD_DIM)?,
+                    &heads(
+                        &w.qlin(&xn, &format!("{p}.self_attn.k_proj"))?,
+                        1,
+                        l,
+                        st.kv_heads,
+                        HEAD_DIM,
+                    )?,
                     &format!("{p}.self_attn.k_norm"),
                     st.eps,
                 )?
                 .transpose_axes(&[0, 2, 1, 3])?;
-            let v = heads(&w.qlin(&xn, &format!("{p}.self_attn.v_proj"))?, 1, l, st.kv_heads, HEAD_DIM)?
-                .transpose_axes(&[0, 2, 1, 3])?;
+            let v = heads(
+                &w.qlin(&xn, &format!("{p}.self_attn.v_proj"))?,
+                1,
+                l,
+                st.kv_heads,
+                HEAD_DIM,
+            )?
+            .transpose_axes(&[0, 2, 1, 3])?;
             let (q, k) = rope(&q, &k, &cos, &sin)?;
             let (k, v) = layer_cache.update(k, v)?;
             let o = match &mask {
@@ -719,7 +738,10 @@ impl Model {
             let xn = w.rms(&hh, &format!("{p}.post_attention_layernorm"), st.eps)?;
             let g = w.qlin(&xn, &format!("{p}.mlp.gate_proj"))?;
             let u = w.qlin(&xn, &format!("{p}.mlp.up_proj"))?;
-            h = ops::add(&hh, w.qlin(&swiglu(&g, &u)?, &format!("{p}.mlp.down_proj"))?)?;
+            h = ops::add(
+                &hh,
+                w.qlin(&swiglu(&g, &u)?, &format!("{p}.mlp.down_proj"))?,
+            )?;
         }
         w.rms(&h, &format!("{}.norm", st.prefix), st.eps)
     }
@@ -779,7 +801,10 @@ impl Model {
         // codec_bos, then the sum of every codebook's embedding of the ref codes.
         let mut ref_embed = self.codec_emb(&codes.index((.., .., 0)))?;
         for i in 0..NCB - 1 {
-            ref_embed = ops::add(&ref_embed, self.cp_emb(i, &codes.index((.., .., (i + 1) as i32)))?)?;
+            ref_embed = ops::add(
+                &ref_embed,
+                self.cp_emb(i, &codes.index((.., .., (i + 1) as i32)))?,
+            )?;
         }
         let one = |id: i32| Array::from_slice(&[id], &[1, 1]);
         let codec_icl = ops::concatenate(&[self.codec_emb(&one(c.codec_bos))?, ref_embed], 1)?;
@@ -788,8 +813,14 @@ impl Model {
         let codec_pad = self.codec_emb(&one(c.codec_pad))?;
         let icl = ops::concatenate(
             &[
-                ops::add(&text_embed, ops::broadcast_to(&codec_pad, &[1, text_lens, hidden])?)?,
-                ops::add(&codec_icl, ops::broadcast_to(&tts_pad, &[1, codec_lens, hidden])?)?,
+                ops::add(
+                    &text_embed,
+                    ops::broadcast_to(&codec_pad, &[1, text_lens, hidden])?,
+                )?,
+                ops::add(
+                    &codec_icl,
+                    ops::broadcast_to(&tts_pad, &[1, codec_lens, hidden])?,
+                )?,
             ],
             1,
         )?;
@@ -875,7 +906,9 @@ impl Model {
             logits,
             p,
             p.repetition_penalty.max(ICL_REPETITION_PENALTY),
-            recent, Some(&xs.suppress))?;
+            recent,
+            Some(&xs.suppress),
+        )?;
         let mut codes = vec![first];
         let st = self.cp_stack();
         let mut cache = caches(st.layers);
@@ -887,7 +920,8 @@ impl Model {
                 self.cp_emb(step - 1, &codes[step])?
             };
             let input = if self.mtp_projection {
-                self.w.qlin(&input, "talker.code_predictor.small_to_mtp_projection")?
+                self.w
+                    .qlin(&input, "talker.code_predictor.small_to_mtp_projection")?
             } else {
                 input
             };
@@ -949,7 +983,10 @@ impl Model {
                 if !keep(prev, &mut frames)? {
                     break;
                 }
-                if !emit(self.codec.decode_frames(decoder, &std::mem::take(&mut frames))?) {
+                if !emit(
+                    self.codec
+                        .decode_frames(decoder, &std::mem::take(&mut frames))?,
+                ) {
                     return Ok(false);
                 }
             }
@@ -1019,7 +1056,9 @@ impl GenConsts {
     fn new(m: &Model) -> R<Self> {
         let c = &m.cfg;
         let tts = m.text_proj(&[c.tts_bos, c.tts_eos, c.tts_pad])?;
-        let ids: Vec<i32> = (c.vocab - 1024..c.vocab).filter(|&i| i != c.codec_eos).collect();
+        let ids: Vec<i32> = (c.vocab - 1024..c.vocab)
+            .filter(|&i| i != c.codec_eos)
+            .collect();
         Ok(GenConsts {
             tts_pad: tts.index((.., 2..3, ..)),
             suppress: Array::from_slice(&ids, &[1, ids.len() as i32]),
@@ -1039,7 +1078,12 @@ fn log_softmax(x: &Array) -> R<Array> {
 /// with `key`, split off the random state as each Python draw does.
 fn categorical(logits: &Array, key: &Array) -> R<Array> {
     let one = s(1.0, logits)?;
-    Ok(random::categorical(ops::multiply(logits, &one)?, None, None, key)?)
+    Ok(random::categorical(
+        ops::multiply(logits, &one)?,
+        None,
+        None,
+        key,
+    )?)
 }
 
 /// `apply_top_p`: keep the tokens whose cumulative probability, summed from
@@ -1182,8 +1226,11 @@ impl Model {
         if let Some(st) = self.primed.borrow().get(&key) {
             return Ok(st.clone());
         }
-        let frames: Vec<Vec<i32>> =
-            c.as_slice::<i32>().chunks(NCB).map(<[i32]>::to_vec).collect();
+        let frames: Vec<Vec<i32>> = c
+            .as_slice::<i32>()
+            .chunks(NCB)
+            .map(<[i32]>::to_vec)
+            .collect();
         let mut st = CodecState::new();
         self.codec.decode_frames(&mut st, &frames)?;
         st.detach()?;
@@ -1340,7 +1387,11 @@ mod tests {
             ("", &[""], &[]),
             ("   ", &["   "], &["   "]),
             ("a.b.c. d", &["a.b.c. d"], &["a.b.c. d"]),
-            ("End with newline\n", &["End with newline"], &["End with newline"]),
+            (
+                "End with newline\n",
+                &["End with newline"],
+                &["End with newline"],
+            ),
             (
                 "Line one\nline two is a little longer than twelve.\nshort",
                 &["Line one line two is a little longer than twelve. short"],

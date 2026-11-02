@@ -86,8 +86,8 @@ impl Checkin {
         let _ = self.task.await;
         if self.reported.lock().unwrap().is_some() {
             let url = format!("{}/api/live/route", self.url);
-            let _ = tokio::task::spawn_blocking(move || post(&url, &json!({ "ambient": null })))
-                .await;
+            let _ =
+                tokio::task::spawn_blocking(move || post(&url, &json!({ "ambient": null }))).await;
         }
     }
 }

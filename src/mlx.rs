@@ -3,9 +3,9 @@
 //! `config.toml` (§3.1) they read.
 
 pub mod breeze;
-pub mod qwen3_tts;
 pub mod native;
 pub mod parakeet;
+pub mod qwen3_tts;
 
 use std::path::Path;
 

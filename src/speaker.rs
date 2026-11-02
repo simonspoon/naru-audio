@@ -1204,12 +1204,19 @@ mod tests {
         assert!(lib.owner_ready(DEFAULT_MODEL));
         // a library already on the model is left alone
         let mut again = lib.clone();
-        assert!(!again.reembed(h, |_| Err(SpeakerError::EmbedFailed)).unwrap());
+        assert!(
+            !again
+                .reembed(h, |_| Err(SpeakerError::EmbedFailed))
+                .unwrap()
+        );
         // one with no audio at all is kept, not emptied
         again.model = "wespeaker-sv-en".into();
         again.people[0].clips[0].has_audio = false;
         assert!(!again.reembed(h, embed).unwrap());
-        assert_eq!((again.model.as_str(), again.people[0].clips.len()), ("wespeaker-sv-en", 1));
+        assert_eq!(
+            (again.model.as_str(), again.people[0].clips.len()),
+            ("wespeaker-sv-en", 1)
+        );
     }
 
     #[test]

@@ -170,7 +170,10 @@ fn a_clip_just_past_two_seconds_embeds_like_one_just_under() {
             &v.embed(&a[..long]).expect("embed"),
             &v.embed(&b[..long]).expect("embed"),
         );
-        assert!(same > 0.9 && other < DEFAULT_THRESHOLD, "{long}: {same} {other}");
+        assert!(
+            same > 0.9 && other < DEFAULT_THRESHOLD,
+            "{long}: {same} {other}"
+        );
     }
 }
 

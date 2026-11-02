@@ -490,11 +490,7 @@ pub(super) enum Quant {
 
 impl Quant {
     /// The mode, group size and bits mlx-c takes, and the biases, if any.
-    fn args<'a>(
-        self,
-        w: &'a Weights,
-        p: &str,
-    ) -> R<(CString, i32, i32, Option<&'a Array>)> {
+    fn args<'a>(self, w: &'a Weights, p: &str) -> R<(CString, i32, i32, Option<&'a Array>)> {
         Ok(match self {
             Quant::Mxfp8 => (CString::new("mxfp8")?, 32, 8, None),
             Quant::Affine { group, bits } => (
@@ -1260,7 +1256,6 @@ impl Model {
         )?;
         Ok(e.sum_axis(-2, None)?)
     }
-
 }
 
 impl Codec {
@@ -1633,7 +1628,6 @@ impl Codec {
         a.eval()?;
         Ok(a.as_slice::<f32>().to_vec())
     }
-
 }
 
 impl Model {

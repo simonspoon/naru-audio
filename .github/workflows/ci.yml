@@ -20,6 +20,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # sherpa-onnx-sys's build.rs extracts its prebuilt libs into
+      # target/sherpa-onnx-prebuilt, which rust-cache's cleanup empties before
+      # saving, while it keeps the build script's output. Drop the crate's
+      # fingerprints so build.rs reruns and fetches the libs again; otherwise a
+      # partial cache hit recompiles it with no library to link.
+      - name: Refetch sherpa-onnx prebuilts
+        shell: bash
+        run: rm -rf target/*/.fingerprint/sherpa-onnx-sys-*
+
       # MLX (aarch64 macOS only) compiles its Metal kernels from source: it
       # needs CMake and the Metal toolchain, a separate download since Xcode 26.
       - name: Install Metal toolchain
@@ -50,6 +59,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      # sherpa-onnx-sys's build.rs extracts its prebuilt libs into
+      # target/sherpa-onnx-prebuilt, which rust-cache's cleanup empties before
+      # saving, while it keeps the build script's output. Drop the crate's
+      # fingerprints so build.rs reruns and fetches the libs again; otherwise a
+      # partial cache hit recompiles it with no library to link.
+      - name: Refetch sherpa-onnx prebuilts
+        shell: bash
+        run: rm -rf target/*/.fingerprint/sherpa-onnx-sys-*
 
       - name: Build
         run: cargo build

@@ -331,7 +331,9 @@ async fn main() -> ExitCode {
     let checkin = match naru_url {
         Ok(url) => Some(server::checkin(state.clone(), url)),
         Err(e) => {
-            state.log.line("warn", None, &format!("naru_checkin_off {e}"));
+            state
+                .log
+                .line("warn", None, &format!("naru_checkin_off {e}"));
             None
         }
     };
