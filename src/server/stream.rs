@@ -32,6 +32,7 @@ use super::{AppState, RequestId, manager_error};
 use crate::error::ApiError;
 use crate::log::Logger;
 use crate::manager::{Guard, KeepAlive};
+use crate::speaker;
 use crate::stt::audio::TARGET_SAMPLE_RATE;
 use crate::stt::hallucination;
 use crate::stt::vad::{MAX_SPEECH_SECONDS, Segmenter, Span, Vad};
@@ -63,6 +64,21 @@ const VAD_WINDOW: usize = 512;
 /// sherpa-onnx starts a span this far, plus `min_speech`, before the
 /// window that detected it.
 const DETECT_LAG: usize = 2 * VAD_WINDOW;
+
+/// The VAD hears each window boosted by `speaker::level_utterance`'s rule
+/// over this many recent windows (~2 s), so Silero opens on quiet speech
+/// (naru task 2617). The ring keeps the raw samples.
+const VAD_LEVEL_WINDOWS: usize = 63;
+
+/// The VAD's boost lifts speech only to here, where Silero already opens on
+/// it (task 2415: -37 dBFS lost no utterance), so audio this loud or louder
+/// reaches the VAD as it did before; the decode levels to
+/// `speaker::TARGET_DBFS` on its own.
+const VAD_TARGET_DBFS: f32 = -35.0;
+
+/// A window whose mean square is at most this (-100 dBFS) is digital
+/// silence, left out of the VAD's level history.
+const DIGITAL_SILENCE_MS: f32 = 1e-10;
 
 /// `max_segment` cuts at the quietest point of this trailing stretch.
 const CUT_SEARCH: usize = RATE;
@@ -708,6 +724,11 @@ pub(super) struct Segments {
     /// A closed span the detector called unfinished: not queued, waiting for
     /// the speech that finishes it or for [`HOLD_CAP`].
     pending: Option<Pending>,
+    /// The last [`VAD_LEVEL_WINDOWS`] windows' levels, dBFS.
+    levels: VecDeque<f32>,
+    /// The VAD's boost, dB: held at its highest while a span is open, so
+    /// a long quiet utterance is not dropped back to its raw level midway.
+    vad_gain_db: f32,
 }
 
 /// A held span `start..end`, queued by `deadline` if no speech has joined it.
@@ -744,6 +765,8 @@ impl Segments {
             backlog,
             turn: None,
             pending: None,
+            levels: VecDeque::new(),
+            vad_gain_db: 0.0,
         }
     }
 
@@ -768,7 +791,7 @@ impl Segments {
         for window in samples.chunks(VAD_WINDOW) {
             self.ring.extend(window);
             self.received += window.len();
-            segmenter.accept(window);
+            segmenter.accept(&self.boost(window));
             while let Some(span) = segmenter.next_span() {
                 self.close(span);
             }
@@ -789,6 +812,41 @@ impl Segments {
             self.ring.drain(..keep - self.ring_start);
             self.ring_start = keep;
         }
+    }
+
+    /// `window` as the VAD hears it: raised toward [`VAD_TARGET_DBFS`] by
+    /// the level rule over the recent windows (held while a span is open),
+    /// never lowered, and never past the peak ceiling.
+    fn boost(&mut self, window: &[f32]) -> Vec<f32> {
+        let ms = window.iter().map(|s| s * s).sum::<f32>() / window.len().max(1) as f32;
+        // Digital silence (live's shut gate and echo frames are zeros) is
+        // no noise floor: counted, clicks over it would read as speech.
+        if ms > DIGITAL_SILENCE_MS {
+            if self.levels.len() == VAD_LEVEL_WINDOWS {
+                self.levels.pop_front();
+            }
+            self.levels.push_back(10.0 * ms.log10());
+        }
+        let mut sorted: Vec<f32> = self.levels.iter().copied().collect();
+        sorted.sort_by(f32::total_cmp);
+        let at = |q: f32| sorted[(q * (sorted.len() - 1) as f32) as usize];
+        let rule = match sorted.is_empty() {
+            true => 0.0,
+            false if at(0.9) - at(0.1) < speaker::UTTERANCE_MIN_SPREAD_DB => 0.0,
+            false => (VAD_TARGET_DBFS - at(0.9)).min(speaker::UTTERANCE_MAX_GAIN_DB),
+        };
+        self.vad_gain_db = if self.open.is_some() {
+            rule.max(self.vad_gain_db)
+        } else {
+            rule
+        };
+        let peak = window.iter().fold(0f32, |m, s| m.max(s.abs()));
+        let gain_db = self
+            .vad_gain_db
+            .min(speaker::PEAK_CEILING_DBFS - 20.0 * peak.max(1e-12).log10())
+            .max(0.0);
+        let gain = 10f32.powf(gain_db / 20.0);
+        window.iter().map(|s| s * gain).collect()
     }
 
     /// Cuts an open segment that has reached `max_segment`, and queues a
@@ -1017,15 +1075,16 @@ fn decode_with(
                 (pcm, start, end, hotwords)
             }
             Job::Partial {
-                pcm,
+                mut pcm,
                 start,
                 hotwords,
             } => {
                 // Anything queued after it means its segment has closed:
                 // the final is next, and replaces it.
-                let result = jobs
-                    .is_empty()
-                    .then(|| stt.decode(&pcm, hotwords.as_deref(), Some(&vad)));
+                let result = jobs.is_empty().then(|| {
+                    speaker::level_utterance(&mut pcm);
+                    stt.decode(&pcm, hotwords.as_deref(), Some(&vad))
+                });
                 busy.store(false, Ordering::SeqCst);
                 let text = match result {
                     None => continue,
@@ -1053,7 +1112,11 @@ fn decode_with(
             }
         };
         let started = Instant::now();
-        let result = stt.decode(&pcm, hotwords.as_deref(), Some(&vad));
+        // The speech gate and the recognizer hear it leveled (naru task
+        // 2617); the hallucination check below judges its own level.
+        let mut leveled = pcm.clone();
+        speaker::level_utterance(&mut leveled);
+        let result = stt.decode(&leveled, hotwords.as_deref(), Some(&vad));
         backlog.fetch_sub(pcm.len(), Ordering::SeqCst);
         let text = match result {
             Ok(segments) => join(&segments),
@@ -1139,6 +1202,59 @@ mod tests {
         );
         segments.open = Some(cfg.pad);
         (segments, rx, busy)
+    }
+
+    /// The VAD hears quiet speech raised toward [`VAD_TARGET_DBFS`], and
+    /// silence, clicks over silence or louder audio as they are (naru task 2617).
+    #[test]
+    fn the_vad_hears_quiet_speech_boosted_and_silence_as_is() {
+        let (mut s, _jobs, _busy) = open_segment(false);
+        s.open = None;
+        let silence = vec![0.0; VAD_WINDOW];
+        for _ in 0..VAD_LEVEL_WINDOWS {
+            assert_eq!(s.boost(&silence), silence);
+        }
+        // a -50 dBFS tone in alternate 4-window bursts over a -70 floor
+        let window = |on: bool, k: usize| -> Vec<f32> {
+            (0..VAD_WINDOW)
+                .map(|i| {
+                    let floor = 3e-4 * if (i + k).is_multiple_of(2) { 1.0 } else { -1.0 };
+                    let tone = (i as f32 * 0.3).sin() * 10f32.powf(-50.0 / 20.0) * 2f32.sqrt();
+                    floor + if on { tone } else { 0.0 }
+                })
+                .collect()
+        };
+        let mut gain = 0.0;
+        for k in 0..2 * VAD_LEVEL_WINDOWS {
+            let w = window((k / 4) % 2 == 0, k);
+            let out = s.boost(&w);
+            gain = 20.0 * (out[1] / w[1]).abs().log10();
+        }
+        assert!((gain - 15.0).abs() < 0.1, "gain {gain}");
+        // held while a span is open, though the window is all floor now
+        s.open = Some(s.received);
+        let quiet = window(false, 0);
+        for _ in 0..VAD_LEVEL_WINDOWS {
+            let out = s.boost(&quiet);
+            let held = 20.0 * (out[0] / quiet[0]).abs().log10();
+            assert!((held - gain).abs() < 0.01, "held {held} gain {gain}");
+        }
+        s.open = None;
+        assert_eq!(s.boost(&quiet), quiet);
+
+        // clicks over digital silence: the zeros are no floor
+        let (mut s, _jobs, _busy) = open_segment(false);
+        s.open = None;
+        let mut click = vec![0.0; VAD_WINDOW];
+        click[0] = 0.07;
+        for k in 0..2 * VAD_LEVEL_WINDOWS {
+            let w = if k % 8 == 0 {
+                click.clone()
+            } else {
+                silence.clone()
+            };
+            assert_eq!(s.boost(&w), w);
+        }
     }
 
     /// Feeds `windows` VAD windows of the open segment, as `push` does;

@@ -1916,7 +1916,9 @@ async fn ambient_line(
 /// "him".
 async fn score(st: &Arc<AppState>, live: &mut Live, start: f64, end: f64) -> Option<Identity> {
     let library = live.library.clone();
-    let pcm = live.clip(start, end)?;
+    let mut pcm = live.clip(start, end)?;
+    // Scored at the level its enrolled clips were (naru task 2617).
+    speaker::level_utterance(&mut pcm);
     if live.verifier.is_none() && !live.verifier_tried && pcm.len() >= speaker::MIN_SAMPLES {
         live.verifier_tried = true;
         let st2 = st.clone();

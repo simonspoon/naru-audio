@@ -533,6 +533,42 @@ impl std::fmt::Display for TooQuiet {
 /// [`MAX_GAIN_DB`] or the speech sits too near the noise floor (the 10th
 /// percentile).
 pub fn normalize_level(pcm: &mut [f32]) -> Result<f32, TooQuiet> {
+    let (speech_dbfs, floor_dbfs) = speech_and_floor(pcm);
+    if TARGET_DBFS - speech_dbfs > MAX_GAIN_DB
+        || speech_dbfs - floor_dbfs < MIN_SPEECH_OVER_FLOOR_DB
+    {
+        return Err(TooQuiet {
+            speech_dbfs,
+            floor_dbfs,
+        });
+    }
+    Ok(scale_to_target(pcm, TARGET_DBFS - speech_dbfs))
+}
+
+/// Most gain [`level_utterance`] gives a live utterance (naru task 2617).
+pub const UTTERANCE_MAX_GAIN_DB: f32 = 30.0;
+/// [`level_utterance`] leaves alone audio whose loud blocks sit less than this
+/// over its quiet ones: digital silence and steady noise, which the energy
+/// gate should still see at their own level.
+pub const UTTERANCE_MIN_SPREAD_DB: f32 = 6.0;
+
+/// Scales one live utterance (a VAD-closed segment or a partial window) the
+/// way [`normalize_level`] scales an enrollment clip, so the speech gate, the
+/// recognizer and speaker scoring hear quiet speech at [`TARGET_DBFS`] (naru
+/// task 2617). Never refuses: the gain is capped at
+/// [`UTTERANCE_MAX_GAIN_DB`], and audio with no level spread is left as is.
+/// Returns the gain applied in dB.
+pub fn level_utterance(pcm: &mut [f32]) -> f32 {
+    let (speech_dbfs, floor_dbfs) = speech_and_floor(pcm);
+    if speech_dbfs - floor_dbfs < UTTERANCE_MIN_SPREAD_DB {
+        return 0.0;
+    }
+    scale_to_target(pcm, (TARGET_DBFS - speech_dbfs).min(UTTERANCE_MAX_GAIN_DB))
+}
+
+/// The 90th (speech) and 10th (floor) percentiles of `pcm`'s 50 ms block
+/// levels, in dBFS.
+fn speech_and_floor(pcm: &[f32]) -> (f32, f32) {
     let mut levels: Vec<f32> = pcm
         .as_chunks::<LEVEL_BLOCK>()
         .0
@@ -547,23 +583,20 @@ pub fn normalize_level(pcm: &mut [f32]) -> Result<f32, TooQuiet> {
     }
     levels.sort_by(f32::total_cmp);
     let at = |q: f32| levels[(q * (levels.len() - 1) as f32) as usize];
-    let (speech_dbfs, floor_dbfs) = (at(0.9), at(0.1));
-    if TARGET_DBFS - speech_dbfs > MAX_GAIN_DB
-        || speech_dbfs - floor_dbfs < MIN_SPEECH_OVER_FLOOR_DB
-    {
-        return Err(TooQuiet {
-            speech_dbfs,
-            floor_dbfs,
-        });
-    }
+    (at(0.9), at(0.1))
+}
+
+/// Scales `pcm` by `gain_db`, less if that would put a sample over
+/// [`PEAK_CEILING_DBFS`]; the gain applied.
+fn scale_to_target(pcm: &mut [f32], gain_db: f32) -> f32 {
     let peak = pcm.iter().fold(0f32, |m, s| m.max(s.abs()));
     let peak_dbfs = 20.0 * peak.max(1e-12).log10();
-    let gain_db = (TARGET_DBFS - speech_dbfs).min(PEAK_CEILING_DBFS - peak_dbfs);
+    let gain_db = gain_db.min(PEAK_CEILING_DBFS - peak_dbfs);
     let gain = 10f32.powf(gain_db / 20.0);
     for s in pcm.iter_mut() {
         *s *= gain;
     }
-    Ok(gain_db)
+    gain_db
 }
 
 /// A clip WAV as [`write_wav`] wrote it.
@@ -904,6 +937,39 @@ mod tests {
             "{e:?}"
         );
         assert!(e.to_string().contains("somewhere quieter"));
+    }
+
+    #[test]
+    fn level_utterance_brings_quiet_speech_up() {
+        let mut pcm = speechlike(-45.0, 1e-5);
+        let gain = level_utterance(&mut pcm);
+        let (speech, peak) = speech_and_peak(&pcm);
+        assert!((gain - 25.0).abs() < 0.5, "gain {gain}");
+        assert!((speech - TARGET_DBFS).abs() < 0.5, "speech {speech}");
+        assert!(peak <= PEAK_CEILING_DBFS + 1e-3, "peak {peak}");
+    }
+
+    #[test]
+    fn level_utterance_caps_the_gain() {
+        let mut pcm = speechlike(-60.0, 1e-6);
+        let gain = level_utterance(&mut pcm);
+        assert!((gain - UTTERANCE_MAX_GAIN_DB).abs() < 1e-3, "gain {gain}");
+    }
+
+    #[test]
+    fn level_utterance_leaves_silence_and_steady_noise_alone() {
+        let mut silence = vec![0.0; 16_000];
+        assert_eq!(level_utterance(&mut silence), 0.0);
+        assert!(silence.iter().all(|&s| s == 0.0));
+        // no speech, just the noise floor
+        let mut noise = speechlike(-120.0, 1e-3);
+        let before = noise.clone();
+        assert_eq!(level_utterance(&mut noise), 0.0);
+        assert_eq!(noise, before);
+        // even a full-scale one: left alone is not held to the peak ceiling
+        let mut click = vec![1.0];
+        assert_eq!(level_utterance(&mut click), 0.0);
+        assert_eq!(click, [1.0]);
     }
 
     #[test]
