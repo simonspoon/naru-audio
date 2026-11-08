@@ -98,6 +98,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/audio/live", get(live::live))
         .route("/ambient", get(host::status).post(host::switch))
         .route("/ambient/log", get(host::log))
+        .route("/ambient/wake-check", post(host::wake_check))
         .route(
             "/v1/audio/speaker/enroll",
             post(speaker::enroll).layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),
@@ -1057,6 +1058,29 @@ mod tests {
         assert_eq!(err["type"], "invalid_request_error");
         assert!(err["message"].as_str().is_some_and(|m| !m.is_empty()));
         assert!(err.get("param").is_some());
+    }
+
+    #[tokio::test]
+    async fn wake_check_route() {
+        let post = |body: &str| {
+            Request::post("/ambient/wake-check")
+                .header(HOST, "127.0.0.1:7870")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        let (status, _, body) = send(
+            app(false),
+            post(r#"{"text":"Naru, hi","wake_words":["Naru"]}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (&body["wake"], &body["match"]),
+            (&true.into(), &"exact".into())
+        );
+        let (status, _, _) = send(app(false), post(r#"{"text":"  "}"#)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

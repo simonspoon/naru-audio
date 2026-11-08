@@ -196,6 +196,74 @@ pub(in crate::server) async fn log(
     Ok(Json(json!({ "events": events })))
 }
 
+/// `POST /ambient/wake-check {"text","wake_words"?}`: stateless; would this
+/// install's ambient listener wake on that one utterance? Needs no mic.
+pub(in crate::server) async fn wake_check(body: Bytes) -> Result<Json<Value>, ApiError> {
+    let invalid = |status: StatusCode, message: &str| {
+        ApiError::new(status, "invalid_request", message.to_string())
+    };
+    let body: Value = serde_json::from_slice(&body)
+        .map_err(|_| invalid(StatusCode::BAD_REQUEST, "the body must be a JSON object"))?;
+    let text = body.get("text").and_then(Value::as_str).unwrap_or("");
+    if text.trim().is_empty() {
+        return Err(invalid(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "\"text\" must be a non-blank string",
+        ));
+    }
+    let words = match body.get("wake_words") {
+        None | Some(Value::Null) => wake_words(),
+        Some(v) => serde_json::from_value::<Vec<String>>(v.clone()).map_err(|_| {
+            invalid(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "\"wake_words\" must be an array of strings",
+            )
+        })?,
+    };
+    Ok(Json(wake_verdict(text, &words)))
+}
+
+/// Whether an untagged line `text` wakes on `words` (as `ingest_line` decides:
+/// a line-initial wake phrase, else a sound-alike), and why.
+fn wake_verdict(text: &str, words: &[String]) -> Value {
+    use crate::ambient::machine::phrases;
+    let wake = phrases::wake_phrases(words);
+    let nearest = phrases::nearest_wake_word(text, &wake)
+        .map(|(word, distance)| json!({"word": word, "distance": distance}));
+    let (wake_up, kind, word, distance, reason) = if phrases::wake_remainder(text, &wake).is_some()
+    {
+        // The configured word whose own phrases match.
+        let word = words
+            .iter()
+            .find(|w| {
+                phrases::wake_remainder(text, &phrases::wake_phrases(std::slice::from_ref(w)))
+                    .is_some()
+            })
+            .or(words.first())
+            .cloned();
+        (true, Some("exact"), word, None, "matched")
+    } else if let Some((word, distance, _)) = phrases::sound_alike(text, &wake) {
+        (
+            true,
+            Some("sound_alike"),
+            Some(word),
+            Some(distance),
+            "sound-alike",
+        )
+    } else {
+        let reason = if wake.is_empty() {
+            "no wake words"
+        } else if phrases::wake_anywhere(text, &wake) {
+            "not line-initial"
+        } else {
+            "no match"
+        };
+        (false, None, None, None, reason)
+    };
+    json!({"wake": wake_up, "match": kind, "word": word, "distance": distance,
+           "reason": reason, "nearest": nearest})
+}
+
 /// `POST /ambient {"on":true|false,"conversation"?}`: switches the listener;
 /// answers as `GET /ambient`. On while on (in any conversation) changes
 /// nothing.
@@ -393,4 +461,57 @@ async fn listen(
         .line("warn", None, &format!("ambient_listener_end reason={why}"));
     // Not left recording while `GET /ambient` says off.
     close(&mic).await;
+}
+
+#[cfg(test)]
+mod wake_verdict_tests {
+    use super::wake_verdict;
+
+    fn check(text: &str, words: &[&str]) -> serde_json::Value {
+        let words: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+        wake_verdict(text, &words)
+    }
+
+    #[test]
+    fn exact() {
+        let v = check("Naru, what time is it", &["Naru"]);
+        assert_eq!(v["wake"], true);
+        assert_eq!(v["match"], "exact");
+        assert_eq!(v["word"], "Naru");
+        assert_eq!(v["reason"], "matched");
+        assert!(v["distance"].is_null());
+    }
+
+    #[test]
+    fn sound_alike() {
+        let v = check("Hey Naro, what time is it", &["Naru"]);
+        assert_eq!(v["wake"], true, "{v}");
+        assert_eq!(v["match"], "sound_alike");
+        assert_eq!(v["reason"], "sound-alike");
+        assert!(v["distance"].is_number());
+        assert!(v["word"].is_string());
+    }
+
+    #[test]
+    fn custom_list_does_not_wake_on_default() {
+        let v = check("Hey Naru", &["Jarvis"]);
+        assert_eq!(v["wake"], false);
+        assert_eq!(v["reason"], "no match");
+        assert!(v["match"].is_null());
+    }
+
+    #[test]
+    fn empty_list_wakes_on_nothing() {
+        let v = check("Hey Naru", &[]);
+        assert_eq!(v["wake"], false);
+        assert_eq!(v["reason"], "no wake words");
+        assert!(v["nearest"].is_null());
+    }
+
+    #[test]
+    fn not_line_initial() {
+        let v = check("please tell Naru hello", &["Naru"]);
+        assert_eq!(v["wake"], false);
+        assert_eq!(v["reason"], "not line-initial");
+    }
 }
