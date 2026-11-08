@@ -189,13 +189,15 @@ impl TranscriptLog {
 // MARK: Wake word and end phrase
 
 pub mod phrases {
-    /// Spellings Parakeet produced for "Naru" across six `say` voices. "Narrow" is left out because
-    /// "narrow" is a word people say.
+    /// The wake word a config without `ambient.wake_words` answers to.
+    pub const DEFAULT_WAKE_WORD: &str = "Naru";
+    /// Spellings Parakeet produced for "Naru" across six `say` voices, matched only while "Naru" is a
+    /// wake word. "Narrow" is left out because "narrow" is a word people say.
     pub const WAKE_SPELLINGS: [&str; 5] = ["naru", "neru", "niru", "nauru", "naroo"];
     const WAKE_LEAD_INS: [&str; 5] = ["hey", "hi", "ok", "okay", "wake"];
     const END_PHRASES: [&str; 2] = ["thanks thats all", "thank you thats all"];
     const FUSED_LEAD_INS: [&str; 6] = ["hey", "hei", "hay", "hi", "okay", "ok"];
-    /// Weighted edit distance at or under which a word counts as "Naru" said by Parakeet.
+    /// Weighted edit distance at or under which a word counts as a wake word said by Parakeet.
     pub const SOUND_ALIKE_MAX_DISTANCE: f64 = 0.45;
 
     /// Lower-case letters, digits and single spaces only; apostrophes vanish so "that's" and "thats"
@@ -221,11 +223,11 @@ pub mod phrases {
             .collect()
     }
 
-    /// User-defined wake words as word lists: normalized, lead-ins stripped, empties and duplicates
-    /// dropped.
-    pub fn wake_phrases(custom: &[String]) -> Vec<Vec<String>> {
+    /// The configured wake words as word lists: normalized, lead-ins stripped, empties and duplicates
+    /// dropped. Only these wake; an empty list wakes on nothing.
+    pub fn wake_phrases(words: &[String]) -> Vec<Vec<String>> {
         let mut phrases: Vec<Vec<String>> = Vec::new();
-        for entry in custom {
+        for entry in words {
             let mut words = word_list(entry);
             while words
                 .first()
@@ -240,21 +242,34 @@ pub mod phrases {
         phrases
     }
 
-    /// Built-in spellings act as one-word phrases beside the custom ones.
-    fn all_phrases(custom: &[Vec<String>]) -> Vec<Vec<String>> {
-        let mut sorted = WAKE_SPELLINGS.to_vec();
+    /// [`wake_phrases`] of [`DEFAULT_WAKE_WORD`].
+    pub fn default_wake_phrases() -> Vec<Vec<String>> {
+        wake_phrases(&[DEFAULT_WAKE_WORD.to_string()])
+    }
+
+    fn has_naru(wake: &[Vec<String>]) -> bool {
+        wake.iter().any(|p| p.len() == 1 && p[0] == "naru")
+    }
+
+    /// The wake phrases plus, while "Naru" is one of them, its built-in spellings as one-word phrases.
+    fn all_phrases(wake: &[Vec<String>]) -> Vec<Vec<String>> {
+        let mut sorted = if has_naru(wake) {
+            WAKE_SPELLINGS.to_vec()
+        } else {
+            Vec::new()
+        };
         sorted.sort();
         sorted
             .into_iter()
             .map(|s| vec![s.to_string()])
-            .chain(custom.iter().cloned())
+            .chain(wake.iter().cloned())
             .collect()
     }
 
     /// Index just past the longest phrase that opens the line (after an optional lead-in).
-    fn phrase_end(tokens: &[String], custom: &[Vec<String>]) -> Option<usize> {
+    fn phrase_end(tokens: &[String], wake: &[Vec<String>]) -> Option<usize> {
         let mut best: Option<usize> = None;
-        for phrase in all_phrases(custom) {
+        for phrase in all_phrases(wake) {
             for start in [0usize, 1] {
                 if start + phrase.len() > tokens.len() {
                     continue;
@@ -284,68 +299,93 @@ pub mod phrases {
     }
 
     /// True when the line is only the wake phrase.
-    pub fn is_bare_wake(text: &str, custom: &[Vec<String>]) -> bool {
+    pub fn is_bare_wake(text: &str, wake: &[Vec<String>]) -> bool {
         let (tokens, _) = words(text);
-        phrase_end(&tokens, custom).is_some_and(|end| end == tokens.len())
+        phrase_end(&tokens, wake).is_some_and(|end| end == tokens.len())
     }
 
     /// The wake word must open the line; returns the words after it as spoken, or `None`.
-    pub fn wake_remainder(text: &str, custom: &[Vec<String>]) -> Option<String> {
+    pub fn wake_remainder(text: &str, wake: &[Vec<String>]) -> Option<String> {
         let spoken: Vec<&str> = text.split_whitespace().collect();
         let (tokens, origin) = words(text);
-        let end = phrase_end(&tokens, custom)?;
+        let end = phrase_end(&tokens, wake)?;
         Some(spoken[origin[end - 1] + 1..].join(" "))
     }
 
-    /// A bare, greeted utterance whose name merely sounds like a wake word, with the candidate words
-    /// and their distance from the closest target.
-    pub fn sound_alike(text: &str, custom: &[Vec<String>]) -> Option<(String, f64)> {
-        let words = word_list(text);
-        let candidate: Vec<String> = match words.len() {
+    /// A greeted utterance whose name merely sounds like a wake word ("Hey Naro", "Hey Jarvas"):
+    /// the candidate words, their distance from the closest wake phrase (or built-in spelling of
+    /// "Naru" while it is one), and the words after them as spoken. The name follows a lead-in and
+    /// is either the whole rest of the line or ends at punctuation before more words ("Hey Nero,
+    /// what time is it?" gives "what time is it?"). Exact wakes are not sound-alikes.
+    pub fn sound_alike(text: &str, wake: &[Vec<String>]) -> Option<(String, f64, String)> {
+        if wake_remainder(text, wake).is_some() {
+            return None;
+        }
+        let spoken: Vec<&str> = text.split_whitespace().collect();
+        let (words, origin) = words(text);
+        // (candidate words, remainder) pairs, one per target length.
+        let mut candidates: Vec<(Vec<String>, String)> = Vec::new();
+        match words.len() {
             0 => return None,
             1 => {
                 let w = &words[0];
                 let lead = FUSED_LEAD_INS
                     .iter()
                     .find(|l| w.starts_with(**l) && w.chars().count() - l.chars().count() >= 3)?;
-                vec![w.chars().skip(lead.chars().count()).collect()]
+                candidates.push((
+                    vec![w.chars().skip(lead.chars().count()).collect()],
+                    String::new(),
+                ));
             }
             _ => {
                 if !WAKE_LEAD_INS.contains(&words[0].as_str()) {
                     return None;
                 }
-                let c: Vec<String> = words[1..].to_vec();
-                if all_phrases(custom).contains(&c) {
-                    return None;
+                candidates.push((words[1..].to_vec(), String::new()));
+                for k in 1..words.len() - 1 {
+                    // The name's last word must end its token, and punctuation follow: at the
+                    // token's end or as tokens of its own ("Nero , what").
+                    let (token, next) = (origin[k], origin[k + 1]);
+                    if next == token
+                        || (next == token + 1
+                            && spoken[token]
+                                .chars()
+                                .last()
+                                .is_none_or(|c| c.is_alphanumeric()))
+                    {
+                        continue;
+                    }
+                    candidates.push((words[1..=k].to_vec(), spoken[next..].join(" ")));
                 }
-                c
-            }
-        };
-        let mut targets: Vec<Vec<String>> = vec![vec!["naru".to_string()]];
-        targets.extend(custom.iter().cloned());
-        let mut best: Option<f64> = None;
-        for target in &targets {
-            if target.len() != candidate.len() {
-                continue;
-            }
-            // Short target words (under 4 letters) must match exactly: "Mix" is not "Max".
-            if candidate
-                .iter()
-                .zip(target)
-                .any(|(c, t)| c != t && t.chars().count() < 4)
-            {
-                continue;
-            }
-            let distance = candidate
-                .iter()
-                .zip(target)
-                .map(|(c, t)| sound_distance(c, t))
-                .fold(0.0, f64::max);
-            if distance <= SOUND_ALIKE_MAX_DISTANCE && distance < best.unwrap_or(f64::INFINITY) {
-                best = Some(distance);
             }
         }
-        best.map(|d| (candidate.join(" "), d))
+        let mut best: Option<(String, f64, String)> = None;
+        for target in &all_phrases(wake) {
+            for (candidate, remainder) in &candidates {
+                if target.len() != candidate.len() {
+                    continue;
+                }
+                // Short target words (under 4 letters) must match exactly: "Mix" is not "Max".
+                if candidate
+                    .iter()
+                    .zip(target)
+                    .any(|(c, t)| c != t && t.chars().count() < 4)
+                {
+                    continue;
+                }
+                let distance = candidate
+                    .iter()
+                    .zip(target)
+                    .map(|(c, t)| sound_distance(c, t))
+                    .fold(0.0, f64::max);
+                if distance <= SOUND_ALIKE_MAX_DISTANCE
+                    && best.as_ref().is_none_or(|b| distance < b.1)
+                {
+                    best = Some((candidate.join(" "), distance, remainder.clone()));
+                }
+            }
+        }
+        best
     }
 
     /// Levenshtein over lower-case letters with phonetic costs: vowel for vowel .25, n/l/m and r/l
@@ -402,18 +442,21 @@ pub mod phrases {
     }
 
     /// True when a wake phrase appears anywhere in the line, line-initial or not. Diagnostics only.
-    pub fn wake_anywhere(text: &str, custom: &[Vec<String>]) -> bool {
+    pub fn wake_anywhere(text: &str, wake: &[Vec<String>]) -> bool {
         let tokens = word_list(text);
-        all_phrases(custom)
+        all_phrases(wake)
             .iter()
             .any(|p| tokens.windows(p.len()).any(|w| w == &p[..]))
     }
 
-    /// The line's word that sounds most like a one-word wake target (a built-in spelling or a
-    /// custom word), with its distance. Diagnostics only.
-    pub fn nearest_wake_word(text: &str, custom: &[Vec<String>]) -> Option<(String, f64)> {
-        let mut targets: Vec<String> = WAKE_SPELLINGS.iter().map(|w| w.to_string()).collect();
-        targets.extend(custom.iter().filter(|p| p.len() == 1).map(|p| p[0].clone()));
+    /// The line's word that sounds most like a one-word wake target (a wake word, or a built-in
+    /// spelling of "Naru" while it is one), with its distance. Diagnostics only.
+    pub fn nearest_wake_word(text: &str, wake: &[Vec<String>]) -> Option<(String, f64)> {
+        let targets: Vec<String> = all_phrases(wake)
+            .into_iter()
+            .filter(|p| p.len() == 1)
+            .map(|p| p[0].clone())
+            .collect();
         let mut best: Option<(String, f64)> = None;
         for word in word_list(text) {
             for t in &targets {
@@ -444,7 +487,8 @@ pub struct AmbientMachine {
     last_heard_him: Option<u64>,
     agent_speaking: bool,
     agent_quiet_at: Option<u64>,
-    custom_wake: Vec<Vec<String>>,
+    /// The wake phrases; "Naru" until [`set_wake_words`](Self::set_wake_words).
+    wake: Vec<Vec<String>>,
     /// The person's name for the next ingested line; consumed by it.
     next_person: Option<String>,
 }
@@ -471,7 +515,7 @@ impl AmbientMachine {
             last_heard_him: None,
             agent_speaking: false,
             agent_quiet_at: None,
-            custom_wake: Vec::new(),
+            wake: phrases::default_wake_phrases(),
             next_person: None,
         }
     }
@@ -493,9 +537,10 @@ impl AmbientMachine {
         }
     }
 
-    /// User-defined wake words, matched beside the built-in "Naru".
+    /// Replaces the wake words: only these wake (and "Naru"'s spellings only while it is listed);
+    /// an empty list wakes on nothing.
     pub fn set_wake_words(&mut self, words: &[String]) {
-        self.custom_wake = phrases::wake_phrases(words);
+        self.wake = phrases::wake_phrases(words);
     }
 
     pub fn log_lines(&mut self, now_ms: u64) -> Vec<LogLine> {
@@ -592,19 +637,19 @@ impl AmbientMachine {
         let bare_wake = !was_in_conversation
             && speaker == Speaker::Unknown
             && !agent_audible
-            && phrases::wake_remainder(line, &self.custom_wake).is_some();
+            && phrases::wake_remainder(line, &self.wake).is_some();
         // A sound-alike ("Hey Naro") is gated like the exact bare wake: any voice but a tagged `Other`.
-        let mut sound_alike = false;
+        let mut sound_alike = None;
         if !was_in_conversation
-            && let Some((word, distance)) = phrases::sound_alike(line, &self.custom_wake)
+            && let Some((word, distance, remainder)) = phrases::sound_alike(line, &self.wake)
         {
-            sound_alike = speaker != Speaker::Other;
+            sound_alike = (speaker != Speaker::Other).then_some(remainder);
             output.wake_candidates.push(WakeCandidate {
                 text: line.to_string(),
                 word,
                 distance,
                 similarity,
-                accepted: sound_alike,
+                accepted: sound_alike.is_some(),
                 reason: match speaker {
                     Speaker::Him => "tagged him",
                     Speaker::Other => "tagged other",
@@ -619,10 +664,13 @@ impl AmbientMachine {
             at_ms: now,
             context: context.to_vec(),
         };
-        if sound_alike {
+        if let Some(remainder) = sound_alike {
             self.mode = Mode::Conversation;
             self.last_heard_him = Some(now);
             output.events.push(wake_event(context));
+            if !remainder.is_empty() {
+                output.utterance = Some(remainder);
+            }
             return None;
         }
         if !(speaker == Speaker::Him || continues_him || bare_wake) {
@@ -642,7 +690,7 @@ impl AmbientMachine {
             return None;
         }
 
-        if let Some(remainder) = phrases::wake_remainder(line, &self.custom_wake) {
+        if let Some(remainder) = phrases::wake_remainder(line, &self.wake) {
             self.mode = Mode::Conversation;
             self.last_heard_him = Some(now);
             output.events.push(wake_event(context));
@@ -667,13 +715,13 @@ impl AmbientMachine {
         text: &str,
         output: &AmbientOutput,
     ) -> WakeAudit {
-        let nearest = phrases::nearest_wake_word(text, &self.custom_wake);
+        let nearest = phrases::nearest_wake_word(text, &self.wake);
         let woke = output.events.iter().any(|e| e.kind == EventKind::Wake);
         let reason = if woke {
             "matched"
         } else if was == Mode::Conversation {
             "in conversation"
-        } else if phrases::wake_remainder(text, &self.custom_wake).is_some()
+        } else if phrases::wake_remainder(text, &self.wake).is_some()
             || !output.wake_candidates.is_empty()
         {
             // Line-initial or a sound-alike, yet no wake: only a tagged `Other` or the agent's
@@ -683,7 +731,7 @@ impl AmbientMachine {
             } else {
                 "agent audible"
             }
-        } else if phrases::wake_anywhere(text, &self.custom_wake) {
+        } else if phrases::wake_anywhere(text, &self.wake) {
             "not line-initial"
         } else {
             "no sound-alike match"

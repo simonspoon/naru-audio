@@ -131,10 +131,11 @@ fn gate() -> Arc<dyn AmbientGate> {
     .clone()
 }
 
-/// Naru's custom wake words, `ambient.wake_words` in its config file:
+/// This install's wake words, `ambient.wake_words` in naru's config file:
 /// `NARU_AUDIO_WAKE_CONFIG`, else `~/.naru/config.json` when `~/.naru`
 /// exists, else `~/.mesa/config.json` (naru's own `config_file`). A missing
-/// or unreadable file means none.
+/// or unreadable file, or no list in it, means the default "Naru"; an empty
+/// list means none.
 fn wake_words() -> Vec<String> {
     let path = match std::env::var_os("NARU_AUDIO_WAKE_CONFIG").filter(|p| !p.is_empty()) {
         Some(p) => std::path::PathBuf::from(p),
@@ -143,7 +144,7 @@ fn wake_words() -> Vec<String> {
                 .or_else(|| std::env::var_os("USERPROFILE"))
                 .map(std::path::PathBuf::from)
             else {
-                return Vec::new();
+                return wake_words_in(None);
             };
             let naru = home.join(".naru");
             let dot = if naru.is_dir() {
@@ -154,11 +155,36 @@ fn wake_words() -> Vec<String> {
             dot.join("config.json")
         }
     };
-    std::fs::read(&path)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+    wake_words_in(std::fs::read(&path).ok().as_deref())
+}
+
+/// [`wake_words`] from the config file's bytes, `None` when it can't be read.
+fn wake_words_in(file: Option<&[u8]>) -> Vec<String> {
+    file.and_then(|b| serde_json::from_slice::<Value>(b).ok())
         .and_then(|v| serde_json::from_value(v["ambient"]["wake_words"].clone()).ok())
-        .unwrap_or_default()
+        .unwrap_or_else(|| vec![ambient::machine::phrases::DEFAULT_WAKE_WORD.to_string()])
+}
+
+#[cfg(test)]
+mod wake_words_tests {
+    use super::wake_words_in;
+
+    #[test]
+    fn no_list_means_naru_and_an_empty_list_means_none() {
+        let read = |s: &str| wake_words_in(Some(s.as_bytes()));
+        assert_eq!(wake_words_in(None), ["Naru"]);
+        assert_eq!(read("not json"), ["Naru"]);
+        assert_eq!(read("{}"), ["Naru"]);
+        assert_eq!(read(r#"{"ambient": {}}"#), ["Naru"]);
+        assert_eq!(
+            read(r#"{"ambient": {"wake_words": []}}"#),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            read(r#"{"ambient": {"wake_words": ["Jarvis"]}}"#),
+            ["Jarvis"]
+        );
+    }
 }
 
 /// Changes a conversation keeps for a slow member before it lags.

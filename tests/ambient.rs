@@ -50,7 +50,7 @@ fn custom() -> Vec<Vec<String>> {
 }
 
 fn rem(t: &str) -> Option<String> {
-    wake_remainder(t, &[])
+    wake_remainder(t, &default_wake_phrases())
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn sound_alike_accepts_and_rejects() {
         "Hey, Naro!",
         "OK Naro",
     ] {
-        assert!(sound_alike(t, &[]).is_some(), "{t}");
+        assert!(sound_alike(t, &default_wake_phrases()).is_some(), "{t}");
     }
     for t in [
         "narrow road",
@@ -126,7 +126,7 @@ fn sound_alike_accepts_and_rejects() {
         "Hey Naru",
         "Heinrich",
     ] {
-        assert!(sound_alike(t, &[]).is_none(), "{t}");
+        assert!(sound_alike(t, &default_wake_phrases()).is_none(), "{t}");
     }
 }
 
@@ -180,17 +180,15 @@ fn custom_wake_words() {
     assert_eq!(wake_remainder("I asked Jarvis", &c), None);
     assert_eq!(wake_remainder("so hey Jarvis", &c), None);
     assert_eq!(wake_remainder("Jarvis lights", &[]), None);
-    assert_eq!(
-        wake_remainder("Hey Naru, remind me", &c).as_deref(),
-        Some("remind me")
-    );
-    assert!(is_bare_wake("Naru", &c));
+    // Naru wakes only while it is a wake word.
+    assert_eq!(wake_remainder("Hey Naru, remind me", &c), None);
+    assert!(!is_bare_wake("Naru", &c));
     assert_eq!(
         sound_alike("Hey Jarvas", &c).map(|x| x.0).as_deref(),
         Some("jarvas")
     );
     assert!(sound_alike("Hey big bard", &c).is_some());
-    assert!(sound_alike("Hey Naro", &c).is_some());
+    assert!(sound_alike("Hey Naro", &c).is_none());
     assert!(sound_alike("Hey Jarvas", &[]).is_none());
     for t in ["Hey Harvey", "Jervis", "Hey big", "Hey Jarvas lights"] {
         assert!(sound_alike(t, &c).is_none(), "{t}");
@@ -625,4 +623,146 @@ fn explain_wake_gives_the_reason_for_each_decision() {
     assert_eq!((a.woke, a.reason), (true, "matched"));
     let a = explain(&mut m, Speaker::Him, "Naru again");
     assert_eq!((a.woke, a.reason), (false, "in conversation"));
+}
+
+// Naru task 2621: the wake words are this install's list; "Naru" is only the default.
+
+#[test]
+fn default_list_is_naru_with_its_mishearings() {
+    assert_eq!(default_wake_phrases(), vec![vec!["naru".to_string()]]);
+    let mut t = M::new();
+    assert_eq!(
+        M::kinds(&t.say(Speaker::Him, "Neru, call Sam")),
+        [EventKind::Wake]
+    );
+    let mut t = M::new();
+    t.m.set_wake_words(&["Naru".to_string()]);
+    let out = t.say(Speaker::Unknown, "Hey Naro");
+    assert_eq!(M::kinds(&out), [EventKind::Wake]);
+}
+
+#[test]
+fn a_renamed_install_ignores_naru() {
+    let jarvis = || {
+        let mut t = M::new();
+        t.m.set_wake_words(&["Jarvis".to_string()]);
+        t
+    };
+    for (who, text) in [
+        (Speaker::Him, "Jarvis, lights"),
+        (Speaker::Unknown, "Hey Jarvis"),
+        (Speaker::Unknown, "Hey Jarvas"),
+        (Speaker::Him, "Hey Jarvas, turn on the lights"),
+    ] {
+        assert_eq!(
+            M::kinds(&jarvis().say(who, text)),
+            [EventKind::Wake],
+            "{text}"
+        );
+    }
+    for (who, text) in [
+        (Speaker::Him, "Naru, what time is it?"),
+        (Speaker::Unknown, "Hey Naru"),
+        (Speaker::Unknown, "Neru"),
+        (Speaker::Unknown, "Hey Naro"),
+        (Speaker::Him, "Hey Nero, what time is it?"),
+        (Speaker::Him, "I asked Jarvis about it"),
+    ] {
+        let mut t = jarvis();
+        let out = t.say(who, text);
+        assert!(!M::kinds(&out).contains(&EventKind::Wake), "{text}");
+        assert_eq!(t.m.mode(), Mode::Ambient, "{text}");
+    }
+    let mut t = jarvis();
+    let out = t.say(Speaker::Him, "Hey Jarvas, turn on the lights");
+    assert_eq!(out.utterance.as_deref(), Some("turn on the lights"));
+    t.adv(S);
+    let out = t.say(Speaker::Him, "Thanks, that's all.");
+    assert_eq!(M::kinds(&out), [EventKind::ModeChanged]);
+}
+
+#[test]
+fn an_empty_list_wakes_on_nothing() {
+    for text in [
+        "Naru",
+        "Hey Naru, what time is it",
+        "Hey Naro",
+        "Neru, call Sam",
+        "Jarvis",
+    ] {
+        for who in [Speaker::Him, Speaker::Unknown] {
+            let mut t = M::new();
+            t.m.set_wake_words(&[]);
+            assert!(
+                !M::kinds(&t.say(who, text)).contains(&EventKind::Wake),
+                "{text}"
+            );
+            assert_eq!(t.m.mode(), Mode::Ambient);
+        }
+    }
+    assert!(wake_phrases(&["  ".to_string(), "hey".to_string()]).is_empty());
+}
+
+#[test]
+fn a_mid_sentence_mention_never_wakes() {
+    for words in [vec![], vec!["Jarvis".to_string()]] {
+        for text in [
+            "so I told Naru about it",
+            "I think Jarvis is great",
+            "well hey Naru, what time",
+            "ask Jarvas, he knows",
+            "tell Nero, what time is it",
+        ] {
+            for who in [Speaker::Him, Speaker::Unknown] {
+                let mut t = M::new();
+                if !words.is_empty() {
+                    t.m.set_wake_words(&words);
+                }
+                let out = t.say(who, text);
+                assert!(!M::kinds(&out).contains(&EventKind::Wake), "{text}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_misheard_wake_word_before_a_sentence_wakes() {
+    // Naru task 2417: Parakeet heard "Hey Naru, what time is it?" as "Hey Nero, ...".
+    let n = default_wake_phrases();
+    assert_eq!(
+        sound_alike("Hey Nero, what time is it?", &n),
+        Some(("nero".to_string(), 0.25, "what time is it?".to_string()))
+    );
+    let mut t = M::new();
+    let out = t.say(Speaker::Unknown, "Hey Nero, what time is it?");
+    assert_eq!(M::kinds(&out), [EventKind::Wake]);
+    assert_eq!(out.utterance.as_deref(), Some("what time is it?"));
+    assert_eq!(
+        sound_alike("Hey Nero , what time is it?", &n)
+            .map(|x| x.2)
+            .as_deref(),
+        Some("what time is it?")
+    );
+    // Measured against Naru's spellings too, so a bare "Hey Nero" (0.25 from "neru") wakes.
+    assert_eq!(sound_alike("Hey Nero", &n).map(|x| x.1), Some(0.25));
+    // The name must end at punctuation and follow a lead-in; ordinary greetings stay out.
+    for t in [
+        "Hey Nero what time is it",
+        "Nero, what time is it",
+        "Hey narrow road",
+        "Hey there, Naru",
+        "Hey Nora, how are you",
+        "Hey Laura, how are you",
+        "Hey Mary, can you help",
+        "Hey Naru, remind me",
+    ] {
+        assert!(sound_alike(t, &n).is_none(), "{t}");
+    }
+    let bird = wake_phrases(&["Big Bird".to_string()]);
+    assert_eq!(
+        sound_alike("Hey big bard, call Sam", &bird)
+            .map(|x| x.2)
+            .as_deref(),
+        Some("call Sam")
+    );
 }

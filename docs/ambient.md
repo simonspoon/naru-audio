@@ -39,9 +39,15 @@ mode every admitted segment (the one that becomes an `ambient_flag`) is also ing
   guard is on): the owner wins whenever their score clears the threshold, else the best match at or above it: the owner is `Him`, another named person is `Other` (the
   line carries the name), scored and matching nobody is an unnamed `Other`; no enrollment, a clip under 1 s or no model is `Unknown` (which may still wake, as
   the machine allows).
-- **Wake words.** The built-in spellings plus `ambient.wake_words` from naru's config file, read once at session
-  start: `NARU_AUDIO_WAKE_CONFIG`, else `~/.naru/config.json` when `~/.naru` exists, else `~/.mesa/config.json`.
-  A missing or unreadable file means no custom words.
+- **Wake words.** This install's `ambient.wake_words` from naru's config file, read once at session start:
+  `NARU_AUDIO_WAKE_CONFIG`, else `~/.naru/config.json` when `~/.naru` exists, else `~/.mesa/config.json`. Only
+  the listed words wake, so two installs in one room can answer to different names. A missing or unreadable file,
+  or no list in it, means the default `["Naru"]`; an empty list means nothing wakes by voice. Naru's built-in
+  mishearing spellings (`neru`, `nauru`, …) count only while "Naru" is listed. The word must open the line,
+  optionally after a lead-in (`hey`, `okay`, …); a mid-sentence mention never wakes. A sound-alike (phonetic
+  distance ≤ 0.45 from a listed word or, for Naru, a spelling) wakes after a lead-in, either as the whole line
+  ("Hey Jarvas", "Hey Nero") or ending at punctuation before a sentence ("Hey Nero, what time is it?"), which is
+  sent on. Hyphenated or fused misspellings ("Ne-ru,", "Heynero, …") before a sentence are not matched.
 - **Gate.** `ambient::load_gate` on the GGUF named by `NARU_AUDIO_AMBIENT_GATE`, loaded once per process on first
   use; unset or failing, it is `NullGate`. It runs under `spawn_blocking`.
 - **Events.** A wake is a `wake` event, a flagged gate verdict an `ambient_verdict` (`docs/live-protocol.md`). In
@@ -99,7 +105,7 @@ ambient segment, from a socket or the server's listener, then appends one `ambie
 | `admitted`, `mode` | whether it reached the machine; the machine's mode after it |
 | `text` | the transcript |
 | `speaker` | `tag` (`him`, `other`, `untagged`), `score` (cosine, `null` unscored), `reason` (`scored`, `too_short`, `model_mismatch`, …), `person` |
-| `wake` | `woke`, `reason` and `nearest` (`word`, `distance`: the line's word closest to a wake spelling, matched by sound at ≤ 0.45 only for a bare greeting) |
+| `wake` | `woke`, `reason` and `nearest` (`word`, `distance`: the line's word closest to a wake spelling, matched by sound at ≤ 0.45 after a lead-in, bare or before punctuation) |
 
 Wake reasons: `matched`; `in conversation` (already awake); `speaker other` (the wake was there but a tagged
 other voice said it); `agent audible` (untagged, while or just after the agent spoke); `not line-initial`;
