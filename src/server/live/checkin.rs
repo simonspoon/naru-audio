@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::host::{self, DEFAULT_CONVERSATION};
+use crate::log::Logger;
 use crate::server::AppState;
 
 /// naru serve's address when neither `NARU_AUDIO_NARU_URL` nor config.toml's
@@ -165,9 +166,16 @@ async fn check(
         if want != host.on() {
             // Its own task: a model load must not hold up the reports.
             let st = st.clone();
+            let url = url.to_string();
             *switching = Some(tokio::spawn(async move {
                 let req = format!("naru_ambient_request_{id}_{seq}");
-                if let Err(e) = host::set(&st, &req, want, DEFAULT_CONVERSATION.to_string()).await {
+                let instance = if want {
+                    instance(&st.log, &url, &req).await
+                } else {
+                    None
+                };
+                let key = DEFAULT_CONVERSATION.to_string();
+                if let Err(e) = host::set(&st, &req, want, key, instance).await {
                     st.log.line(
                         "error",
                         Some(&req),
@@ -184,6 +192,31 @@ async fn check(
         .map_err(|e| e.to_string())??;
     *reported.lock().unwrap() = Some(id);
     Ok(())
+}
+
+/// naru serve's instance id (`GET /api/voice/guard`, naru task 2666), whose
+/// owner the listener judges "him" against (naru task 2670). An older naru
+/// with no such route, or one that does not answer, is no instance: the
+/// legacy owner, as before.
+async fn instance(log: &Logger, url: &str, req: &str) -> Option<String> {
+    let guard = format!("{url}/api/voice/guard");
+    let answer = tokio::task::spawn_blocking(move || get(&guard))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+    match answer {
+        Ok(body) => match body["instance"].as_str() {
+            Some(i) if super::check_id("instance", i).is_ok() => Some(i.to_string()),
+            _ => {
+                log.line("warn", Some(req), "naru_instance_unknown no valid instance");
+                None
+            }
+        },
+        Err(e) => {
+            log.line("warn", Some(req), &format!("naru_instance_unknown {e}"));
+            None
+        }
+    }
 }
 
 /// The ambient-engine event for a listener event, as the Mac app sent it:
@@ -260,5 +293,40 @@ mod tests {
             Some(json!({"event": "idea", "speaker": "him", "text": "t"}))
         );
         assert_eq!(engine_event(&json!({"type": "utterance"})), None);
+    }
+
+    /// A one-request HTTP server answering `body` with `status`; its URL.
+    fn answer_once(status: &str, body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let status = status.to_string();
+        std::thread::spawn(move || {
+            let (mut tcp, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = tcp.read(&mut buf);
+            let reply = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = tcp.write_all(reply.as_bytes());
+        });
+        url
+    }
+
+    /// The listener judges against naru's instance (naru task 2670); an
+    /// older naru (404) or none at all is no instance, the legacy owner.
+    #[tokio::test]
+    async fn the_instance_is_naru_serves_and_fails_open() {
+        let log = Logger::stderr();
+        let url = answer_once("200 OK", r#"{"live":false,"instance":"mac-a"}"#);
+        assert_eq!(instance(&log, &url, "t").await.as_deref(), Some("mac-a"));
+        let old = answer_once("404 Not Found", r#"{"error":{}}"#);
+        assert_eq!(instance(&log, &old, "t").await, None);
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://{}", l.local_addr().unwrap())
+        };
+        assert_eq!(instance(&log, &closed, "t").await, None);
     }
 }

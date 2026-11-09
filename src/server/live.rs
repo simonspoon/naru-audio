@@ -1780,11 +1780,12 @@ async fn finish_segment(
     // The score and the bar it is held to, so the threshold can be
     // calibrated from the log; `-` when the segment was not scored.
     let scored = format!(
-        "mode={} start={start:.2} end={end:.2} score={} threshold={DEFAULT_THRESHOLD}",
+        "mode={} start={start:.2} end={end:.2} score={} threshold={DEFAULT_THRESHOLD} instance={}",
         mode_name(mode),
         verdict
             .and_then(|d| d.score)
             .map_or("-".to_string(), |s| format!("{s:.3}")),
+        live.instance.as_deref().unwrap_or("-"),
     );
     if !admitted {
         st.log.info(None, &format!("live_segment_dropped {scored}"));
@@ -1889,7 +1890,7 @@ fn ambient_audit(
         "at_ms": live.now_ms(), "start": start, "end": end, "admitted": admitted,
         "mode": live.ambient.mode().as_str(), "text": text,
         "speaker": {
-            "tag": tag,
+            "tag": tag, "instance": live.instance,
             "score": identity.and_then(|i| i.verdict.score),
             "reason": identity.map(|i| i.verdict.reason),
             "person": identity.and_then(|i| i.person.as_ref()).map(|p| p.name.clone()),

@@ -65,7 +65,7 @@ daemon launch, not after a restart (nothing is persisted). Only `POST /ambient`,
 | Route | |
 |---|---|
 | `GET /ambient` | `{"on":false,"conversation":null,"mic":null}`; while on, `conversation` is its key and `mic` the capture's status (as `/health`'s `mic`). |
-| `POST /ambient` | `{"on":true,"conversation":"…"}` loads the default STT model, opens the input device (`NARU_AUDIO_MIC_DEVICE`, else `config.toml` `[mic] device`, else the built-in mic) and joins `conversation` (default `ambient`), beginning it in `ambient` if it is new. Already on, it changes nothing. `{"on":false}` leaves the conversation and closes the device before it answers; one sent while an `on` is still loading the model waits for it. A listener that ends by itself (the device gone for good, a decode failure) closes the device too. Answers as `GET /ambient`. 400 `invalid_request` for a missing `on` or a bad `conversation`; 503 when the model or device cannot open. |
+| `POST /ambient` | `{"on":true,"conversation":"…"}` loads the default STT model, opens the input device (`NARU_AUDIO_MIC_DEVICE`, else `config.toml` `[mic] device`, else the built-in mic) and joins `conversation` (default `ambient`), beginning it in `ambient` if it is new. An optional `"instance"` (1 to 128 characters) is the Naru instance whose owner the listener tags as him, as a live `start` frame's `instance` is (naru task 2670); without one it is the legacy/default owner. The instance is logged on `ambient_on` and on every segment line. Already on, it changes nothing (its instance included: switch it off and on to change that). `{"on":false}` leaves the conversation and closes the device before it answers; one sent while an `on` is still loading the model waits for it. A listener that ends by itself (the device gone for good, a decode failure) closes the device too. Answers as `GET /ambient`. 400 `invalid_request` for a missing `on` or a bad `conversation` or `instance`; 503 when the model or device cannot open. |
 | `GET /ambient/log` | `{"events":[…]}`: the `ambient_flag`, `utterance`, `wake` and `ambient_verdict` events it published, oldest first, the last 2 minutes and at most 500 (as `TranscriptLog`). In memory only; cleared when it turns on. |
 | `POST /ambient/wake-check` | Stateless, needs no mic: `{"text":"…","wake_words"?:["…"]}` (words default to this install's list, `[]` wakes on nothing) answers whether an untagged line would wake the listener: `{"wake":bool,"match":"exact"\|"sound_alike"\|null,"word":str\|null,"distance":num\|null,"reason":"matched"\|"sound-alike"\|"no wake words"\|"not line-initial"\|"no match","nearest":{"word","distance"}\|null}`. 422 `invalid_request` for blank `text` or a bad `wake_words`; 400 for a body that is not JSON. |
 
@@ -85,7 +85,9 @@ uses :7771). Every 2 s, while naru has a live session (`GET /api/live`):
   report older than 10 s as no host). On SIGTERM or Ctrl-C it reports `null` before exiting.
 - It obeys the session's `ambient_request` once per `ambient_request_seq` (`naru live ambient on|off`), switching
   the listener as `POST /ambient` does in conversation `ambient`, on its own task so reports keep going during a
-  model load. A request already pending when it first sees a session (it just started, or the session is new)
+  model load. Switching on, it first reads naru's instance id (`GET /api/voice/guard`) and passes it as
+  `instance`, so his voice in that Naru instance is him (naru task 2670); a naru without the route, or not
+  answering, is no instance (`naru_instance_unknown` warning), the legacy owner as before. A request already pending when it first sees a session (it just started, or the session is new)
   is not obeyed: a restarted daemon stays off until asked again. Checking in never switches it on by itself.
 - The listener's `wake` and `ambient_verdict` events go to naru's ambient engine, `POST /api/workflows/events`
   (`wake`, speaker `unknown`; `can_help` as `can-help` and `idea`, speaker `him`), as the Mac app sent them.
@@ -105,7 +107,7 @@ ambient segment, from a socket or the server's listener, then appends one `ambie
 | `at_ms`, `start`, `end` | session clock; the segment's span in seconds |
 | `admitted`, `mode` | whether it reached the machine; the machine's mode after it |
 | `text` | the transcript |
-| `speaker` | `tag` (`him`, `other`, `untagged`), `score` (cosine, `null` unscored), `reason` (`scored`, `too_short`, `model_mismatch`, …), `person` |
+| `speaker` | `tag` (`him`, `other`, `untagged`), `instance` (the Naru instance "him" was judged against, `null` the legacy owner), `score` (cosine, `null` unscored), `reason` (`scored`, `too_short`, `model_mismatch`, …), `person` |
 | `wake` | `woke`, `reason` and `nearest` (`word`, `distance`: the line's word closest to a wake spelling, matched by sound at ≤ 0.45 after a lead-in, bare or before punctuation) |
 
 Wake reasons: `matched`; `in conversation` (already awake); `speaker other` (the wake was there but a tagged

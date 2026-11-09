@@ -1281,6 +1281,58 @@ async fn the_server_listener_wakes_once_and_logs_lines() {
     assert_eq!(status["on"], false, "{status}");
 }
 
+/// The server's listener judges "him" against the Naru instance it was
+/// switched on for (naru task 2670): with none, an instance's owner is
+/// another person, as before.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_server_listener_judges_against_its_instance() {
+    let Some(home) = model_home() else { return };
+    let Some(()) = write_library(home.path(), false, &[("A", true, &["a1.wav", "a2.wav"])]) else {
+        return;
+    };
+    let mut lib = Library::load(home.path()).unwrap();
+    lib.people[0].instance = Some("mac-a".into());
+    lib.save(home.path()).unwrap();
+    let (host, frames) = injected();
+    let addr = serve_with(home.path(), Some(host)).await;
+    let (status, bad) = http(
+        &addr,
+        "POST",
+        "/ambient",
+        Some(json!({"on": true, "instance": 7})),
+    )
+    .await;
+    assert_eq!(status, 400, "{bad}");
+    let mut tags = vec![];
+    for instance in [json!("mac-a"), Value::Null] {
+        let body = json!({"on": true, "conversation": "c-inst", "instance": instance});
+        let (status, on) = http(&addr, "POST", "/ambient", Some(body)).await;
+        assert_eq!(status, 200, "{on}");
+        inject(&frames, &spoken(voice("a3.wav"))).await;
+        let flag = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                if let Some(f) = logged(&addr, "ambient_flag").await.pop() {
+                    break f;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("no ambient line within 60 s");
+        tags.push((
+            flag["speaker"]["is_him"].clone(),
+            flag["speaker"]["person"]["name"].clone(),
+        ));
+        let (status, off) = http(&addr, "POST", "/ambient", Some(json!({"on": false}))).await;
+        assert_eq!(status, 200, "{off}");
+    }
+    assert_eq!(
+        tags,
+        [(json!(true), json!("A")), (json!(false), json!("A"))],
+        "{tags:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_playing_a_reply_shuts_the_server_listener() {
     let Some(home) = model_home() else { return };

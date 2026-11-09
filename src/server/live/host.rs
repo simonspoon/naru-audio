@@ -283,17 +283,28 @@ pub(in crate::server) async fn switch(
         Some(_) => return Err(bad("\"conversation\" must be a string")),
     };
     check_id("conversation", &key).map_err(|f| bad(&f.message))?;
-    set(&st, &req_id, on, key).await.map(Json)
+    let instance = match body.get("instance") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(i)) => Some(i.clone()),
+        Some(_) => return Err(bad("\"instance\" must be a string")),
+    };
+    if let Some(i) = &instance {
+        check_id("instance", i).map_err(|f| bad(&f.message))?;
+    }
+    set(&st, &req_id, on, key, instance).await.map(Json)
 }
 
 /// Switches the listener on (joining conversation `key`) or off; answers as
 /// `GET /ambient`. `POST /ambient` and naru's `ambient_request` (the
-/// check-in) both come here.
+/// check-in) both come here. `instance` is the Naru instance whose owner is
+/// "him" to the listener (naru task 2670), as a live `start` frame's is; none
+/// is the legacy/default owner.
 pub(in crate::server) async fn set(
     st: &Arc<AppState>,
     req_id: &str,
     on: bool,
     key: String,
+    instance: Option<String>,
 ) -> Result<Value, ApiError> {
     let host = host(st)?;
     let _one = host.switch.lock().await;
@@ -333,6 +344,7 @@ pub(in crate::server) async fn set(
     let (member, mode, seq) = join(&key, Some(Mode::Ambient)).map_err(fail)?;
     let mut live = Live::new(mode, seq, library, false);
     live.library_stamp = library_stamp;
+    live.instance = instance;
     // A member may already be playing a reply.
     if anyone_speaking(&key) {
         live.set_agent_speaking(true);
@@ -340,6 +352,7 @@ pub(in crate::server) async fn set(
     live.ambient.set_wake_words(&wake_words());
     let (input, events, backlog) = super::workers(st, &cfg, vad, model);
     host.log.lock().unwrap().events.clear();
+    let live_instance = live.instance.clone();
     let mic: SharedMic = Arc::new(Mutex::new(capture.mic));
     let task = tokio::spawn(listen(
         mic.clone(),
@@ -360,7 +373,11 @@ pub(in crate::server) async fn set(
     });
     st.log.info(
         Some(req_id),
-        &format!("ambient_on conversation={key} model={}", cfg.model),
+        &format!(
+            "ambient_on conversation={key} model={} instance={}",
+            cfg.model,
+            live_instance.as_deref().unwrap_or("-")
+        ),
     );
     Ok(host.status())
 }
