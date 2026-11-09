@@ -67,7 +67,7 @@ fn embed(v: &SpeakerVerifier, clip: &str) -> Vec<f32> {
 fn library(v: &SpeakerVerifier, people: &[(&str, bool, &[&str])]) -> Library {
     let mut lib = Library::default();
     for (name, owner, clips) in people {
-        let id = lib.add_person(name, *owner);
+        let id = lib.add_person(name, *owner, None);
         let person = lib.people.iter_mut().find(|p| p.id == id).unwrap();
         for (i, clip) in clips.iter().enumerate() {
             person.clips.push(Clip {
@@ -86,6 +86,7 @@ fn verify(v: &SpeakerVerifier, lib: &Library, only_owner: bool, clip: &str) -> I
     speaker::identify(
         Some(v),
         Some(lib),
+        None,
         only_owner,
         &samples(clip),
         DEFAULT_THRESHOLD,
@@ -217,9 +218,16 @@ fn short_reply_and_missing_library_fail_open() {
     // "Yes." in the other voice would be rejected if it were scored
     let mut short = samples("b1.wav");
     short.truncate(MIN_SAMPLES - 1);
-    let id = speaker::identify(Some(v), Some(&lib), true, &short, DEFAULT_THRESHOLD);
+    let id = speaker::identify(Some(v), Some(&lib), None, true, &short, DEFAULT_THRESHOLD);
     assert!(id.verdict.is_him && id.verdict.reason == Reason::TooShort);
-    let id = speaker::identify(Some(v), None, true, &samples("b1.wav"), DEFAULT_THRESHOLD);
+    let id = speaker::identify(
+        Some(v),
+        None,
+        None,
+        true,
+        &samples("b1.wav"),
+        DEFAULT_THRESHOLD,
+    );
     assert!(id.verdict.is_him && id.verdict.reason == Reason::NoEnrollment);
     assert!(verify(v, &lib, true, "a_short.wav").verdict.is_him);
 }
@@ -321,7 +329,7 @@ async fn routes_without_the_model_use_the_documented_errors() {
     assert_eq!(body["score"], Value::Null);
     // an enrollment but no model: a clip that needs scoring is 409 ...
     Library::update(home.path(), |l| {
-        l.ensure_owner();
+        l.ensure_owner(None);
         l.people[0].clips.push(Clip {
             id: 1,
             created_at: 0,

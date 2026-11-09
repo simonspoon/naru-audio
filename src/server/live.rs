@@ -419,6 +419,11 @@ struct LiveStart {
     /// speaker reference); off unless `true`.
     #[serde(default)]
     typed_frames: bool,
+    /// The Naru instance whose owner the guard and ambient tagging judge
+    /// against (naru task 2665); the legacy/default owner when absent.
+    instance: Option<String>,
+    /// Overrides the library's `live_guard` for this session when present.
+    guard: Option<bool>,
 }
 
 fn s16le() -> String {
@@ -440,6 +445,9 @@ enum ClientMessage {
         action: String,
         /// The person a `begin`ning recording is for; the owner when absent.
         person: Option<u64>,
+        /// Whose owner `begin` (with no `person`) and `clear` mean; the
+        /// session's instance when absent.
+        instance: Option<String>,
     },
     Speak {
         id: String,
@@ -513,6 +521,12 @@ struct Live {
     enrolling: Option<Vec<f32>>,
     /// Who the running recording is for; the owner when `None`.
     enroll_person: Option<u64>,
+    /// The instance whose owner a running recording with no person is for.
+    enroll_instance: Option<String>,
+    /// The session's Naru instance: whose owner is "him".
+    instance: Option<String>,
+    /// The session's guard switch; the library's `live_guard` when `None`.
+    guard: Option<bool>,
     /// The audio fed to the VAD, as `Segments` positions it.
     ring: VecDeque<f32>,
     ring_start: usize,
@@ -547,6 +561,9 @@ impl Live {
             migrate_failed: false,
             enrolling: None,
             enroll_person: None,
+            enroll_instance: None,
+            instance: None,
+            guard: None,
             ring: VecDeque::new(),
             ring_start: 0,
             received: 0,
@@ -579,7 +596,14 @@ impl Live {
 
     /// The owner has recorded something.
     fn enrolled(&self) -> bool {
-        self.library.owner().is_some_and(|o| !o.clips.is_empty())
+        self.library
+            .owner_of(self.instance.as_deref())
+            .is_some_and(|o| !o.clips.is_empty())
+    }
+
+    /// Whether the live guard is switched on for this session.
+    fn guard_on(&self) -> bool {
+        self.guard.unwrap_or(self.library.live_guard)
     }
 
     /// Milliseconds since the session began: the ambient machine's clock.
@@ -661,7 +685,7 @@ impl Live {
             "agent_speaking": self.agent_speaking(),
             "enrolled": self.enrolled(),
             "enrolling": self.enrolling.is_some(),
-            "live_guard": self.library.live_guard,
+            "live_guard": self.guard_on(),
             "speaking": ids,
             "resumed": resumed.is_some(),
         });
@@ -871,6 +895,9 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         }
         None => req_id.to_string(),
     };
+    if let Some(id) = &start.instance {
+        check_id("instance", id)?;
+    }
     let requested = start.mode.as_deref().map(parse_mode).transpose()?;
     // Everything else is the stream's own validation.
     let mut fields = json!({"sample_rate": rate, "partials": start.partials.unwrap_or(true)});
@@ -943,6 +970,8 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
         start.typed_frames,
     );
     live.library_stamp = library_stamp;
+    live.instance = start.instance.clone();
+    live.guard = start.guard;
     live.ambient.set_wake_words(&wake_words());
     let ready = json!({
         "type": "ready", "session": session_id, "model": cfg.model, "load_ms": load_ms,
@@ -1404,8 +1433,16 @@ async fn client_message(
             *stopping = true;
             let _ = input.send(Input::Stop);
         }
-        ClientMessage::Enroll { action, person } => {
-            let mut events = enroll(st, req_id, live, &action, person).await;
+        ClientMessage::Enroll {
+            action,
+            person,
+            instance,
+        } => {
+            if let Some(id) = &instance {
+                check_id("instance", id)?;
+            }
+            let instance = instance.or_else(|| live.instance.clone());
+            let mut events = enroll(st, req_id, live, &action, person, instance).await;
             if let Some((key, _)) = conv {
                 let before = events.len();
                 events.retain(|e| e["type"] != "state");
@@ -1522,19 +1559,21 @@ async fn speak(
 }
 
 /// `enroll` actions: `begin` records the microphone (for `person`, else the
-/// owner), `finish` adds the recording to that person as a new clip, `cancel`
-/// drops it, `clear` deletes the owner's clips.
+/// owner of `instance`), `finish` adds the recording to that person as a new
+/// clip, `cancel` drops it, `clear` deletes the owner of `instance`'s clips.
 async fn enroll(
     st: &Arc<AppState>,
     req_id: &str,
     live: &mut Live,
     action: &str,
     person: Option<u64>,
+    instance: Option<String>,
 ) -> Vec<Value> {
     match action {
         "begin" => {
             live.enrolling = Some(Vec::new());
             live.enroll_person = person;
+            live.enroll_instance = instance;
             vec![live.state_event(None)]
         }
         "cancel" => {
@@ -1550,6 +1589,7 @@ async fn enroll(
                 )];
             };
             let target = live.enroll_person.take();
+            let target_instance = live.enroll_instance.take();
             let st2 = st.clone();
             let result = tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
                 if clip.len() < speaker::MIN_SAMPLES {
@@ -1568,7 +1608,7 @@ async fn enroll(
                 Library::update(home, |l| {
                     let id = match target {
                         Some(id) => l.person(id)?.id,
-                        None => l.ensure_owner(),
+                        None => l.ensure_owner(target_instance.as_deref()),
                     };
                     l.reembed(home, |pcm| verifier.embed(pcm))?;
                     l.add_clip(home, id, &clip, embedding).map(|_| ())
@@ -1608,9 +1648,11 @@ async fn enroll(
             let cleared = tokio::task::spawn_blocking({
                 let home = home.clone();
                 move || {
-                    Library::update(&home, |l| match l.owner().map(|o| o.id) {
-                        Some(owner) => l.clear_clips(&home, owner),
-                        None => Ok(false),
+                    Library::update(&home, |l| {
+                        match l.owner_of(instance.as_deref()).map(|o| o.id) {
+                            Some(owner) => l.clear_clips(&home, owner),
+                            None => Ok(false),
+                        }
                     })
                 }
             })
@@ -1717,8 +1759,10 @@ async fn finish_segment(
     let verdict = identity.as_ref().map(|i| i.verdict);
     // The live guard is opt-in, needs the owner's voice, and never drops a
     // short reply; scoring above is only a tag when it is off.
-    let guard = live.library.live_guard
-        && live.library.owner_ready(DEFAULT_MODEL)
+    let guard = live.guard_on()
+        && live
+            .library
+            .owner_ready(live.instance.as_deref(), DEFAULT_MODEL)
         && end - start >= GUARD_MIN_SECONDS;
     let admitted = match mode {
         _ if echo => false,
@@ -1955,6 +1999,7 @@ async fn score(st: &Arc<AppState>, live: &mut Live, start: f64, end: f64) -> Opt
             .map(Arc::new);
     }
     let verifier = live.verifier.clone();
+    let instance = live.instance.clone();
     let home = st.registry.home().to_path_buf();
     let migrate = !live.migrate_failed;
     let (identity, failed) = tokio::task::spawn_blocking(move || {
@@ -1972,6 +2017,7 @@ async fn score(st: &Arc<AppState>, live: &mut Live, start: f64, end: f64) -> Opt
         let identity = speaker::identify(
             verifier.as_deref(),
             Some(&library),
+            instance.as_deref(),
             false,
             &pcm,
             DEFAULT_THRESHOLD,

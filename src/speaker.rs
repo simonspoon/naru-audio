@@ -132,8 +132,13 @@ pub struct Clip {
 pub struct Person {
     pub id: u64,
     pub name: String,
-    /// The voice the live guard admits ("him"); at most one person.
+    /// The voice the live guard admits ("him"); at most one person per
+    /// `instance`.
     pub owner: bool,
+    /// The Naru instance this person belongs to (naru task 2665); `None` is
+    /// the legacy/default one, used by clients that send no instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     pub clips: Vec<Clip>,
 }
 
@@ -259,6 +264,7 @@ impl Library {
                     id: 1,
                     name: OWNER_NAME.to_string(),
                     owner: true,
+                    instance: None,
                     clips: vec![Clip {
                         id: 1,
                         created_at: now_secs(),
@@ -305,8 +311,16 @@ impl Library {
         saved
     }
 
+    /// The legacy/default owner: the one with no instance.
     pub fn owner(&self) -> Option<&Person> {
-        self.people.iter().find(|p| p.owner)
+        self.owner_of(None)
+    }
+
+    /// The owner of `instance` (`None`: the legacy/default owner).
+    pub fn owner_of(&self, instance: Option<&str>) -> Option<&Person> {
+        self.people
+            .iter()
+            .find(|p| p.owner && p.instance.as_deref() == instance)
     }
 
     pub fn person(&self, id: u64) -> Result<&Person, SpeakerError> {
@@ -331,45 +345,57 @@ impl Library {
         person.clips.iter().collect()
     }
 
-    /// Whether the owner has a clip that can be scored against `model`.
-    pub fn owner_ready(&self, model: &str) -> bool {
-        self.owner()
+    /// Whether the owner of `instance` has a clip that can be scored against
+    /// `model`.
+    pub fn owner_ready(&self, instance: Option<&str>, model: &str) -> bool {
+        self.owner_of(instance)
             .is_some_and(|o| !self.usable(o, model).is_empty())
     }
 
-    /// Adds a person; `owner` makes them the owner, clearing it on the others.
-    pub fn add_person(&mut self, name: &str, owner: bool) -> u64 {
+    /// Clears `owner` on everyone of `instance`.
+    fn disown(&mut self, instance: Option<&str>) {
+        self.people
+            .iter_mut()
+            .filter(|p| p.instance.as_deref() == instance)
+            .for_each(|p| p.owner = false);
+    }
+
+    /// Adds a person to `instance`; `owner` makes them its owner, clearing it
+    /// on the instance's others.
+    pub fn add_person(&mut self, name: &str, owner: bool, instance: Option<&str>) -> u64 {
         let id = self.people.iter().map(|p| p.id).max().unwrap_or(0) + 1;
         if owner {
-            self.people.iter_mut().for_each(|p| p.owner = false);
+            self.disown(instance);
         }
         self.people.push(Person {
             id,
             name: name.to_string(),
             owner,
+            instance: instance.map(str::to_string),
             clips: Vec::new(),
         });
         id
     }
 
-    /// The owner's id, creating "Me" when nobody owns the library yet.
-    pub fn ensure_owner(&mut self) -> u64 {
-        match self.owner() {
+    /// The owner of `instance`'s id, creating "Me" when it has none yet.
+    pub fn ensure_owner(&mut self, instance: Option<&str>) -> u64 {
+        match self.owner_of(instance) {
             Some(o) => o.id,
-            None => self.add_person(OWNER_NAME, true),
+            None => self.add_person(OWNER_NAME, true, instance),
         }
     }
 
-    /// Renames and/or re-owns; setting `owner` true clears it on the others.
+    /// Renames and/or re-owns; setting `owner` true clears it on the others
+    /// of the person's instance.
     pub fn patch_person(
         &mut self,
         id: u64,
         name: Option<&str>,
         owner: Option<bool>,
     ) -> Result<(), SpeakerError> {
-        self.person(id)?;
+        let instance = self.person(id)?.instance.clone();
         if owner == Some(true) {
-            self.people.iter_mut().for_each(|p| p.owner = false);
+            self.disown(instance.as_deref());
         }
         let person = self.person_mut(id)?;
         if let Some(name) = name {
@@ -685,12 +711,16 @@ pub struct Identity {
 }
 
 /// The pure decision. `embedding` is the clip's embedding, `None` when the
-/// model could not produce one. Every case but a scored one fails open. With
-/// `only_owner` only the owner is a candidate (the legacy `verify`); else every
-/// person with a usable clip is scored and the best at or above `threshold`
-/// wins. A scored clip matching nobody is `is_him: false` with no person.
+/// model could not produce one. Every case but a scored one fails open. "The
+/// owner" is the owner of `instance` (`None`: the legacy/default owner); any
+/// other instance's owner is just another person. With `only_owner` only the
+/// owner is a candidate (the legacy `verify`); else every person with a usable
+/// clip is scored and the best at or above `threshold` wins. A scored clip
+/// matching nobody is `is_him: false` with no person. A named instance whose
+/// owner has no usable clip fails open.
 pub fn judge(
     library: Option<&Library>,
+    instance: Option<&str>,
     only_owner: bool,
     model: &str,
     samples: usize,
@@ -704,10 +734,11 @@ pub fn judge(
     let Some(library) = library else {
         return open(Reason::NoEnrollment);
     };
+    let is_owner = |p: &Person| p.owner && p.instance.as_deref() == instance;
     let candidates: Vec<(&Person, Vec<&Clip>)> = library
         .people
         .iter()
-        .filter(|p| p.owner || !only_owner)
+        .filter(|p| is_owner(p) || !only_owner)
         .map(|p| (p, library.usable(p, model)))
         .filter(|(_, clips)| !clips.is_empty())
         .collect();
@@ -718,6 +749,9 @@ pub fn judge(
         } else {
             Reason::NoEnrollment
         });
+    }
+    if instance.is_some() && !candidates.iter().any(|(p, _)| is_owner(p)) {
+        return open(Reason::NoEnrollment);
     }
     if samples < MIN_SAMPLES {
         return open(Reason::TooShort);
@@ -733,13 +767,13 @@ pub fn judge(
     // scores higher: wrongly dropping him is worse than admitting another.
     // Someone's clips scored but the owner's could not (a dimension mismatch):
     // fail open rather than call the owner another voice.
-    if candidates.iter().any(|(p, _)| p.owner) && !scored.iter().any(|(p, _)| p.owner) {
+    if candidates.iter().any(|(p, _)| is_owner(p)) && !scored.iter().any(|(p, _)| is_owner(p)) {
         return open(Reason::ModelUnavailable);
     }
     let best = scored
         .iter()
         .copied()
-        .find(|(p, s)| p.owner && *s >= threshold)
+        .find(|(p, s)| is_owner(p) && *s >= threshold)
         .or_else(|| scored.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)));
     let Some((person, score)) = best else {
         return open(Reason::ModelUnavailable);
@@ -748,7 +782,7 @@ pub fn judge(
     Identity {
         verdict: Verdict {
             score: Some(score),
-            is_him: matched && person.owner,
+            is_him: matched && is_owner(person),
             reason: Reason::Scored,
         },
         person: matched.then(|| PersonRef {
@@ -763,6 +797,7 @@ pub fn judge(
 pub fn identify(
     verifier: Option<&SpeakerVerifier>,
     library: Option<&Library>,
+    instance: Option<&str>,
     only_owner: bool,
     pcm: &[f32],
     threshold: f32,
@@ -773,6 +808,7 @@ pub fn identify(
     };
     judge(
         library,
+        instance,
         only_owner,
         DEFAULT_MODEL,
         pcm.len(),
@@ -818,6 +854,7 @@ mod tests {
                 id: i as u64 + 1,
                 name: name.to_string(),
                 owner: *owner,
+                instance: None,
                 clips: clips
                     .iter()
                     .map(|e| {
@@ -839,6 +876,7 @@ mod tests {
     fn id(lib: &Library, emb: &[f32], thr: f32, only_owner: bool) -> Identity {
         judge(
             Some(lib),
+            None,
             only_owner,
             DEFAULT_MODEL,
             MIN_SAMPLES,
@@ -1045,7 +1083,7 @@ mod tests {
         let lib = library(&[("Me", true, &[&[1.0, 0.0]])]);
         let orthogonal: &[f32] = &[0.0, 1.0];
         let run = |l: Option<&Library>, model, samples, emb| {
-            judge(l, true, model, samples, emb, 0.5).verdict
+            judge(l, None, true, model, samples, emb, 0.5).verdict
         };
         let v = run(None, DEFAULT_MODEL, MIN_SAMPLES, Some(orthogonal));
         assert!(v.is_him && v.reason == Reason::NoEnrollment);
@@ -1066,7 +1104,15 @@ mod tests {
         );
         assert!(v.is_him && v.reason == Reason::ModelUnavailable);
         // no verifier at all (model not pulled): open, even with a long clip
-        let v = identify(None, Some(&lib), true, &vec![0.0; MIN_SAMPLES * 2], 0.5).verdict;
+        let v = identify(
+            None,
+            Some(&lib),
+            None,
+            true,
+            &vec![0.0; MIN_SAMPLES * 2],
+            0.5,
+        )
+        .verdict;
         assert!(v.is_him && v.reason == Reason::ModelUnavailable);
     }
 
@@ -1076,8 +1122,8 @@ mod tests {
         let h = home.path();
         assert_eq!(Library::load(h).unwrap(), Library::default());
         let (me, sam) = Library::update(h, |l| {
-            let me = l.ensure_owner();
-            let sam = l.add_person("Sam", false);
+            let me = l.ensure_owner(None);
+            let sam = l.add_person("Sam", false, None);
             l.add_clip(h, me, &vec![0.1; 16_000], vec![1.0, 0.0])?;
             l.add_clip(h, sam, &vec![0.1; 8_000], vec![0.0, 1.0])?;
             Ok((me, sam))
@@ -1085,7 +1131,7 @@ mod tests {
         .unwrap();
         let lib = Library::load(h).unwrap();
         assert_eq!(lib.owner().unwrap().id, me);
-        assert!(lib.owner_ready(DEFAULT_MODEL) && !lib.owner_ready("x"));
+        assert!(lib.owner_ready(None, DEFAULT_MODEL) && !lib.owner_ready(None, "x"));
         let clip = lib.person(sam).unwrap().clips[0].clone();
         assert!(clip.has_audio && (clip.seconds - 0.5).abs() < 1e-6);
         assert!(Library::clip_path(h, clip.id).is_file());
@@ -1144,7 +1190,7 @@ mod tests {
         let h = home.path();
         let pcm = vec![0.1; 16_000];
         let me = Library::update(h, |l| {
-            let me = l.ensure_owner();
+            let me = l.ensure_owner(None);
             l.add_clip(h, me, &pcm, vec![1.0, 0.0])?;
             Ok(me)
         })
@@ -1204,14 +1250,14 @@ mod tests {
             (a, b)
         };
         let (a, b) = Library::update(h, |l| {
-            let me = l.ensure_owner();
+            let me = l.ensure_owner(None);
             Ok(ids(l, me))
         })
         .unwrap();
         assert!(b > a);
         // the counter survives a reload
         let c = Library::update(h, |l| {
-            let me = l.ensure_owner();
+            let me = l.ensure_owner(None);
             l.remove_clip(h, me, b)?;
             Ok(l.add_clip(h, me, &pcm, vec![1.0])?.id)
         })
@@ -1243,7 +1289,7 @@ mod tests {
         let h = home.path();
         let pcm = vec![0.1; 16_000];
         let (kept, gone) = Library::update(h, |l| {
-            let me = l.ensure_owner();
+            let me = l.ensure_owner(None);
             let kept = l.add_clip(h, me, &pcm, vec![1.0, 0.0])?.id;
             let gone = l.add_clip(h, me, &pcm, vec![1.0, 0.0])?.id;
             // a migrated enrollment, which has no audio
@@ -1267,7 +1313,7 @@ mod tests {
         assert_eq!(clips.iter().map(|c| c.id).collect::<Vec<_>>(), [kept]);
         // the WAV round-trips to the same length
         assert_eq!(clips[0].embedding, vec![16_000.0, 0.5]);
-        assert!(lib.owner_ready(DEFAULT_MODEL));
+        assert!(lib.owner_ready(None, DEFAULT_MODEL));
         // a library already on the model is left alone
         let mut again = lib.clone();
         assert!(
@@ -1283,6 +1329,110 @@ mod tests {
             (again.model.as_str(), again.people[0].clips.len()),
             ("wespeaker-sv-en", 1)
         );
+    }
+
+    /// A library with a legacy owner, owners of instances "a" and "b", and Sam.
+    fn instances() -> Library {
+        let mut lib = library(&[
+            ("Me", true, &[&[1.0, 0.0, 0.0, 0.0]]),
+            ("A", true, &[&[0.0, 1.0, 0.0, 0.0]]),
+            ("B", true, &[&[0.0, 0.0, 1.0, 0.0]]),
+            ("Sam", false, &[&[0.0, 0.0, 0.0, 1.0]]),
+        ]);
+        lib.people[1].instance = Some("a".into());
+        lib.people[2].instance = Some("b".into());
+        lib
+    }
+
+    fn judged(lib: &Library, instance: Option<&str>, emb: &[f32]) -> Identity {
+        judge(
+            Some(lib),
+            instance,
+            false,
+            DEFAULT_MODEL,
+            MIN_SAMPLES,
+            Some(emb),
+            0.5,
+        )
+    }
+
+    #[test]
+    fn each_instance_judges_against_its_own_owner() {
+        let lib = instances();
+        let (me, a, b) = (
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        );
+        assert_eq!(lib.owner_of(Some("a")).unwrap().name, "A");
+        assert_eq!(lib.owner().unwrap().name, "Me");
+        // instance a admits A and calls B (and the legacy owner) another, named
+        let i = judged(&lib, Some("a"), &a);
+        assert!(i.verdict.is_him && i.person.unwrap().name == "A");
+        let i = judged(&lib, Some("a"), &b);
+        assert!(!i.verdict.is_him && i.person.unwrap().name == "B");
+        assert!(!judged(&lib, Some("a"), &me).verdict.is_him);
+        // instance b the reverse
+        assert!(judged(&lib, Some("b"), &b).verdict.is_him);
+        assert!(!judged(&lib, Some("b"), &a).verdict.is_him);
+        // no instance: the legacy owner only
+        assert!(judged(&lib, None, &me).verdict.is_him);
+        assert!(!judged(&lib, None, &a).verdict.is_him);
+        // only_owner (verify) scores the instance's owner alone
+        let v = judge(
+            Some(&lib),
+            Some("a"),
+            true,
+            DEFAULT_MODEL,
+            MIN_SAMPLES,
+            Some(&a),
+            0.5,
+        );
+        assert!(v.verdict.is_him && v.verdict.reason == Reason::Scored);
+        // an instance with no owner, or one with no clips, fails open
+        let v = judged(&lib, Some("c"), &b).verdict;
+        assert!(v.is_him && v.reason == Reason::NoEnrollment);
+        let mut bare = lib.clone();
+        bare.people[1].clips.clear();
+        let v = judged(&bare, Some("a"), &b).verdict;
+        assert!(v.is_him && v.reason == Reason::NoEnrollment);
+        assert!(!bare.owner_ready(Some("a"), DEFAULT_MODEL));
+        assert!(bare.owner_ready(Some("b"), DEFAULT_MODEL));
+    }
+
+    #[test]
+    fn owners_are_unique_per_instance() {
+        let mut lib = instances();
+        let a2 = lib.add_person("A2", true, Some("a"));
+        let owners = |l: &Library| {
+            l.people
+                .iter()
+                .filter(|p| p.owner)
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(owners(&lib), ["Me", "B", "A2"]);
+        lib.patch_person(2, None, Some(true)).unwrap();
+        assert_eq!(owners(&lib), ["Me", "A", "B"]);
+        assert_eq!(lib.ensure_owner(Some("a")), 2);
+        let c = lib.ensure_owner(Some("c"));
+        assert_eq!(lib.person(c).unwrap().instance.as_deref(), Some("c"));
+        assert_eq!(lib.ensure_owner(None), 1);
+        assert!(!lib.person(a2).unwrap().owner);
+    }
+
+    #[test]
+    fn an_old_library_loads_and_saves_unchanged() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let old = r#"{"model":"campplus-sv-en","live_guard":true,"people":[{"id":1,"name":"Me","owner":true,"clips":[{"id":1,"created_at":5,"seconds":2.0,"embedding":[0.6,0.8],"has_audio":false}]}],"next_clip_id":2}"#;
+        std::fs::create_dir_all(h.join("speaker")).unwrap();
+        std::fs::write(Library::path(h), old).unwrap();
+        let lib = Library::load(h).unwrap();
+        assert!(lib.live_guard && lib.owner().unwrap().instance.is_none());
+        assert!(lib.owner_ready(None, DEFAULT_MODEL));
+        lib.save(h).unwrap();
+        assert_eq!(std::fs::read_to_string(Library::path(h)).unwrap(), old);
     }
 
     #[test]

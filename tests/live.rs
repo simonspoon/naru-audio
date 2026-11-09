@@ -1384,7 +1384,7 @@ fn write_library(home: &Path, live_guard: bool, people: &[(&str, bool, &[&str])]
     let mut lib = Library::default();
     lib.live_guard = live_guard;
     for (name, owner, clips) in people {
-        let id = lib.add_person(name, *owner);
+        let id = lib.add_person(name, *owner, None);
         let person = lib.people.iter_mut().find(|p| p.id == id).unwrap();
         for (i, clip) in clips.iter().enumerate() {
             person.clips.push(Clip {
@@ -1494,4 +1494,62 @@ async fn ambient_lines_name_the_person_whatever_the_guard() {
         .map(|e| &e["speaker"]["person"]["name"])
         .collect();
     assert_eq!(names, ["Me", "Sam"], "{events:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_instance_guards_with_its_own_owner() {
+    let Some(home) = model_home() else { return };
+    let Some(()) = write_library(
+        home.path(),
+        false,
+        &[
+            ("A", true, &["a1.wav", "a2.wav"]),
+            ("B", true, &["b1.wav", "b2.wav"]),
+        ],
+    ) else {
+        return;
+    };
+    let mut lib = Library::load(home.path()).unwrap();
+    // written as one instance, where only the last owner stays one
+    lib.people[0].owner = true;
+    lib.people[0].instance = Some("mac-a".into());
+    lib.people[1].instance = Some("mac-b".into());
+    lib.save(home.path()).unwrap();
+    let addr = serve(home.path()).await;
+    // the session's guard overrides the library's switch, which is off
+    let (mut a, state) = ready(&addr, json!({"instance": "mac-a", "guard": true})).await;
+    assert_eq!(
+        (state["live_guard"].clone(), state["enrolled"].clone()),
+        (json!(true), json!(true)),
+        "{state}"
+    );
+    let (mut b, _) = ready(&addr, json!({"instance": "mac-b", "guard": true})).await;
+    let short = |name: &str| {
+        let pcm = voice(name);
+        spoken(pcm[..pcm.len().min(24_000)].to_vec())
+    };
+    for (ws, other, own) in [(&mut a, "b3.wav", "a3.wav"), (&mut b, "a3.wav", "b3.wav")] {
+        send_audio(ws, &spoken(voice(other))).await;
+        send_audio(ws, &spoken(voice(own))).await;
+        // a short reply in the other voice is never dropped
+        send_audio(ws, &short(other)).await;
+    }
+    let (ea, eb) = (stop(&mut a).await, stop(&mut b).await);
+    for (events, own) in [(&ea, "A"), (&eb, "B")] {
+        let heard = heard_utterances(events);
+        assert_eq!(heard.len(), 2, "{events:?}");
+        assert_eq!(heard[0]["speaker"]["is_him"], true, "{}", heard[0]);
+        assert_eq!(heard[0]["speaker"]["person"]["name"], own, "{}", heard[0]);
+        let len = heard[1]["end"].as_f64().unwrap() - heard[1]["start"].as_f64().unwrap();
+        assert!(len < 2.0, "{}", heard[1]);
+    }
+    // no instance and no guard field: today's behaviour, nothing dropped
+    let (mut legacy, state) = ready(&addr, json!({})).await;
+    assert_eq!(
+        (state["live_guard"].clone(), state["enrolled"].clone()),
+        (json!(false), json!(false)),
+        "{state}"
+    );
+    send_audio(&mut legacy, &spoken(voice("b3.wav"))).await;
+    assert_eq!(heard_utterances(&stop(&mut legacy).await).len(), 1);
 }

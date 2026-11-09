@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::multipart::MultipartRejection;
-use axum::extract::{Extension, Multipart, Path, State};
+use axum::extract::{Extension, Multipart, Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
@@ -28,6 +28,7 @@ use crate::stt::audio::{self, AudioError};
 struct Form {
     files: Vec<axum::body::Bytes>,
     threshold: Option<String>,
+    instance: Option<String>,
 }
 
 async fn read_form(multipart: Result<Multipart, MultipartRejection>) -> Result<Form, ApiError> {
@@ -41,6 +42,7 @@ async fn read_form(multipart: Result<Multipart, MultipartRejection>) -> Result<F
     let mut form = Form {
         files: Vec::new(),
         threshold: None,
+        instance: None,
     };
     while let Some(field) = multipart.next_field().await.map_err(multipart_error)? {
         match field.name().unwrap_or_default() {
@@ -48,6 +50,7 @@ async fn read_form(multipart: Result<Multipart, MultipartRejection>) -> Result<F
                 .files
                 .push(field.bytes().await.map_err(multipart_error)?),
             "threshold" => form.threshold = Some(field.text().await.map_err(multipart_error)?),
+            "instance" => form.instance = Some(field.text().await.map_err(multipart_error)?),
             _ => {}
         }
     }
@@ -88,6 +91,19 @@ pub(super) fn normalize_level(pcm: &mut [f32]) -> Result<(), ApiError> {
         .map_err(|e| bad_request("file", "clip_too_quiet", e.to_string()))
 }
 
+/// An optional Naru instance id (naru task 2665): absent is the legacy/default
+/// owner; present must be 1 to 128 characters, as on the live socket.
+fn instance_of(raw: Option<String>) -> Result<Option<String>, ApiError> {
+    match raw {
+        Some(s) if s.is_empty() || s.chars().count() > 128 => Err(bad_request(
+            "instance",
+            "invalid_request",
+            "instance must be 1 to 128 characters",
+        )),
+        other => Ok(other),
+    }
+}
+
 const NO_CLIPS: &str = "enrolling needs at least one \"file\" clip of 1 s or more";
 
 fn speaker_error(st: &AppState, req_id: &str, e: SpeakerError) -> ApiError {
@@ -124,7 +140,7 @@ async fn blocking<T: Send + 'static>(
 
 fn person_json(p: &Person) -> Value {
     json!({
-        "id": p.id, "name": p.name, "owner": p.owner,
+        "id": p.id, "name": p.name, "owner": p.owner, "instance": p.instance,
         "clips": p.clips.iter().map(|c| json!({
             "id": c.id, "created_at": c.created_at, "seconds": c.seconds,
             "has_audio": c.has_audio,
@@ -164,18 +180,21 @@ pub(super) async fn list_people(
 pub(super) struct PersonBody {
     name: Option<String>,
     owner: Option<bool>,
+    /// Only on create; a person's instance does not change.
+    instance: Option<String>,
 }
 
-/// `POST /v1/audio/speaker/people` `{name, owner?}`.
+/// `POST /v1/audio/speaker/people` `{name, owner?, instance?}`.
 pub(super) async fn create_person(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
     Json(body): Json<PersonBody>,
 ) -> Result<Json<Value>, ApiError> {
     let name = name_of(body.name.as_deref().unwrap_or_default())?.to_string();
+    let instance = instance_of(body.instance)?;
     blocking(&st, &req_id, move |st, req_id| {
         Library::update(st.registry.home(), |l| {
-            let id = l.add_person(&name, body.owner.unwrap_or(false));
+            let id = l.add_person(&name, body.owner.unwrap_or(false), instance.as_deref());
             Ok(person_json(l.person(id)?))
         })
         .map_err(|e| speaker_error(st, req_id, e))
@@ -345,13 +364,15 @@ pub(super) async fn put_guard(
 }
 
 /// `POST /v1/audio/speaker/enroll` (legacy): one or more `file` WAV clips that
-/// replace the owner's clips, creating the owner "Me" if there is none.
+/// replace the owner's clips (of the optional `instance`), creating the owner
+/// "Me" if there is none.
 pub(super) async fn enroll(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    let form = read_form(multipart).await?;
+    let mut form = read_form(multipart).await?;
+    let instance = instance_of(form.instance.take())?;
     blocking(&st, &req_id, move |st, req_id| {
         let clips = form
             .files
@@ -380,7 +401,7 @@ pub(super) async fn enroll(
         let count = embedded.len();
         Library::update(home, |l| {
             l.reembed(home, |pcm| verifier.embed(pcm))?;
-            let owner = l.ensure_owner();
+            let owner = l.ensure_owner(instance.as_deref());
             l.clear_clips(home, owner)?;
             for (pcm, embedding) in embedded {
                 l.add_clip(home, owner, &pcm, embedding)?;
@@ -394,8 +415,8 @@ pub(super) async fn enroll(
     .map(Json)
 }
 
-/// `POST /v1/audio/speaker/verify`: one `file` clip scored against the owner,
-/// optional `threshold`.
+/// `POST /v1/audio/speaker/verify`: one `file` clip scored against the owner
+/// (of the optional `instance`), optional `threshold`.
 pub(super) async fn verify(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
@@ -408,6 +429,7 @@ pub(super) async fn verify(
         .ok_or_else(|| bad_request("file", "invalid_request", "the \"file\" field is required"))?
         .clone();
     let threshold = threshold(form.threshold.as_deref())?;
+    let instance = instance_of(form.instance)?;
     blocking(&st, &req_id, move |st, req_id| {
         let pcm = decode(&wav)?;
         let home = st.registry.home();
@@ -416,9 +438,14 @@ pub(super) async fn verify(
         // the model, so neither needs it pulled. A library of another model
         // uses the model only to re-embed, failing open without it.
         let long = pcm.len() >= speaker::MIN_SAMPLES;
-        let verifier = if library.owner_ready(DEFAULT_MODEL) && long {
+        let instance = instance.as_deref();
+        let verifier = if library.owner_ready(instance, DEFAULT_MODEL) && long {
             Some(load_verifier(st)?)
-        } else if library.owner().is_some_and(|o| !o.clips.is_empty()) && long {
+        } else if library
+            .owner_of(instance)
+            .is_some_and(|o| !o.clips.is_empty())
+            && long
+        {
             load_verifier(st).ok()
         } else {
             None
@@ -428,7 +455,15 @@ pub(super) async fn verify(
         {
             library = speaker::migrate(home, v).map_err(|e| speaker_error(st, req_id, e))?;
         }
-        let v = speaker::identify(verifier.as_ref(), Some(&library), true, &pcm, threshold).verdict;
+        let v = speaker::identify(
+            verifier.as_ref(),
+            Some(&library),
+            instance,
+            true,
+            &pcm,
+            threshold,
+        )
+        .verdict;
         Ok(json!({
             "score": v.score,
             "is_him": v.is_him,
@@ -440,16 +475,26 @@ pub(super) async fn verify(
     .map(Json)
 }
 
-/// `DELETE /v1/audio/speaker/enrollment` (legacy): removes the owner's clips.
+#[derive(Deserialize)]
+pub(super) struct InstanceQuery {
+    instance: Option<String>,
+}
+
+/// `DELETE /v1/audio/speaker/enrollment[?instance=]` (legacy): removes the
+/// owner's clips.
 pub(super) async fn delete_enrollment(
     State(st): State<Arc<AppState>>,
     Extension(RequestId(req_id)): Extension<RequestId>,
+    Query(query): Query<InstanceQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let deleted = blocking(&st, &req_id, |st, req_id| {
+    let instance = instance_of(query.instance)?;
+    let deleted = blocking(&st, &req_id, move |st, req_id| {
         let home = st.registry.home();
-        Library::update(home, |l| match l.owner().map(|o| o.id) {
-            Some(owner) => l.clear_clips(home, owner),
-            None => Ok(false),
+        Library::update(home, |l| {
+            match l.owner_of(instance.as_deref()).map(|o| o.id) {
+                Some(owner) => l.clear_clips(home, owner),
+                None => Ok(false),
+            }
         })
         .map_err(|e| speaker_error(st, req_id, e))
     })

@@ -111,11 +111,18 @@ Scoring lives in `src/speaker.rs` (naru tasks 2028, 2260, 2354), not in the stat
 catalog model (3D-Speaker CAM++ via sherpa-onnx, `kind = "speaker"`; `wespeaker-sv-en` until task 2354) embeds 16 kHz
 mono audio. CAM++ pools in 2 s segments and mis-scores a short last one, so each clip is tiled (repeated from its
 start) to a whole number of 2 s segments before it is embedded. The voice library is
-`$NARU_AUDIO_HOME/speaker/people.json`: `{model, live_guard, people: [{id, name, owner, clips: [{id, created_at,
+`$NARU_AUDIO_HOME/speaker/people.json`: `{model, live_guard, people: [{id, name, owner, instance?, clips: [{id, created_at,
 seconds, embedding, has_audio}]}]}`, tagged with the model name (embeddings of different models are never compared).
 A library made with another model fails open until the current model is loaded (a live segment to score, a `verify`,
 or a new clip), which re-embeds every clip from its kept WAV and drops a clip that has no audio. Ids are integers. Each clip's audio is kept as a 16 kHz mono WAV in
-`speaker/clips/<clip id>.wav` (`has_audio`). At most one person is the owner: "him". When `people.json` is absent, an
+`speaker/clips/<clip id>.wav` (`has_audio`). At most one person per instance is the owner: "him".
+
+**Instances** (naru task 2665): several Naru instances (machines) can share one naru-audio. A person may carry an
+`instance` id (a string; omitted from the file when absent); each instance has at most one owner, and a person with no
+instance belongs to the legacy/default instance, whose owner is the one every client that sends no instance gets. A
+session, request or enrollment naming an instance judges against that instance's owner only; every other person,
+including other instances' owners, is just another person. A named instance whose owner has no usable clip fails open
+(`no_enrollment`). An old `people.json` loads and saves unchanged. When `people.json` is absent, an
 old `speaker/enrollment.json` (else `enrollment.json.off-20261022`) is migrated into an owner named "Me" with one clip
 (`has_audio: false`, `seconds: 0`); the old file is left in place.
 
@@ -132,8 +139,13 @@ can be re-measured on a real enrollment.
 pulled, a mismatched library, or a clip under 1 s (`MIN_SAMPLES`) all answer `is_him: true`, with `reason`
 `no_enrollment`, `model_unavailable`, `model_mismatch` or `too_short` (`scored` otherwise).
 
-The **live guard** is a separate switch, `live_guard` (default off). It drops a segment in `live` mode only when
-`live_guard` is true, the owner has at least one usable clip, the segment is at least 2.0 s long, and the match
+The **live guard** is a separate switch, `live_guard` (default off). The `start` message's optional `guard` (bool)
+overrides it for that session, and its optional `instance` (1-128 characters) picks whose owner the guard and ambient
+tagging judge against; clients should send `guard` per session rather than flip the library-wide switch, which stays
+as the default for sessions that send none. The session's `state` reports the effective `live_guard`, and `enrolled`
+for its instance's owner. An `enroll` message may carry `instance` too (default: the session's), naming whose owner
+`begin` (with no `person`) records and `clear` empties. It drops a segment in `live` mode only when
+the guard is on, the owner has at least one usable clip, the segment is at least 2.0 s long, and the match
 is not the owner (another person, or nobody). Shorter segments are always admitted; with the switch off `live` never
 drops a segment for speaker reasons. Scoring still runs for the `speaker` tag. A running session reloads
 `people.json` when it changes, so library edits and the switch apply without a restart. Ambient tagging scores every
@@ -149,16 +161,17 @@ like `/v1/audio/transcriptions`.
 
 | Route | |
 |---|---|
-| `GET /v1/audio/speaker/people` | `{model, live_guard, people: [{id, name, owner, clips: [{id, created_at, seconds, has_audio}]}]}`; no embeddings |
-| `POST /v1/audio/speaker/people` | `{name, owner?}` makes a person (the same shape as one list entry) |
-| `PATCH /v1/audio/speaker/people/{id}` | `{name?, owner?}`; `owner: true` clears it on the others |
+| `GET /v1/audio/speaker/people` | `{model, live_guard, people: [{id, name, owner, instance, clips: [{id, created_at, seconds, has_audio}]}]}`; no embeddings; `instance` is `null` for the legacy/default instance |
+| `POST /v1/audio/speaker/people` | `{name, owner?, instance?}` makes a person (the same shape as one list entry); `owner: true` clears it on the instance's others |
+| `PATCH /v1/audio/speaker/people/{id}` | `{name?, owner?}`; `owner: true` clears it on the others of the person's instance (which does not change) |
 | `DELETE /v1/audio/speaker/people/{id}` | `{deleted: true}`; removes its clips' WAVs |
 | `POST /v1/audio/speaker/people/{id}/clips` | multipart `file` WAV; normalizes its speech to -20 dBFS (peak held under -1 dBFS), then embeds and keeps it; answers the clip `{id, created_at, seconds, has_audio}`; 400 under 1 s; 400 `clip_too_quiet` (re-record) when it needs over +24 dB or its speech is under 10 dB above its noise floor (naru task 2413) |
 | `GET /v1/audio/speaker/people/{id}/clips/{clip}/audio` | `audio/wav`; 404 when the clip has no audio |
 | `DELETE /v1/audio/speaker/people/{id}/clips/{clip}` | `{deleted: true}` |
-| `GET` / `PUT /v1/audio/speaker/guard` | `{live: bool}` (PUT takes the same body) |
+| `GET` / `PUT /v1/audio/speaker/guard` | `{live: bool}` (PUT takes the same body); the legacy library-wide default, overridden by a session's `guard` |
 
-Legacy single-voice routes, same response shapes, now over the owner: `POST /v1/audio/speaker/enroll` (one or more
+Legacy single-voice routes, same response shapes, now over the owner (of the optional `instance`: a multipart field on
+`enroll` and `verify`, `?instance=` on `DELETE enrollment`; empty or over 128 characters is 400): `POST /v1/audio/speaker/enroll` (one or more
 `file` clips replace the owner's clips, creating the owner "Me" if there is none, and keep their audio; 400 when none is
 1 s or longer; answers `{model, count, dim}`), `POST /v1/audio/speaker/verify` (`file`, optional `threshold`; scored
 against the owner only; answers `{score, is_him, reason, threshold}`), `DELETE /v1/audio/speaker/enrollment` (removes
