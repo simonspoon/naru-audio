@@ -85,6 +85,19 @@ async fn serve(home: &Path) -> String {
 }
 
 async fn serve_with(home: &Path, mic: Option<AmbientHost>) -> String {
+    // The wake list comes from naru's config, the real `~/.naru/config.json`
+    // unless overridden; pin it to "Naru" so the wake tests don't depend on
+    // the person's install (naru task 2675). Set once, the same value for every
+    // test. Not `.cargo/config.toml` `[env]`: that would also redirect a
+    // `cargo run` daemon away from the real config.
+    static WAKE_CONFIG: std::sync::Once = std::sync::Once::new();
+    WAKE_CONFIG.call_once(|| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wake-config.json");
+        // SAFETY: std locks its own env reads against this write. This is the
+        // process's only `setenv`; the first one copies `environ` without
+        // freeing the original, so a native `getenv` racing it reads valid memory.
+        unsafe { std::env::set_var("NARU_AUDIO_WAKE_CONFIG", path) };
+    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let log = Arc::new(Logger::stderr());
