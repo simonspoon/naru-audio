@@ -39,6 +39,14 @@ jobs:
           xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
           xcrun metal --version
 
+      # rust-cache likewise keeps mlx-sys's build output but not the metallib
+      # it writes to target/mlx ($MLX_RS_METAL_PATH), so MLX tests exit 255.
+      # Drop mlx-sys's fingerprints when it is missing, so its build reruns.
+      - name: Rebuild a missing mlx.metallib
+        if: runner.os == 'macOS'
+        shell: bash
+        run: test -f target/mlx/mlx.metallib || rm -rf target/*/.fingerprint/mlx-sys-*
+
       - name: Check
         run: cargo check --all-targets
 
