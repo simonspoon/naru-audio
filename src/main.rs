@@ -145,6 +145,24 @@ enum Command {
         #[command(subcommand)]
         action: MicAction,
     },
+    /// Print stored ambient transcript segments, one JSON line each, from
+    /// $NARU_AUDIO_HOME/ambient-transcripts (no daemon needed).
+    Transcripts {
+        /// Start, inclusive: YYYY-MM-DDTHH:MM[:SS] local time, the same with
+        /// Z or ±HH:MM, or unix ms.
+        #[arg(long)]
+        from: String,
+        /// End, exclusive; same forms as --from.
+        #[arg(long)]
+        to: String,
+        /// Only this Naru instance's segments; without it, only those
+        /// stored with no instance.
+        #[arg(long, conflicts_with = "all")]
+        instance: Option<String>,
+        /// Every instance's segments.
+        #[arg(long)]
+        all: bool,
+    },
     /// Cloned voices in $NARU_AUDIO_HOME/voices, spoken by any cloning model
     /// (qwen3-tts-0.6b-base-mlx, qwen3-tts-1.7b-base-mlx, breeze-tts-2-8bit-mlx).
     Voice {
@@ -252,6 +270,12 @@ async fn main() -> ExitCode {
         Command::Mlx { action } => return mlx_command(action),
         Command::Mic { action } => return mic_command(action).await,
         Command::Voice { action } => return voice_command(action),
+        Command::Transcripts {
+            from,
+            to,
+            instance,
+            all,
+        } => return transcripts_command(&from, &to, instance.as_deref(), all),
         // §3.7: these work without a daemon, directly on $NARU_AUDIO_HOME.
         command => return registry_command(command),
     };
@@ -375,6 +399,38 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// `transcripts`; exits 2 on a bad time, 1 on a read failure.
+fn transcripts_command(from: &str, to: &str, instance: Option<&str>, all: bool) -> ExitCode {
+    use naru_audio::transcripts::{Instance, parse_time, read};
+    let (Some(from_ms), Some(to_ms)) = (parse_time(from), parse_time(to)) else {
+        eprintln!(
+            "naru-audio: --from and --to take YYYY-MM-DDTHH:MM[:SS] (local), with Z or ±HH:MM, or unix ms"
+        );
+        return ExitCode::from(2);
+    };
+    let Some(home) = registry::default_home() else {
+        eprintln!("naru-audio: set NARU_AUDIO_HOME or HOME");
+        return ExitCode::FAILURE;
+    };
+    let which = if all {
+        Instance::All
+    } else {
+        Instance::Only(instance)
+    };
+    match read(&home, from_ms, to_ms, which) {
+        Ok(segments) => {
+            for s in segments {
+                println!("{s}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("naru-audio: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -532,7 +588,8 @@ fn registry_command(command: Command) -> ExitCode {
         | Command::Stream { .. }
         | Command::Mlx { .. }
         | Command::Mic { .. }
-        | Command::Voice { .. } => {
+        | Command::Voice { .. }
+        | Command::Transcripts { .. } => {
             unreachable!("handled by main")
         }
         Command::Pull { names, force } => {

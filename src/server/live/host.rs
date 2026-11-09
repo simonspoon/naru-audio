@@ -3,11 +3,12 @@
 //! (VAD, speech-to-text, speaker scoring, the ambient machine and gate), so
 //! ambient works with no client attached.
 //!
-//! Off until `POST /ambient {"on":true}` and never on at startup; nothing is
-//! persisted, so a restarted daemon is off. What it hears goes to the other
-//! members of its conversation and into an in-memory log, `GET /ambient/log`.
+//! Off until `POST /ambient {"on":true}` and never on at startup; its state is
+//! not persisted, so a restarted daemon is off. What it hears goes to the other
+//! members of its conversation, into an in-memory log, `GET /ambient/log`, and
+//! into the transcript store (`crate::transcripts`, `GET /ambient/transcripts`).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, Query, State};
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -196,6 +197,56 @@ pub(in crate::server) async fn log(
     Ok(Json(json!({ "events": events })))
 }
 
+/// `GET /ambient/transcripts?from=&to=[&instance=]` (naru task 2672): the
+/// stored ambient segments with `from <= time < to`, oldest first, for one
+/// Naru instance (none given: the segments stored with no instance). Times as
+/// `crate::transcripts::parse_time` takes them.
+pub(in crate::server) async fn transcripts(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let time = |key: &str| {
+        q.get(key)
+            .and_then(|v| crate::transcripts::parse_time(v))
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    format!(
+                        "\"{key}\" must be YYYY-MM-DDTHH:MM[:SS] (local), with Z or ±HH:MM, or unix ms"
+                    ),
+                )
+            })
+    };
+    let (from, to) = (time("from")?, time("to")?);
+    let instance = q.get("instance").filter(|i| !i.is_empty()).cloned();
+    let home = st.registry.home().to_path_buf();
+    let segments = tokio::task::spawn_blocking(move || {
+        crate::transcripts::read(
+            &home,
+            from,
+            to,
+            crate::transcripts::Instance::Only(instance.as_deref()),
+        )
+    })
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            e.to_string(),
+        )
+    })?
+    .map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            e.to_string(),
+        )
+    })?;
+    Ok(Json(json!({ "segments": segments })))
+}
+
 /// `POST /ambient/wake-check {"text","wake_words"?}`: stateless; would this
 /// install's ambient listener wake on that one utterance? Needs no mic.
 pub(in crate::server) async fn wake_check(body: Bytes) -> Result<Json<Value>, ApiError> {
@@ -345,6 +396,7 @@ pub(in crate::server) async fn set(
     let mut live = Live::new(mode, seq, library, false);
     live.library_stamp = library_stamp;
     live.instance = instance;
+    live.session = Some(key.clone());
     // A member may already be playing a reply.
     if anyone_speaking(&key) {
         live.set_agent_speaking(true);

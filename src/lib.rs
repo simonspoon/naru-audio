@@ -20,6 +20,7 @@ pub mod speaker;
 pub mod stt;
 #[cfg(any(not(target_os = "macos"), test))]
 pub mod transcode;
+pub mod transcripts;
 pub mod tts;
 pub mod turn;
 pub mod voices;

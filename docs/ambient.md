@@ -95,6 +95,38 @@ uses :7771). Every 2 s, while naru has a live session (`GET /api/live`):
 naru being down is a warning (logged once until it answers again), never a failure. Its poll of `GET /api/live`
 takes an untagged can-help offer as any page's poll does.
 
+## Transcripts on disk (naru task 2672)
+
+Every final ambient segment, from any client's socket or the server's own listener, admitted or not, is appended
+as one line of JSON to `<home>/ambient-transcripts/<YYYY-MM-DD>.jsonl` (local date; `~/.naru-audio`, the dev
+daemon's `~/.naru-audio-dev`). Always on, whatever the client. Files are mode 0600 in a 0700 dir and are **kept
+indefinitely**: nothing deletes them (cleanup is a separate, later task); delete files by hand to clear them.
+One write per line on an append-only file, so a crash loses at most the line being written; the next append starts
+on a fresh line and readers skip a torn one. The in-memory `GET /ambient/log` window is unchanged.
+
+| Field | |
+|---|---|
+| `at`, `at_utc`, `unix_ms` | when it was stored (a moment after the speech ended, once decoded): local RFC 3339 with offset, UTC, unix ms |
+| `instance` | the Naru instance the session was for (the live start frame's / `POST /ambient`'s `instance`); `null` for a client that sent none |
+| `session` | the socket's session id, or the listener's conversation (`ambient`) |
+| `text`, `start`, `end` | the transcript; its span in seconds on the session clock |
+| `admitted` | `false` when the machine never saw it (echo, agent speaking, a hold) |
+| `wake`, `wake_reason` | whether it woke the listener, and why (reasons as in the audit below) |
+| `speaker` | `is_him` (`null` unscored), `tag` (`him`, `other`, `untagged`), `score`, `reason`, `person` |
+
+Reading a time range, one instance only (no `instance`: only the segments stored with no instance). Times are
+`YYYY-MM-DDTHH:MM[:SS]` in local time, the same with `Z` or `±HH:MM`, or unix ms; `from` inclusive, `to` exclusive:
+
+```sh
+curl -s 'http://127.0.0.1:7870/ambient/transcripts?from=2026-11-09T09:30&to=2026-11-09T12:00&instance=<id>' | jq -r '.segments[] | "\(.at) \(.speaker.tag): \(.text)"'
+naru-audio transcripts --from 2026-11-09T09:30 --to 2026-11-09T12:00 --instance <id>   # JSON lines, no daemon needed
+naru-audio transcripts --from 2026-11-09T09:30 --to 2026-11-09T12:00 --all             # every instance
+```
+
+`GET /ambient/transcripts` answers `{"segments":[…]}` oldest first, 400 `invalid_request` for a missing or bad
+`from`/`to`. In a URL, send a `+HH:MM` offset's `+` as `%2B`. Writes are not fsynced: a power cut can lose the last
+few lines.
+
 ## The audit (naru task 2416)
 
 To see afterwards why a wake word did or did not wake, start the daemon with `NARU_AUDIO_AMBIENT_AUDIT=1`. Every

@@ -1053,6 +1053,29 @@ async fn a_non_wake_line_emits_no_wake() {
         2,
         "{events:?}"
     );
+    // Stored on disk (naru task 2672): a client with no instance reads it
+    // back with none; another instance sees nothing.
+    let range = "/ambient/transcripts?from=0&to=99999999999999";
+    let (status, got) = http(&addr, "GET", range, None).await;
+    assert_eq!(status, 200, "{got}");
+    let segments = got["segments"].as_array().unwrap();
+    let flags: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "ambient_flag")
+        .collect();
+    assert_eq!(segments.len(), flags.len(), "{got}");
+    for (stored, flag) in segments.iter().zip(&flags) {
+        assert_eq!(stored["text"], flag["text"], "{got}");
+        assert_eq!(stored["wake"], false, "{stored}");
+        assert!(stored["instance"].is_null(), "{stored}");
+        assert!(stored["session"].is_string(), "{stored}");
+        assert!(stored["unix_ms"].is_i64(), "{stored}");
+    }
+    let other = format!("{range}&instance=someone-else");
+    let (_, got) = http(&addr, "GET", &other, None).await;
+    assert_eq!(got["segments"], json!([]), "{got}");
+    let (status, _) = http(&addr, "GET", "/ambient/transcripts?from=soon&to=0", None).await;
+    assert_eq!(status, 400);
 }
 
 #[tokio::test(flavor = "multi_thread")]

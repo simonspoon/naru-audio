@@ -407,12 +407,18 @@ It calls `GET /health` on `$NARU_AUDIO_URL` and exits:
 
 ## Privacy
 
-By default naru-audio stores none of what you say or have it say. It does
-not write spoken text, transcripts, microphone audio or generated audio to
-disk. Its log records request lines (route, status, timings, ids,
+By default naru-audio stores none of what you say or have it say, with one
+exception: ambient mode's transcripts. It does not write spoken text,
+microphone audio or generated audio to disk, nor transcripts outside ambient
+mode. Its log records request lines (route, status, timings, ids,
 character and sentence counts, model and voice names) and never writes the
 spoken text or transcripts itself; error lines carry the underlying error
 message from the library or MLX engine. Audio and text in a request are held in memory while it runs.
+
+Ambient mode keeps every transcript it hears, kept indefinitely, in
+`ambient-transcripts/<date>.jsonl` under its home (mode 0600), tagged with
+the Naru instance it is for; read them with `naru-audio transcripts` or `GET
+/ambient/transcripts`, delete the files to clear them (`docs/ambient.md`).
 
 What is stored is what you create on purpose: pulled models, cloned voices
 and their reference clips and transcripts, and Sample Studio clips and

@@ -99,6 +99,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ambient", get(host::status).post(host::switch))
         .route("/ambient/log", get(host::log))
         .route("/ambient/wake-check", post(host::wake_check))
+        .route("/ambient/transcripts", get(host::transcripts))
         .route(
             "/v1/audio/speaker/enroll",
             post(speaker::enroll).layer(DefaultBodyLimit::max(transcriptions::MAX_BODY_BYTES)),

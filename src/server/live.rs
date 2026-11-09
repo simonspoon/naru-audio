@@ -525,6 +525,9 @@ struct Live {
     enroll_instance: Option<String>,
     /// The session's Naru instance: whose owner is "him".
     instance: Option<String>,
+    /// The session id, or the listener's conversation, stored with each
+    /// ambient transcript segment.
+    session: Option<String>,
     /// The session's guard switch; the library's `live_guard` when `None`.
     guard: Option<bool>,
     /// The audio fed to the VAD, as `Segments` positions it.
@@ -563,6 +566,7 @@ impl Live {
             enroll_person: None,
             enroll_instance: None,
             instance: None,
+            session: None,
             guard: None,
             ring: VecDeque::new(),
             ring_start: 0,
@@ -971,6 +975,7 @@ async fn session(st: &Arc<AppState>, req_id: &str, socket: &mut WebSocket) -> Re
     );
     live.library_stamp = library_stamp;
     live.instance = start.instance.clone();
+    live.session = Some(session_id.clone());
     live.guard = start.guard;
     live.ambient.set_wake_words(&wake_words());
     let ready = json!({
@@ -1789,7 +1794,7 @@ async fn finish_segment(
     );
     if !admitted {
         st.log.info(None, &format!("live_segment_dropped {scored}"));
-        if mode == Mode::Ambient && audit_on() {
+        if mode == Mode::Ambient {
             let wake = json!({"woke": false, "reason": "not admitted"});
             ambient_audit(st, live, false, start, end, text, identity.as_ref(), wake);
         }
@@ -1862,11 +1867,12 @@ fn context_json(context: &[LogLine]) -> Value {
     json!(lines)
 }
 
-/// The ambient audit (naru task 2416): with `NARU_AUDIO_AMBIENT_AUDIT=1`, one
-/// `ambient_segment` line of JSON per ambient segment in
-/// `<home>/ambient-audit.log` (rotated as the daemon log): its text, speaker
-/// tag and score, and the wake decision with its reason. Off by default, as it
-/// holds what was said; a local file only.
+/// Every ambient segment goes to the transcript store (naru task 2672,
+/// `crate::transcripts`), kept indefinitely. The ambient audit (naru task
+/// 2416): with `NARU_AUDIO_AMBIENT_AUDIT=1`, also one `ambient_segment` line of
+/// JSON per segment in `<home>/ambient-audit.log` (rotated as the daemon log):
+/// its text, speaker tag and score, and the wake decision with its reason.
+/// Off by default; a local file only.
 #[allow(clippy::too_many_arguments)]
 fn ambient_audit(
     st: &AppState,
@@ -1878,9 +1884,6 @@ fn ambient_audit(
     identity: Option<&Identity>,
     wake: Value,
 ) {
-    if !audit_on() {
-        return;
-    }
     let tag = match ambient_speaker(identity) {
         machine::Speaker::Him => "him",
         machine::Speaker::Other => "other",
@@ -1897,6 +1900,31 @@ fn ambient_audit(
         },
         "wake": wake,
     });
+    let stored = json!({
+        "instance": live.instance, "session": live.session, "text": text,
+        "start": start, "end": end, "admitted": admitted,
+        "wake": record["wake"]["woke"], "wake_reason": record["wake"]["reason"],
+        "speaker": {
+            "is_him": identity
+                .filter(|i| i.verdict.reason == speaker::Reason::Scored)
+                .map(|i| i.verdict.is_him),
+            "tag": tag,
+            "score": record["speaker"]["score"], "reason": record["speaker"]["reason"],
+            "person": record["speaker"]["person"],
+        },
+    });
+    if let Err(e) =
+        crate::transcripts::append(st.registry.home(), std::time::SystemTime::now(), stored)
+    {
+        st.log.line(
+            "warn",
+            None,
+            &format!("ambient_transcript_write_failed error={e}"),
+        );
+    }
+    if !audit_on() {
+        return;
+    }
     let path = st.registry.home().join("ambient-audit.log");
     if let Ok(log) = Logger::file(&path, MAX_LOG_BYTES) {
         log.info(None, &format!("ambient_segment {record}"));
