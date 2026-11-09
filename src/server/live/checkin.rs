@@ -228,7 +228,12 @@ fn engine_event(event: &Value) -> Option<Value> {
         ("ambient_verdict", _) => ("idea", "him"),
         _ => return None,
     };
-    Some(json!({ "event": name, "speaker": speaker, "text": event["text"] }))
+    let mut body = json!({ "event": name, "speaker": speaker, "text": event["text"] });
+    // The wake's Naru instance (naru task 2673 ignores another instance's).
+    if let Some(instance) = event["instance"].as_str() {
+        body["instance"] = json!(instance);
+    }
+    Some(body)
 }
 
 async fn emit(st: Arc<AppState>, url: String, event: Value) {
@@ -285,6 +290,15 @@ mod tests {
             engine_event(&wake),
             Some(json!({"event": "wake", "speaker": "unknown", "text": "hey naru"}))
         );
+        let mine = json!({"type": "wake", "text": "hey naru", "instance": "mac-a"});
+        assert_eq!(
+            engine_event(&mine),
+            Some(
+                json!({"event": "wake", "speaker": "unknown", "text": "hey naru", "instance": "mac-a"})
+            )
+        );
+        let none = json!({"type": "wake", "text": "hey naru", "instance": null});
+        assert_eq!(engine_event(&none).unwrap().get("instance"), None);
         let help = json!({"type": "ambient_verdict", "kind": "can_help", "text": "t"});
         assert_eq!(engine_event(&help).unwrap()["event"], "can-help");
         let idea = json!({"type": "ambient_verdict", "kind": "idea", "text": "t"});

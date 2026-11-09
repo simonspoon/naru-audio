@@ -1983,6 +1983,7 @@ async fn ambient_line(
             json!({
                 "type": "wake", "text": e.text, "remainder": output.utterance,
                 "at_ms": e.at_ms, "context": context_json(&e.context),
+                "instance": live.instance,
             })
         })
         .collect();
