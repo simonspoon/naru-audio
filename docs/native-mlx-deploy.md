@@ -1,28 +1,28 @@
 # Deploying native Qwen3-TTS (naru task 2389)
 
+> History, superseded by task 2391 below: the Python sidecar no longer
+> exists, so there is no sidecar fallback or `[mlx]` switch to roll back to.
+> The Install and Check sections stay current.
+
 From this build on, `qwen3-tts-0.6b-base-mlx` and `qwen3-tts-1.7b-base-mlx`
-run in-process (mlx-rs, no Python) by default, as 8-bit Breeze and Parakeet
-already do. The audio is byte-identical to the sidecar's for the same seed,
-cloned voices included; first audio arrives in ~0.07-0.09 s instead of
-~0.25-0.28 s (task 2388). The Python sidecar stays as the fallback for one
-release: a failed native load logs `native_load_failed` and loads the model
-in the sidecar instead.
+run in-process (mlx-rs, no Python), as 8-bit Breeze and Parakeet do. The
+audio is byte-identical to the old sidecar's for the same seed, cloned voices
+included; first audio arrives in ~0.07-0.09 s instead of ~0.25-0.28 s
+(task 2388).
 
 ## The real install today
 
 `~/.naru-audio/config.toml`:
 
 ```toml
-[mlx]
-python = "/Users/simonspoon/.naru-audio/mlx/.venv/bin/python"
-
 [defaults]
 stt = "whisper-large-v3-turbo-mlx"
 tts = "qwen3-tts-1.7b-base-mlx"
 ```
 
-No config change is needed: `qwen3-tts-1.7b-base-mlx` goes native once the
-new binary runs. Keep `[mlx] python`: Whisper STT still runs in the sidecar.
+No config change is needed for Qwen3-TTS: `qwen3-tts-1.7b-base-mlx` runs
+in-process once the new binary runs. (The `stt` default is dropped; see task
+2390 below. Any `[mlx] python` key is ignored.)
 
 The LaunchAgent `com.naru.audio` runs `~/.cargo/bin/naru-audio serve`
 (logs `~/.naru-audio/serve.log`). The binary installed there (2026-10-25)
@@ -52,24 +52,11 @@ grep 'load model=qwen3-tts-1.7b-base-mlx' ~/.naru-audio/serve.log | tail -1   # 
 curl -s http://127.0.0.1:7870/api/ps                                       # "engine":"native"
 ```
 
-`engine=sidecar` with a `native_load_failed` line before it means the native
-load failed (most often `mlx.metallib` missing beside the binary); speech
-still works through the sidecar.
+If the native load fails (most often `mlx.metallib` missing beside the
+binary), the request gets 503 `backend_unavailable` with the reason; there is
+no other engine to fall back to.
 
 ## Roll back
-
-Back to the sidecar, same binary: add the key under `[mlx]` and restart (the
-engine is picked when the model loads):
-
-```toml
-[mlx]
-python = "/Users/simonspoon/.naru-audio/mlx/.venv/bin/python"
-native_qwen3_tts = false
-```
-
-```sh
-launchctl kickstart -k gui/$(id -u)/com.naru.audio
-```
 
 Back to the previous binary:
 
@@ -79,9 +66,9 @@ cp ~/.cargo/bin/naru-audio.pre-2389 ~/.cargo/bin/naru-audio
 launchctl kickstart -k gui/$(id -u)/com.naru.audio
 ```
 
-`native_tts = false` (8-bit Breeze) and `native_stt = false` (Parakeet) are
-the matching switches for the other native engines; neither is in the
-real config's defaults today.
+(The `[mlx] native_qwen3_tts`, `native_tts` and `native_stt = false`
+switches that once selected the sidecar were removed in task 2391 and are
+ignored.)
 
 ## Verified (dev, ~/naru-scratch/2389)
 
@@ -89,8 +76,8 @@ real config's defaults today.
   voice (Her3 on 0.6B, Jarvis on 1.7B), `/api/ps` reports `engine=native`, the
   daemon has no child process, and the PCM is byte-identical to task 2388's
   sidecar output for the same text and seed.
-- `native_qwen3_tts = false` with the venv: both sizes load in the sidecar
-  (`engine=sidecar`, python child running), same bytes.
+- At the time, `native_qwen3_tts = false` loaded both sizes in the sidecar
+  with the same bytes (historical: the sidecar and that switch are gone).
 - `cargo test --lib`: 339 passed.
 
 # Deploying the dropped-model removal (naru task 2390)
@@ -173,5 +160,5 @@ is re-made for `breeze-tts-2-8bit-mlx`.
    (and the task 2390 models). `uv` itself is no longer needed by naru-audio.
 
 Roll back: restore the previous binary (Roll back above), skipping step 4
-until the new build has run for a while; the old binary still finds the
-venv and its `[mlx] python`.
+until the new build has run for a while; the previous binary (pre-2391)
+still finds the venv and its `[mlx] python`, which this build ignores.
