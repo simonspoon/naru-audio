@@ -35,9 +35,15 @@ fn link_metallib() {
         && std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|v| v == "aarch64");
     if apple_silicon && let Some(dir) = std::env::var_os("MLX_RS_METAL_PATH") {
         let metallib = std::path::Path::new(&dir).join("mlx.metallib");
-        // OUT_DIR is <profile dir>/build/<pkg>-<hash>/out.
+        // OUT_DIR is <profile dir>/build/<pkg>-<hash>/out, or since cargo
+        // 1.100 <profile dir>/build/<pkg>/<hash>/out: find the build dir.
         let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
-        let link = out.ancestors().nth(3).unwrap().join("mlx.metallib");
+        let profile = out
+            .ancestors()
+            .find(|p| p.file_name().is_some_and(|n| n == "build"))
+            .and_then(std::path::Path::parent)
+            .expect("OUT_DIR under <profile dir>/build");
+        let link = profile.join("mlx.metallib");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&metallib, &link).expect("link mlx.metallib");
     }

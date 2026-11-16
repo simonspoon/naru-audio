@@ -63,7 +63,15 @@ jobs:
       # links it into the profile dir and cp follows the link.
       - name: Rename metallib
         if: matrix.target == 'aarch64-apple-darwin'
-        run: cp target/${{ matrix.target }}/release/mlx.metallib ${{ matrix.name }}.metallib
+        run: |
+          METALLIB=target/${{ matrix.target }}/release/mlx.metallib
+          if [ ! -f "$METALLIB" ]; then
+            echo "::error::mlx.metallib missing at $METALLIB after the build (mlx-sys writes target/mlx/mlx.metallib; build.rs links it into the profile dir)"
+            ls -la "$METALLIB" target/mlx || true
+            find target -maxdepth 5 -name mlx.metallib -exec ls -la {} \; || true
+            exit 1
+          fi
+          cp "$METALLIB" ${{ matrix.name }}.metallib
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -56,15 +56,22 @@ step_struct!(
 step_struct!(
     /// Trims to the first/last Silero VAD speech span, keeping `pad_ms`
     /// either side (clamped to the buffer).
-    TrimSilence { threshold: f32 = VadConfig::default().threshold, pad_ms: f32 = 0.0 }
+    TrimSilence {
+        threshold: f32 = VadConfig::default().threshold,
+        pad_ms: f32 = 0.0
+    }
 );
 step_struct!(
     /// Peak-normalises to `peak_db` dBFS.
-    Normalize { peak_db: f32 = -1.0 }
+    Normalize {
+        peak_db: f32 = -1.0
+    }
 );
 step_struct!(
     /// 4th-order Butterworth high-pass.
-    Highpass { freq_hz: f32 = 80.0 }
+    Highpass {
+        freq_hz: f32 = 80.0
+    }
 );
 step_struct!(
     /// Parametric EQ: biquad bands applied in order.
@@ -72,11 +79,18 @@ step_struct!(
 );
 step_struct!(
     /// Split-band de-esser.
-    Deess { freq_hz: f32 = 6000.0, threshold_db: f32 = -30.0, ratio: f32 = 4.0 }
+    Deess {
+        freq_hz: f32 = 6000.0,
+        threshold_db: f32 = -30.0,
+        ratio: f32 = 4.0
+    }
 );
 step_struct!(
     /// BS.1770 integrated-loudness gain, then a limiter at the peak ceiling.
-    Loudness { target_lufs: f32 = -18.0, peak_ceiling_db: f32 = -1.0 }
+    Loudness {
+        target_lufs: f32 = -18.0,
+        peak_ceiling_db: f32 = -1.0
+    }
 );
 step_struct!(
     /// Feed-forward compressor.
@@ -90,7 +104,9 @@ step_struct!(
 );
 step_struct!(
     /// Pitch shift at constant duration (formants move with it).
-    Pitch { semitones: f32 = 0.0 }
+    Pitch {
+        semitones: f32 = 0.0
+    }
 );
 step_struct!(
     /// Speed change, pitch preserved (WSOLA).
@@ -102,7 +118,10 @@ step_struct!(
 );
 step_struct!(
     /// Schroeder reverb.
-    Reverb { room_size: f32 = 0.5, wet: f32 = 0.2 }
+    Reverb {
+        room_size: f32 = 0.5,
+        wet: f32 = 0.2
+    }
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

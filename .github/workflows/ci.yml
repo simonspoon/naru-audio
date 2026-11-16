@@ -25,10 +25,11 @@ jobs:
       # (keeping the dirs) before saving, while it keeps the build script's
       # output. build.rs skips the download when the lib dir exists, so drop
       # both the dir and the crate's fingerprints: build.rs reruns and fetches
-      # the libs again instead of linking against an empty dir.
+      # the libs again instead of linking against an empty dir. Cargo 1.100+
+      # keeps build-script fingerprints under build/<pkg>/<hash>/ instead.
       - name: Refetch sherpa-onnx prebuilts
         shell: bash
-        run: rm -rf target/sherpa-onnx-prebuilt target/*/.fingerprint/sherpa-onnx-sys-*
+        run: rm -rf target/sherpa-onnx-prebuilt target/*/.fingerprint/sherpa-onnx-sys-* target/*/build/sherpa-onnx-sys
 
       # MLX (aarch64 macOS only) compiles its Metal kernels from source: it
       # needs CMake and the Metal toolchain, a separate download since Xcode 26.
@@ -45,7 +46,7 @@ jobs:
       - name: Rebuild a missing mlx.metallib
         if: runner.os == 'macOS'
         shell: bash
-        run: test -f target/mlx/mlx.metallib || rm -rf target/*/.fingerprint/mlx-sys-*
+        run: test -f target/mlx/mlx.metallib || rm -rf target/*/.fingerprint/mlx-sys-* target/*/build/mlx-sys
 
       - name: Check
         run: cargo check --all-targets
@@ -74,10 +75,11 @@ jobs:
       # (keeping the dirs) before saving, while it keeps the build script's
       # output. build.rs skips the download when the lib dir exists, so drop
       # both the dir and the crate's fingerprints: build.rs reruns and fetches
-      # the libs again instead of linking against an empty dir.
+      # the libs again instead of linking against an empty dir. Cargo 1.100+
+      # keeps build-script fingerprints under build/<pkg>/<hash>/ instead.
       - name: Refetch sherpa-onnx prebuilts
         shell: bash
-        run: rm -rf target/sherpa-onnx-prebuilt target/*/.fingerprint/sherpa-onnx-sys-*
+        run: rm -rf target/sherpa-onnx-prebuilt target/*/.fingerprint/sherpa-onnx-sys-* target/*/build/sherpa-onnx-sys
 
       - name: Build
         run: cargo build
