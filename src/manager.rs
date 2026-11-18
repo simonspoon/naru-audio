@@ -23,7 +23,7 @@ use crate::stt::{SttError, SttModel};
 use crate::tts::{TtsError, TtsModel};
 
 /// §3.4 default when neither the request nor `NARU_AUDIO_KEEP_ALIVE` sets one.
-const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(5 * 60);
 
 /// §3.4 `keep_alive`: how long a model stays loaded once idle. `For(0)`
 /// unloads as soon as the model is idle.
@@ -256,7 +256,7 @@ impl Config {
 
 /// `"8GiB"`, `"512 MiB"`, `"6GB"` or plain bytes (`"1024"`): binary units
 /// are powers of 1024, decimal ones of 1000.
-fn parse_size(s: &str) -> Result<u64, String> {
+pub fn parse_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
     let split = s
         .find(|c: char| !(c.is_ascii_digit() || c == '.'))
@@ -293,6 +293,49 @@ pub fn write_defaults(
     tts: Option<&str>,
     voices: &[(String, Option<String>)],
 ) -> Result<(), String> {
+    edit_config(home, |config| {
+        let defaults = config
+            .entry("defaults")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(defaults) = defaults.as_table_like_mut() else {
+            return Err("config.toml: `defaults` is not a table".to_string());
+        };
+        if let Some(stt) = stt {
+            defaults.insert("stt", toml_edit::value(stt));
+        }
+        if let Some(tts) = tts {
+            defaults.insert("tts", toml_edit::value(tts));
+        }
+        if !voices.is_empty() {
+            let table = defaults
+                .entry("voices")
+                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+            let Some(table) = table.as_table_like_mut() else {
+                return Err("config.toml: `defaults.voices` is not a table".to_string());
+            };
+            for (model, voice) in voices {
+                match voice {
+                    Some(v) => {
+                        table.insert(model, toml_edit::value(v.as_str()));
+                    }
+                    None => {
+                        table.remove(model);
+                    }
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Read-modify-write of `home`'s `config.toml` through `edit`, keeping
+/// every table, key and comment `edit` does not touch; written to a temp
+/// file and renamed over the original (following a symlink), so a failed
+/// `edit` or write leaves the file as it was.
+pub fn edit_config(
+    home: &Path,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), String>,
+) -> Result<(), String> {
     let path = crate::registry::config_path(home);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -302,36 +345,7 @@ pub fn write_defaults(
     let mut config: toml_edit::DocumentMut = text
         .parse()
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    let defaults = config
-        .entry("defaults")
-        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-    let Some(defaults) = defaults.as_table_like_mut() else {
-        return Err("config.toml: `defaults` is not a table".to_string());
-    };
-    if let Some(stt) = stt {
-        defaults.insert("stt", toml_edit::value(stt));
-    }
-    if let Some(tts) = tts {
-        defaults.insert("tts", toml_edit::value(tts));
-    }
-    if !voices.is_empty() {
-        let table = defaults
-            .entry("voices")
-            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-        let Some(table) = table.as_table_like_mut() else {
-            return Err("config.toml: `defaults.voices` is not a table".to_string());
-        };
-        for (model, voice) in voices {
-            match voice {
-                Some(v) => {
-                    table.insert(model, toml_edit::value(v.as_str()));
-                }
-                None => {
-                    table.remove(model);
-                }
-            }
-        }
-    }
+    edit(&mut config)?;
     let path = match std::fs::canonicalize(&path) {
         Ok(target) => target,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => path,

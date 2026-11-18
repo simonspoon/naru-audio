@@ -106,6 +106,7 @@ async fn serve_with(home: &Path, profile: Profile, loader: Arc<dyn Loader>) -> S
         pulls: Arc::new(naru_audio::server::PullTracker::new()),
         keep_recent: false,
         mic: None,
+        naru_url: None,
     }));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("127.0.0.1:{port}")

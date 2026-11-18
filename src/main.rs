@@ -350,6 +350,7 @@ async fn main() -> ExitCode {
         pulls: Arc::new(naru_audio::server::PullTracker::new()),
         keep_recent,
         mic,
+        naru_url: naru_url.clone().ok(),
     });
     // naru serve's ambient host (naru task 2373); fails open.
     let checkin = match naru_url {

@@ -115,6 +115,11 @@ const ASSETS: &[Asset] = &[
         bytes: include_bytes!("../admin/js/design.mjs"),
     },
     Asset {
+        path: "js/settings.mjs",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../admin/js/settings.mjs"),
+    },
+    Asset {
         path: "js/playground.mjs",
         content_type: "text/javascript; charset=utf-8",
         bytes: include_bytes!("../admin/js/playground.mjs"),
@@ -241,6 +246,7 @@ mod tests {
             pulls: Arc::new(PullTracker::new()),
             keep_recent: false,
             mic: None,
+            naru_url: None,
         }))
     }
 

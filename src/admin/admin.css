@@ -1224,3 +1224,16 @@ input[type='checkbox']:disabled, input[type='radio']:disabled { opacity: 0.5; cu
 .design-pick.on { color: var(--cyan); }
 /* Description + preview stay in view; scroll inside if taller than the screen. */
 .design-sticky { max-height: calc(100vh - var(--header-h) - 24px); overflow: auto; }
+/* Settings tab (task 2869): one card per config.toml setting, large labels. */
+.set-intro { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
+.set-list { display: grid; gap: 12px; max-width: 760px; }
+.set-label { display: block; color: var(--text-h); font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+.set-what { margin: 0 0 10px; font-size: 15px; }
+.set-control { display: flex; align-items: center; gap: 8px; }
+.set-control .inp { flex: 1; font-size: 15px; }
+.set-check { display: flex; align-items: center; gap: 8px; flex: 1; font-size: 15px; cursor: pointer; }
+.set-facts { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 10px; color: var(--muted); font-size: 14px; }
+.set-facts b { color: var(--text-h); font-weight: 500; }
+.set-facts code, .set-intro code, .set-applies code, .set-warn code { font: 13px var(--font-mono); }
+.set-applies { margin: 8px 0 0; color: var(--muted); font-size: 14px; }
+.set-warn { margin: 8px 0 0; color: var(--amber); font-size: 14px; }

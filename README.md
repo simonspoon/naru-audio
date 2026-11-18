@@ -310,7 +310,11 @@ All state lives in `$NARU_AUDIO_HOME`, default `~/.naru-audio`:
 ```
 
 `config.toml` (every key is optional; the admin UI's default-model controls
-write `[defaults]` for you):
+write `[defaults]` for you, and its **Settings** tab (`/admin/#settings`)
+shows and saves `keep_alive`, `[memory]`, `[mic]`, `[naru]` and `[mlx]`
+below, each with the value in force, its default, whether an environment
+variable overrides it, and whether it needs a restart. It edits only the key
+you save and keeps the rest of the file as it was):
 
 ```toml
 [defaults]
@@ -383,6 +387,7 @@ curl http://127.0.0.1:7870/v1/models
 | `GET /api/pulls`, `DELETE /api/pulls/{name}` | List pulls in progress; cancel one. |
 | `GET /api/ps`, `POST /api/load` | Loaded models; warm or unload one. |
 | `GET`/`PUT /api/defaults` | The live default STT/TTS model and each TTS model's default voice. |
+| `GET`/`PUT /api/settings` | The admin Settings tab's `config.toml` keys: `defaults.keep_alive`, `memory.max_resident`, `mic.device`, `naru.url`, `mlx.breeze_depth_cache`. |
 | `GET /admin` | The web admin UI. |
 
 Errors use OpenAI's envelope, `{"error":{"message","type","code","param"}}`.

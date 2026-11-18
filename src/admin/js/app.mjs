@@ -19,8 +19,9 @@ import * as design from './design.mjs';
 import * as playground from './playground.mjs';
 import * as samples from './samples.mjs';
 import * as studio from './studio.mjs';
+import * as settings from './settings.mjs';
 
-const TABS = { overview, models, voices, clone, design, playground, samples, studio };
+const TABS = { overview, models, voices, clone, design, playground, samples, studio, settings };
 const DEFAULT_TAB = 'overview';
 // Tabs reached from another tab rather than the sidebar light up their parent.
 const NAV_PARENT = { studio: 'samples' };

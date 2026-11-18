@@ -99,6 +99,7 @@ impl Server {
             pulls: Arc::new(naru_audio::server::PullTracker::new()),
             keep_recent: false,
             mic: None,
+            naru_url: None,
         }));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.spawn(async move {

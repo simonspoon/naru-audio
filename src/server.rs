@@ -10,6 +10,7 @@ pub use live::host::{AmbientHost, Capture};
 mod prep;
 mod pulls;
 mod sample_transcript;
+mod settings;
 mod speaker;
 mod speech;
 mod stream;
@@ -68,6 +69,9 @@ pub struct AppState {
     /// The server's own ambient listener on a local input device
     /// (`POST /ambient`, src/server/live/host.rs); `None` without one.
     pub mic: Option<AmbientHost>,
+    /// The naru serve address the check-in started with; `None` when it is
+    /// off (a bad `[naru] url`).
+    pub naru_url: Option<String>,
 }
 
 /// The request's `X-Request-Id`, for handlers' log lines.
@@ -214,6 +218,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ps", get(ps))
         .route("/api/load", post(load))
         .route("/api/defaults", get(get_defaults).put(put_defaults))
+        .route("/api/settings", get(settings::get).put(settings::put))
         .route("/admin", get(admin::index))
         .route("/admin/", get(admin::index))
         .route("/admin/{*path}", get(admin::asset))
@@ -1035,6 +1040,7 @@ mod tests {
             pulls: Arc::new(PullTracker::new()),
             keep_recent: false,
             mic: None,
+            naru_url: None,
         }))
     }
 

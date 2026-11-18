@@ -67,6 +67,7 @@ fn app(home: &Path) -> Router {
         pulls: Arc::new(naru_audio::server::PullTracker::new()),
         keep_recent: false,
         mic: None,
+        naru_url: None,
     }))
 }
 
