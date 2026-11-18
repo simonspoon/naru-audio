@@ -261,7 +261,11 @@ fn settings_json(st: &AppState, mic_devices: Result<Vec<String>, String>) -> Val
     let mic_env = env("NARU_AUDIO_MIC_DEVICE");
     let url_env = env("NARU_AUDIO_NARU_URL");
     let url_now = super::naru_url(home);
+    // The mlx module exists only on Apple-silicon macOS (src/lib.rs).
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     let depth_cache = crate::mlx::breeze_depth_cache(home);
+    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
+    let depth_cache: Result<bool, String> = Ok(false);
     let mic_device = crate::mic::configured_device(home);
     // An unreadable file fails every reader the same way: report it once.
     let error = [
@@ -323,6 +327,7 @@ fn settings_json(st: &AppState, mic_devices: Result<Vec<String>, String>) -> Val
                 "configured": configured(DEPTH_CACHE),
                 "effective": depth_cache.as_ref().ok(),
                 "default": false,
+                "available": cfg!(all(target_arch = "aarch64", target_os = "macos")),
                 "env": null,
                 "env_override": false,
                 "applies": "model_load",
@@ -368,7 +373,9 @@ mod tests {
                 "breeze_depth_cache = true # Breeze"
             )
         );
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         let home = home_with(&text);
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         assert_eq!(crate::mlx::breeze_depth_cache(home.path()), Ok(true));
     }
 
