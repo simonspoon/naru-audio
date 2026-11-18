@@ -4,8 +4,8 @@
 //! then edits only those keys, keeping every other table, key and comment.
 
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::body::Bytes;
@@ -25,13 +25,79 @@ const NARU_URL: &str = "naru.url";
 const DEPTH_CACHE: &str = "mlx.breeze_depth_cache";
 const KEYS: [&str; 5] = [KEEP_ALIVE, MAX_RESIDENT, MIC_DEVICE, NARU_URL, DEPTH_CACHE];
 
+/// How long a request waits for the input device list.
+const MIC_LIST_WAIT: Duration = Duration::from_secs(2);
+static MIC_LIST: LazyLock<InputList> = LazyLock::new(|| InputList::new(crate::mic::input_names));
+
+/// A device lister run on its own thread, one run at a time, and waited on
+/// for at most a set time (naru task 2883): a CoreAudio call can block for
+/// good, and a blocked run's thread never returns, so it is never doubled.
+struct InputList {
+    list: fn() -> Vec<String>,
+    /// When the run in flight started; `None` when none is.
+    running: Mutex<Option<Instant>>,
+    done: tokio::sync::watch::Sender<Vec<String>>,
+}
+
+impl InputList {
+    fn new(list: fn() -> Vec<String>) -> Self {
+        Self {
+            list,
+            running: Mutex::new(None),
+            done: tokio::sync::watch::Sender::new(Vec::new()),
+        }
+    }
+
+    /// The names, from a fresh run or one already in flight. A run older
+    /// than `wait` is reported at once instead of waited on again.
+    async fn names(&'static self, wait: Duration) -> Result<Vec<String>, String> {
+        let mut done = self.done.subscribe();
+        {
+            let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            match *running {
+                Some(since) if since.elapsed() >= wait => {
+                    return Err(format!(
+                        "could not list input devices: CoreAudio has not answered for {}s",
+                        since.elapsed().as_secs()
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    *running = Some(Instant::now());
+                    let spawned =
+                        std::thread::Builder::new()
+                            .name("input-list".into())
+                            .spawn(move || {
+                                let names = (self.list)();
+                                *self.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                                self.done.send_replace(names);
+                            });
+                    if let Err(e) = spawned {
+                        *running = None;
+                        return Err(format!("could not list input devices: {e}"));
+                    }
+                }
+            }
+        }
+        match tokio::time::timeout(wait, done.changed()).await {
+            Ok(Ok(())) => Ok(done.borrow().clone()),
+            _ => Err(format!(
+                "could not list input devices: CoreAudio did not answer within {}s",
+                wait.as_secs()
+            )),
+        }
+    }
+}
+
 /// `GET /api/settings`: per key its `configured` value in `config.toml`
 /// (`null` when unset), the `effective` value in force, its `default`, the
 /// `env` var that overrides it and whether that is set (`env_override`), and
 /// `restart_needed` when the file says something the running server is not
-/// using. Also `mic_devices` (input device names) and `keep_recent`.
+/// using. Also `mic_devices` (input device names; empty with a
+/// `mic_devices_error` when they could not be listed in time) and
+/// `keep_recent`.
 pub(super) async fn get(State(st): State<Arc<AppState>>) -> Json<Value> {
-    Json(settings_json(&st))
+    Json(settings_json(&st, MIC_LIST.names(MIC_LIST_WAIT).await))
 }
 
 /// `PUT /api/settings` `{"<table>.<key>": value | null, ...}`: `null` removes
@@ -63,7 +129,10 @@ pub(super) async fn put(
         edits.push((*key, value));
     }
     write(st.registry.home(), &edits).map_err(|e| transcriptions::internal(&st, &req_id, e))?;
-    Ok(Json(settings_json(&st)))
+    Ok(Json(settings_json(
+        &st,
+        MIC_LIST.names(MIC_LIST_WAIT).await,
+    )))
 }
 
 /// The value to write for `key`, `None` to remove it.
@@ -163,7 +232,7 @@ fn fmt_keep_alive(k: KeepAlive) -> String {
     }
 }
 
-fn settings_json(st: &AppState) -> Value {
+fn settings_json(st: &AppState, mic_devices: Result<Vec<String>, String>) -> Value {
     let home = st.registry.home();
     let running = st.models.settings();
     let (config, config_error) = match crate::registry::read_config(home) {
@@ -260,7 +329,8 @@ fn settings_json(st: &AppState) -> Value {
                 "restart_needed": false,
             },
         },
-        "mic_devices": crate::mic::input_names(),
+        "mic_devices": mic_devices.as_deref().unwrap_or_default(),
+        "mic_devices_error": mic_devices.err(),
         "keep_recent": {
             "on": st.keep_recent,
             "env": "NARU_AUDIO_KEEP_RECENT",
@@ -339,6 +409,99 @@ mod tests {
         ] {
             assert!(validate(key, &value).is_ok(), "{key} {value}");
         }
+    }
+
+    fn state(home: &Path) -> Arc<AppState> {
+        use crate::log::Logger;
+        use crate::manager::{BackendLoader, ModelManager};
+        use crate::registry::Registry;
+        let log = Arc::new(Logger::stderr());
+        let registry = Arc::new(Registry::open(home).unwrap());
+        let settings = Settings::from_env(crate::profile::Profile::detect().unwrap()).unwrap();
+        let models = ModelManager::new(
+            registry.clone(),
+            log.clone(),
+            settings,
+            Arc::new(BackendLoader),
+        );
+        Arc::new(AppState {
+            port: 7870,
+            allow_remote: false,
+            started: Instant::now(),
+            log,
+            registry,
+            models: Arc::new(models),
+            pulls: Arc::new(super::super::PullTracker::new()),
+            keep_recent: false,
+            mic: None,
+            naru_url: None,
+        })
+    }
+
+    /// A device lister that never returns (a CoreAudio call stuck in
+    /// coreaudiod): requests answer within the wait, start one run between
+    /// them, and leave the server answering.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stuck_device_list_never_hangs_settings() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        fn stuck() -> Vec<String> {
+            RUNS.fetch_add(1, Ordering::SeqCst);
+            loop {
+                std::thread::park();
+            }
+        }
+        let list: &'static InputList = Box::leak(Box::new(InputList::new(stuck)));
+        let home = home_with(ORIGINAL);
+        let st = state(home.path());
+        for i in 0..10 {
+            let t = Instant::now();
+            let body = settings_json(&st, list.names(MIC_LIST_WAIT).await);
+            let took = t.elapsed();
+            assert!(
+                took < MIC_LIST_WAIT + Duration::from_millis(500),
+                "#{i} took {took:?}"
+            );
+            assert_eq!(body["mic_devices"], json!([]), "{body}");
+            let err = body["mic_devices_error"].as_str().unwrap();
+            assert!(err.contains("could not list input devices"), "{err}");
+            let settings = body["settings"].as_object().unwrap();
+            assert_eq!(settings.len(), 5, "{body}");
+            assert_eq!(settings[KEEP_ALIVE]["configured"], "5m");
+            assert_eq!(settings[DEPTH_CACHE]["configured"], false);
+            assert_eq!(body["error"], Value::Null, "{body}");
+        }
+        assert_eq!(RUNS.load(Ordering::SeqCst), 1);
+
+        use tower::ServiceExt;
+        let resp = super::super::router(st)
+            .oneshot(
+                axum::http::Request::get("/health")
+                    .header("host", "127.0.0.1:7870")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_device_list_that_answers_is_fresh_each_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        fn quick() -> Vec<String> {
+            RUNS.fetch_add(1, Ordering::SeqCst);
+            vec!["BlackHole 2ch".to_string()]
+        }
+        let list: &'static InputList = Box::leak(Box::new(InputList::new(quick)));
+        for _ in 0..2 {
+            assert_eq!(
+                list.names(MIC_LIST_WAIT).await,
+                Ok(vec!["BlackHole 2ch".to_string()])
+            );
+        }
+        assert_eq!(RUNS.load(Ordering::SeqCst), 2);
     }
 
     #[test]

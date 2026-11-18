@@ -124,14 +124,16 @@ impl Drop for Mic {
     }
 }
 
-/// The input devices' names.
+/// The input devices' names: devices with input streams, read as CoreAudio
+/// properties. Not cpal's `input_devices()`, which opens an AudioUnit on
+/// every device to read its formats and can block in coreaudiod for good
+/// (naru task 2883).
 #[cfg(target_os = "macos")]
 pub fn input_names() -> Vec<String> {
-    use cpal::traits::{DeviceTrait, HostTrait};
-    cpal::default_host()
-        .input_devices()
-        .map(|ds| ds.filter_map(|d| d.name().ok()).collect())
-        .unwrap_or_default()
+    coreaudio_inputs()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -485,9 +487,16 @@ mod capture {
 
     fn inputs(host: &cpal::Host) -> Vec<(String, cpal::Device)> {
         // Enumerated devices, not `default_input_device()`: cpal only stops
-        // and reports a stream whose device disappears for these.
-        host.input_devices()
-            .map(|ds| ds.filter_map(|d| Some((d.name().ok()?, d))).collect())
+        // and reports a stream whose device disappears for these. Filtered
+        // by `input_names()`, not cpal's `input_devices()`, which can block
+        // for good (naru task 2883).
+        let names = super::input_names();
+        host.devices()
+            .map(|ds| {
+                ds.filter_map(|d| Some((d.name().ok()?, d)))
+                    .filter(|(n, _)| names.contains(n))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -555,6 +564,16 @@ mod capture {
 /// streams), from CoreAudio: cpal does not expose the transport type.
 #[cfg(target_os = "macos")]
 fn built_in_input_name() -> Option<String> {
+    coreaudio_inputs()
+        .into_iter()
+        .find(|(_, built_in)| *built_in)
+        .map(|(name, _)| name)
+}
+
+/// Each device with input streams: its name and whether its transport type
+/// is built-in. Property reads only, no AudioUnit.
+#[cfg(target_os = "macos")]
+fn coreaudio_inputs() -> Vec<(String, bool)> {
     use core_foundation_sys::base::{CFRelease, kCFAllocatorDefault};
     use core_foundation_sys::data::{CFDataGetBytePtr, CFDataGetLength};
     use core_foundation_sys::string::{
@@ -585,7 +604,7 @@ fn built_in_input_name() -> Option<String> {
             &mut size,
         ) != 0
         {
-            return None;
+            return Vec::new();
         }
         let mut ids = vec![0 as AudioObjectID; size as usize / size_of::<AudioObjectID>()];
         if AudioObjectGetPropertyData(
@@ -597,8 +616,9 @@ fn built_in_input_name() -> Option<String> {
             ids.as_mut_ptr().cast(),
         ) != 0
         {
-            return None;
+            return Vec::new();
         }
+        let mut out = Vec::new();
         for id in ids {
             let mut transport = 0u32;
             let mut tsize = size_of::<u32>() as u32;
@@ -614,9 +634,8 @@ fn built_in_input_name() -> Option<String> {
                 &mut tsize,
                 (&mut transport as *mut u32).cast(),
             ) != 0
-                || transport != kAudioDeviceTransportTypeBuiltIn
             {
-                continue;
+                transport = 0;
             }
             let saddr = address(kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput);
             let mut ssize = 0u32;
@@ -624,7 +643,11 @@ fn built_in_input_name() -> Option<String> {
             {
                 continue;
             }
-            let naddr = address(kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal);
+            // cpal's `Device::name()` property, so the names match its.
+            let naddr = address(
+                kAudioDevicePropertyDeviceNameCFString,
+                kAudioDevicePropertyScopeOutput,
+            );
             let mut name: CFStringRef = std::ptr::null();
             let mut nsize = size_of::<CFStringRef>() as u32;
             if AudioObjectGetPropertyData(
@@ -653,10 +676,10 @@ fn built_in_input_name() -> Option<String> {
                 std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data) as usize);
             let s = String::from_utf8_lossy(bytes).into_owned();
             CFRelease(data.cast());
-            return Some(s);
+            out.push((s, transport == kAudioDeviceTransportTypeBuiltIn));
         }
+        out
     }
-    None
 }
 
 #[cfg(test)]
@@ -729,16 +752,24 @@ mod tests {
     }
 
     /// Reads devices without opening any. CI runners have no built-in mic.
+    /// Every input name must be a cpal device name: the mic thread opens
+    /// devices by matching them.
     #[cfg(target_os = "macos")]
     #[test]
-    fn built_in_mic_is_an_input_device() {
+    fn input_names_are_cpal_device_names() {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let cpal_names: Vec<String> = cpal::default_host()
+            .devices()
+            .unwrap()
+            .filter_map(|d| d.name().ok())
+            .collect();
+        let names = input_names();
+        eprintln!("inputs: {names:?}; built-in: {:?}", built_in_input_name());
+        for name in names.iter().chain(built_in_input_name().as_ref()) {
+            assert!(cpal_names.contains(name), "{name:?} not in {cpal_names:?}");
+        }
         if let Some(name) = built_in_input_name() {
-            eprintln!("built-in mic: {name:?}");
-            assert!(
-                input_names().contains(&name),
-                "{name:?} not in {:?}",
-                input_names()
-            );
+            assert!(names.contains(&name), "{name:?} not in {names:?}");
         }
     }
 

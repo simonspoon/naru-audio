@@ -91,12 +91,12 @@ export function mount(view) {
     if (data.error) notes.append(el('p', { class: 'set-warn' }, [`config.toml problem: ${data.error}`]));
     list.replaceChildren();
     for (const [key, s] of Object.entries(data.settings)) {
-      list.append(card(key, s, data.mic_devices));
+      list.append(card(key, s, data.mic_devices, data.mic_devices_error));
     }
     list.append(keepRecentCard(data.keep_recent));
   }
 
-  function card(key, s, micDevices) {
+  function card(key, s, micDevices, micError) {
     const info = INFO[key];
     let input;
     let read;
@@ -129,6 +129,9 @@ export function mount(view) {
     resetBtn.addEventListener('click', () => save({ [key]: null }, resetBtn));
 
     const status = [];
+    if (key === 'mic.device' && micError) {
+      status.push(el('p', { class: 'set-warn' }, ['Could not list input devices; type the device name instead.']));
+    }
     if (s.env_override) {
       status.push(
         el('p', { class: 'set-warn' }, [
